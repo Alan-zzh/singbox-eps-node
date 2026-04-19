@@ -13,7 +13,7 @@ Date: 2026-04-20
 - ePS-JP-VLESS-Reality (殖民节点，苹果域名伪装)
 - ePS-JP-VLESS-WS (CDN节点)
 - ePS-JP-Trojan-WS (CDN节点)
-- ePS-JP-Hysteria2 (CDN节点，端口跳跃)
+- ePS-JP-Hysteria2 (直连节点，端口跳跃)
 """
 
 import os
@@ -42,7 +42,7 @@ except ImportError:
 
 logger = get_logger('subscription_service')
 
-SERVER_IP = os.getenv('SERVER_IP', '54.250.149.157')
+SERVER_IP = os.getenv('SERVER_IP', '')
 CF_DOMAIN = os.getenv('CF_DOMAIN', '')
 DATA_DIR = os.getenv('DATA_DIR', '/root/singbox-manager')
 CERT_DIR = os.getenv('CERT_DIR', '/root/singbox-manager/cert')
@@ -151,7 +151,9 @@ def generate_all_links():
     params = {
         'sni': REALITY_SNI,
         'insecure': '1',
-        'protocol': 'hysteria2'
+        'protocol': 'hysteria2',
+        'obfs': 'salamander',
+        'obfs-password': HYSTERIA2_PASSWORD[:8]
     }
     hysteria2_port = random.choice(HYSTERIA2_UDP_PORTS)
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])

@@ -19,9 +19,9 @@ ENV_FILE = os.path.join(BASE_DIR, '.env')
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 DB_FILE = os.path.join(DATA_DIR, 'singbox.db')
 
-# 服务器配置
-SERVER_IP = '54.250.149.157'
-CF_DOMAIN = 'jp1.290372913.xyz'
+# 服务器配置 - 必须从环境变量读取
+SERVER_IP = os.getenv('SERVER_IP', '')
+CF_DOMAIN = os.getenv('CF_DOMAIN', '')
 
 # 服务端口配置
 SUB_PORT = 2096

@@ -28,6 +28,8 @@ vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
 trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 hysteria2_pass = env_vars.get('HYSTERIA2_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
+server_ip = env_vars.get('SERVER_IP', '')
+cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
 socks5_user = env_vars.get('SOCKS5_USER', 'socks5')
 socks5_pass = env_vars.get('SOCKS5_PASS', 'socks5pass')
 
@@ -77,11 +79,11 @@ config = {
             "transport": {
                 "type": "ws",
                 "path": "/vless-ws",
-                "headers": {"Host": "jp1.290372913.xyz"}
+                "headers": {"Host": cf_domain or server_ip}
             },
             "tls": {
                 "enabled": True,
-                "server_name": "jp1.290372913.xyz",
+                "server_name": cf_domain or server_ip,
                 "certificate_path": "/root/singbox-manager/cert/cert.crt",
                 "key_path": "/root/singbox-manager/cert/cert.key",
                 "alpn": ["http/1.1"]
@@ -96,11 +98,11 @@ config = {
             "transport": {
                 "type": "ws",
                 "path": "/trojan-ws",
-                "headers": {"Host": "jp1.290372913.xyz"}
+                "headers": {"Host": cf_domain or server_ip}
             },
             "tls": {
                 "enabled": True,
-                "server_name": "jp1.290372913.xyz",
+                "server_name": cf_domain or server_ip,
                 "certificate_path": "/root/singbox-manager/cert/cert.crt",
                 "key_path": "/root/singbox-manager/cert/cert.key",
                 "alpn": ["http/1.1"]

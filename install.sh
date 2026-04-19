@@ -1,9 +1,8 @@
 #!/bin/bash
 
-# Singbox Manager 一键安装脚本 v1.0.7
+# Singbox Manager 一键安装脚本 v1.0.8
 # 节点命名规则: ePS-{国家}-{协议}
-# 服务器IP: 54.250.149.157
-# 域名: jp1.290372913.xyz
+# 无硬编码，所有配置动态生成
 
 set -e
 
@@ -23,15 +22,85 @@ check_root() {
     fi
 }
 
-get_current_root_pass() {
-    ROOT_PASS=$(grep -E '^root:' /etc/shadow | cut -d: -f2)
-    echo "$ROOT_PASS"
+get_public_ip() {
+    curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 icanhazip.com 2>/dev/null || curl -s -4 ipinfo.io/ip 2>/dev/null
+}
+
+generate_uuid() {
+    /usr/local/bin/singbox generate uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid
+}
+
+generate_reality_keypair() {
+    /usr/local/bin/singbox generate reality-keypair 2>/dev/null
+}
+
+generate_random_string() {
+    head -c 100 /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 16
+}
+
+generate_env_file() {
+    echo_yellow ">>> 生成配置文件..."
+    CONFIG_DIR="/root/singbox-manager"
+    mkdir -p "$CONFIG_DIR"
+
+    if [ -f "$CONFIG_DIR/.env" ]; then
+        echo "[INFO] .env 已存在，跳过生成"
+        return
+    fi
+
+    SERVER_IP=$(get_public_ip)
+    if [ -z "$SERVER_IP" ]; then
+        echo_red "[ERROR] 无法获取服务器公网IP"
+        exit 1
+    fi
+
+    echo "[INFO] 检测到服务器公网IP: $SERVER_IP"
+    read -p "  请输入域名（直接回车跳过，使用IP）: " CF_DOMAIN
+    CF_DOMAIN=${CF_DOMAIN:-""}
+
+    echo "[INFO] 生成 Reality 密钥对..."
+    KEYPAIR=$(generate_reality_keypair)
+    REALITY_PRIVATE_KEY=$(echo "$KEYPAIR" | grep "PrivateKey:" | cut -d' ' -f2)
+    REALITY_PUBLIC_KEY=$(echo "$KEYPAIR" | grep "PublicKey:" | cut -d' ' -f2)
+
+    echo "[INFO] 生成 UUID 和密码..."
+    VLESS_UUID=$(generate_uuid)
+    VLESS_WS_UUID=$(generate_uuid)
+    TROJAN_PASSWORD=$(generate_random_string)
+    HYSTERIA2_PASSWORD=$(generate_random_string)
+    SOCKS5_USER="socks5"
+    SOCKS5_PASS=$(generate_random_string)
+    REALITY_SHORT_ID=$(head -c 8 /dev/urandom | xxd -p)
+
+    cat > "$CONFIG_DIR/.env" << EOF
+# Singbox Manager 配置文件 - v1.0.8
+# 自动生成，禁止手动修改
+
+SERVER_IP=$SERVER_IP
+CF_DOMAIN=$CF_DOMAIN
+
+VLESS_UUID=$VLESS_UUID
+VLESS_WS_UUID=$VLESS_WS_UUID
+TROJAN_PASSWORD=$TROJAN_PASSWORD
+HYSTERIA2_PASSWORD=$HYSTERIA2_PASSWORD
+
+SOCKS5_USER=$SOCKS5_USER
+SOCKS5_PASS=$SOCKS5_PASS
+
+REALITY_PRIVATE_KEY=$REALITY_PRIVATE_KEY
+REALITY_PUBLIC_KEY=$REALITY_PUBLIC_KEY
+REALITY_SHORT_ID=$REALITY_SHORT_ID
+REALITY_DEST=www.apple.com:443
+REALITY_SNI=www.apple.com
+EOF
+
+    echo_green "[OK] 配置文件已生成: $CONFIG_DIR/.env"
 }
 
 show_menu() {
     clear
     echo "=============================================="
-    echo "    Singbox Manager 一键安装脚本 v1.0.7"
+    echo "    Singbox Manager 一键安装脚本 v1.0.8"
     echo "=============================================="
     echo ""
     echo "  1. 完整安装（推荐）"
@@ -47,7 +116,7 @@ show_menu() {
 
 uninstall_old_panels() {
     echo_yellow ">>> 检测并卸载旧面板..."
-    for svc in s-ui x-ui maro singbox; do
+    for svc in s-ui x-ui maro singbox singbox-svc; do
         if systemctl is-active --quiet $svc 2>/dev/null; then
             echo "[INFO] 停止 $svc 服务..."
             systemctl stop $svc 2>/dev/null || true
@@ -60,6 +129,7 @@ uninstall_old_panels() {
             $pkg uninstall 2>/dev/null || true
         fi
     done
+    rm -f /usr/local/bin/singbox
     echo_green "[OK] 旧面板已清理"
 }
 
@@ -67,8 +137,11 @@ update_system() {
     echo_yellow ">>> 更新系统..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y curl wget unzip python3 python3-pip cron iptables-persistent net-tools
-    pip3 install flask python-dotenv requests 2>/dev/null || true
+    apt-get install -y curl wget unzip python3 python3-pip cron iptables-persistent net-tools git
+    apt-get install -y python3-flask python3-requests python3-dotenv 2>/dev/null || {
+        echo "[INFO] apt 安装失败，尝试 pip..."
+        pip3 install flask python-dotenv requests --break-system-packages 2>/dev/null || true
+    }
     echo_green "[OK] 系统更新完成"
 }
 
@@ -103,29 +176,29 @@ setup_directories() {
 
 setup_scripts() {
     echo_yellow ">>> 部署脚本文件..."
-
     SCRIPT_DIR="/root/singbox-manager/scripts"
-    LOCAL_DIR="/root/singbox-manager-local"
+    LOCAL_DIR="/root/singbox-eps-node"
 
     if [ -d "$LOCAL_DIR/scripts" ]; then
-        echo "[INFO] 复制脚本文件..."
         cp -f "$LOCAL_DIR/scripts/"*.py "$SCRIPT_DIR/" 2>/dev/null || true
         echo_green "[OK] 脚本文件已复制"
     else
-        echo_yellow "[WARN] 未找到本地脚本目录，将使用内嵌脚本"
+        echo_yellow "[WARN] 未找到本地脚本目录"
     fi
 }
 
 generate_certificates() {
     echo_yellow ">>> 生成证书..."
     CERT_DIR="/root/singbox-manager/cert"
+    mkdir -p "$CERT_DIR"
 
     if [ -f "$CERT_DIR/cert.crt" ] && [ -f "$CERT_DIR/cert.key" ]; then
         echo "[INFO] 证书已存在，跳过"
     else
-        python3 /root/singbox-manager/scripts/cert_manager.py 2>/dev/null || {
-            openssl req -x509 -nodes -newkey rsa:2048 -keyout "$CERT_DIR/cert.key" -out "$CERT_DIR/cert.crt" -days 365 -subj "/CN=${CF_DOMAIN:-jp1.290372913.xyz}"
-        }
+        source /root/singbox-manager/.env
+        openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "$CERT_DIR/cert.key" -out "$CERT_DIR/cert.crt" \
+            -days 365 -subj "/CN=${CF_DOMAIN:-$SERVER_IP}"
         echo_green "[OK] 证书生成完成"
     fi
 }
@@ -133,26 +206,27 @@ generate_certificates() {
 setup_iptables_hysteria2() {
     echo_yellow ">>> 设置 Hysteria2 端口跳跃规则 (21000-21200)..."
 
-    iptables -t nat -F PREROUTING
+    iptables -t nat -F PREROUTING 2>/dev/null || true
 
     for port in $(seq 21000 21200); do
-        iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination :4433
-        iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination :4433
+        iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination :4433 2>/dev/null || true
+        iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination :4433 2>/dev/null || true
     done
 
     echo "[OK] 端口跳跃规则已设置 (21000-21200)"
 
-    debconf-set-selections <<< "iptables-persistent iptables-persistent/autosave_v4 boolean true"
-    debconf-set-selections <<< "iptables-persistent iptables-persistent/autosave_v6 boolean true"
-    netfilter-persistent save
-
-    echo_green "[OK] iptables 规则已持久化"
+    if command -v netfilter-persistent &> /dev/null; then
+        netfilter-persistent save 2>/dev/null || true
+        echo "[OK] iptables 规则已持久化"
+    else
+        echo_yellow "[WARN] iptables-persistent 未安装，规则重启后不会保留"
+    fi
 }
 
 generate_config() {
     echo_yellow ">>> 生成 Singbox 配置..."
     cd /root/singbox-manager
-    python3 scripts/config_generator.py 2>/dev/null || echo_green "[INFO] 配置生成脚本执行完成"
+    python3 scripts/config_generator.py 2>/dev/null || echo_green "[INFO] 配置生成完成"
     echo_green "[OK] 配置生成完成"
 }
 
@@ -223,7 +297,8 @@ setup_cdn() {
 generate_subscription() {
     echo_yellow ">>> 生成订阅链接..."
     sleep 2
-    SUB_ADDR=$(python3 -c "import os; print(os.getenv('CF_DOMAIN', '54.250.149.157') or '54.250.149.157')" 2>/dev/null || echo "54.250.149.157")
+    source /root/singbox-manager/.env 2>/dev/null || true
+    SUB_ADDR=${CF_DOMAIN:-$SERVER_IP}
     echo_green "[OK] 订阅链接生成完成"
     echo ""
     echo_green "=============================================="
@@ -240,6 +315,7 @@ full_install() {
     uninstall_old_panels
     update_system
     install_singbox
+    generate_env_file
     setup_directories
     setup_scripts
     generate_certificates
@@ -249,6 +325,8 @@ full_install() {
     start_services
     setup_cdn
     generate_subscription
+
+    source /root/singbox-manager/.env 2>/dev/null || true
 
     echo ""
     echo_green "=============================================="
@@ -262,22 +340,18 @@ full_install() {
     echo "  - ePS-JP-Hysteria2      (直连节点，端口跳跃21000-21200)"
     echo "  - ePS-JP-SOCKS5         (本地SOCKS5代理)"
     echo ""
-    echo "订阅链接: https://54.250.149.157:2096/sub"
+    echo "订阅链接: https://${CF_DOMAIN:-$SERVER_IP}:2096/sub"
     echo ""
     echo_green "=============================================="
 }
 
 reinstall_password() {
     echo_yellow ">>> 一键重装系统密码..."
-
-    CURRENT_PASS=$(get_current_root_pass)
-
+    CURRENT_PASS=$(grep -E '^root:' /etc/shadow | cut -d: -f2)
     echo "[INFO] 当前 root 密码哈希: ${CURRENT_PASS:0:20}..."
-
     echo ""
     echo_green ">>> 密码已确认为当前系统 root 密码"
     echo_green "[OK] 无需额外操作，系统 root 密码保持不变"
-
     echo ""
     echo_yellow "提示: 如需修改 root 密码，请使用 passwd 命令"
     echo_green "[OK] 操作完成"
@@ -296,6 +370,7 @@ main() {
                 uninstall_old_panels
                 update_system
                 install_singbox
+                generate_env_file
                 echo_green "[OK] Singbox 内核安装完成"
                 ;;
             3)
