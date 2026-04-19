@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.13** (Bug修复与优化版)
+**v1.0.14** (Clash自动分流订阅+TG机器人总控版)
 
 ---
 
@@ -15,33 +15,49 @@
 | v1.0.11 | 2026-04-20 | 合并订阅/重装系统/非ROOT自动切换 |
 | v1.0.12 | 2026-04-20 | 添加 VLESS-HTTPUpgrade 协议 (CDN节点) |
 | v1.0.13 | 2026-04-20 | 修复CF证书API/Base64填充/iptables优化/域名提示 |
+| v1.0.14 | 2026-04-20 | Clash自动分流订阅+TG机器人总控+CDN多源备用 |
 
 ---
 
-## 最新更新内容 (v1.0.13)
+## 最新更新内容 (v1.0.14)
 
-### 修复一：Cloudflare 证书 API 致命错误
-- **问题**: 原代码使用错误的参数格式 (`type: origin`, `host: domain`)，CF API 直接返回 400 错误
+### 新增一：Clash 自动分流订阅
+- **功能**: 识别客户端 User-Agent，Clash/Stash/Shadowrocket 自动下发 YAML 配置
+- **包含**: 
+  - 自动选择（负载均衡）：每5分钟测速，自动选最快节点
+  - 故障切换：主节点挂了自动切备用
+  - 手动选择：用户可自由切换任意节点
+- **分流规则**: 苹果服务走 Reality、国内直连、国外走代理
+- **依赖**: `pyyaml` (已加入安装脚本)
+
+### 新增二：TG 机器人总控
+- **文件**: `scripts/tg_bot.py`
+- **命令**:
+  - `/status` - 查看服务器状态 (Singbox/订阅/CDN/负载/内存)
+  - `/renew` - 强制续签证书
+  - `/sub` - 获取订阅链接
+  - `/restart` - 重启 Singbox
+  - `/cdn` - 更新 CDN IP
+  - `/help` - 显示帮助
+- **配置**: 在 `.env` 中添加 `TG_BOT_TOKEN` 即可使用
+- **服务**: `singbox-tgbot.service` (开机自启)
+
+### 新增三：CDN 多源备用
+- **问题**: `api.uouin.com` 挂了就无法获取优选 IP
 - **修复方案**: 
-  - 先用 `openssl` 本地生成私钥和 CSR
-  - 使用正确参数: `hostnames`, `request_type: origin-rsa`, `csr`
-  - 私钥在本地生成，不需要 CF 返回
-- **效果**: Cloudflare 15年证书申请功能现在可以正常工作
+  - 添加 2 个备用 IP 源 (GitHub raw + cf.090227.xyz)
+  - 所有源失败时使用 Cloudflare 官方兜底 IP (104.16.1.1 等)
+- **效果**: CDN IP 获取成功率 100%
 
-### 修复二：外部订阅合并 Base64 填充炸裂
-- **问题**: 很多机场的 Base64 订阅链接结尾不带 `=` 填充符，Python 严格解码会崩溃
-- **修复方案**: 增加 Base64 安全补齐逻辑 `padded_raw = raw + '=' * (-len(raw) % 4)`
-- **效果**: 合并任何机场订阅都不会再崩溃
+### 修复一：证书申请崩溃 Bug
+- **问题**: `install.sh` 中内联 Python 代码在 CF API 返回 `private_key: None` 时崩溃
+- **修复方案**: 删除臃肿的内联 Python，直接调用 `cert_manager.py --cf-cert`
+- **效果**: 证书申请稳定运行
 
-### 优化一：iptables 精准清理
-- **问题**: `iptables -t nat -F PREROUTING` 会清空所有端口转发规则，影响 Docker 等服务
-- **修复方案**: 改为精准清理 `iptables-save | grep -v "DNAT.*4433" | iptables-restore`
-- **效果**: 只清理 Hysteria2 相关规则，不影响其他服务
-
-### 优化二：无域名 CDN 提示
-- **问题**: 用户没填域名时，CDN 节点会失效但没有提示
-- **修复方案**: 安装时检测未配置域名，显示警告提示
-- **效果**: 用户明确知道需要配置域名才能使用 CDN 加速
+### 修复二：路径写死 Bug
+- **问题**: `setup_scripts()` 硬编码 `/root/singbox-eps-node`
+- **修复方案**: 改为相对路径 `./scripts` 自动识别
+- **效果**: 任意目录名均可正常运行
 
 ### 当前节点列表 (5个)
 | 节点名称 | 协议 | 传输 | 安全 | CDN |
@@ -57,13 +73,14 @@
 ## 核心目录树
 ```
 singbox-eps-node/
-├── install.sh          # 主安装脚本 (v1.0.13)
+├── install.sh          # 主安装脚本 (v1.0.14)
 ├── scripts/
 │   ├── config.py       # 配置中心 (从.env读取)
 │   ├── config_generator.py  # Singbox配置生成器
-│   ├── subscription_service.py  # 订阅服务 (+dotenv+合并订阅+Base64修复)
-│   ├── cdn_monitor.py  # CDN监控
+│   ├── subscription_service.py  # 订阅服务 (+Clash自动分流+Base64修复)
+│   ├── cdn_monitor.py  # CDN监控 (+多源备用)
 │   ├── cert_manager.py # 证书管理 (CF API修复)
+│   ├── tg_bot.py       # TG机器人总控 (新增)
 │   └── logger.py       # 日志模块
 ├── docs/
 │   └── architecture.md # 架构文档
