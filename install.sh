@@ -253,6 +253,7 @@ Description=Singbox Subscription Service
 After=network.target
 
 [Service]
+EnvironmentFile=/root/singbox-manager/.env
 ExecStart=/usr/bin/python3 /root/singbox-manager/scripts/subscription_service.py
 Restart=always
 RestartSec=5
@@ -268,6 +269,7 @@ Description=Singbox CDN Monitor
 After=network.target
 
 [Service]
+EnvironmentFile=/root/singbox-manager/.env
 ExecStart=/usr/bin/python3 /root/singbox-manager/scripts/cdn_monitor.py --daemon
 Restart=always
 RestartSec=10
