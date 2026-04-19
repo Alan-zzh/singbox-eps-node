@@ -2,8 +2,8 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v1.0.3
-Date: 2026-04-19
+Version: v1.0.18
+Date: 2026-04-20
 功能：生成完整的 Singbox 配置
 """
 
@@ -16,7 +16,7 @@ import string
 
 # 读取环境变量
 env_vars = {}
-with open('/root/singbox-manager/.env', 'r') as f:
+with open('/root/singbox-eps-node/.env', 'r') as f:
     for line in f:
         line = line.strip()
         if '=' in line and not line.startswith('#'):
@@ -89,8 +89,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": "/root/singbox-manager/cert/cert.crt",
-                "key_path": "/root/singbox-manager/cert/cert.key",
+                "certificate_path": "/root/singbox-eps-node/cert/cert.crt",
+                "key_path": "/root/singbox-eps-node/cert/cert.key",
                 "alpn": ["http/1.1"]
             }
         },
@@ -108,8 +108,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": "/root/singbox-manager/cert/cert.crt",
-                "key_path": "/root/singbox-manager/cert/cert.key",
+                "certificate_path": "/root/singbox-eps-node/cert/cert.crt",
+                "key_path": "/root/singbox-eps-node/cert/cert.key",
                 "alpn": ["http/1.1"]
             }
         },
@@ -127,8 +127,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": "/root/singbox-manager/cert/cert.crt",
-                "key_path": "/root/singbox-manager/cert/cert.key",
+                "certificate_path": "/root/singbox-eps-node/cert/cert.crt",
+                "key_path": "/root/singbox-eps-node/cert/cert.key",
                 "alpn": ["http/1.1"]
             }
         },
@@ -141,8 +141,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": "www.apple.com",
-                "certificate_path": "/root/singbox-manager/cert/cert.crt",
-                "key_path": "/root/singbox-manager/cert/cert.key",
+                "certificate_path": "/root/singbox-eps-node/cert/cert.crt",
+                "key_path": "/root/singbox-eps-node/cert/cert.key",
                 "alpn": ["h3"]
             },
             "obfs": {
@@ -182,7 +182,7 @@ config = {
     }
 }
 
-with open("/root/singbox-manager/config.json", 'w') as f:
+with open("/root/singbox-eps-node/config.json", 'w') as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
 
 print("[OK] Singbox配置已保存")
