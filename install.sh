@@ -138,15 +138,44 @@ uninstall_old_panels() {
 }
 
 update_system() {
-    echo_yellow ">>> 更新系统..."
+    echo_yellow ">>> 更新系统并安装依赖..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y curl wget unzip python3 python3-pip cron iptables-persistent net-tools git
+    apt-get install -y curl wget unzip python3 python3-pip cron iptables-persistent net-tools git iproute2
     apt-get install -y python3-flask python3-requests python3-dotenv 2>/dev/null || {
         echo "[INFO] apt 安装失败，尝试 pip..."
         pip3 install flask python-dotenv requests --break-system-packages 2>/dev/null || true
     }
-    echo_green "[OK] 系统更新完成"
+
+    echo_yellow ">>> 执行系统网络级优化 (BBR + FQ + PIE 三合一加速)..."
+    if ! grep -q "net.ipv4.tcp_congestion_control" /etc/sysctl.conf; then
+        echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.core.default_qdisc" /etc/sysctl.conf; then
+        echo "net.core.default_qdisc = cake" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_rmem" /etc/sysctl.conf; then
+        echo "net.ipv4.tcp_rmem = 4096 87380 67108864" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_wmem = 4096 65536 67108864" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_bbr_min_rtt_win_sec" /etc/sysctl.conf; then
+        echo "net.ipv4.tcp_bbr_min_rtt_win_sec = 60" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_slow_start_after_idle = 0" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_fastopen" /etc/sysctl.conf; then
+        echo "net.ipv4.tcp_fastopen = 3" >> /etc/sysctl.conf
+        echo "fs.file-max = 1000000" >> /etc/sysctl.conf
+        echo "net.ipv4.tcp_tw_reuse = 1" >> /etc/sysctl.conf
+        echo "net.ipv4.ip_local_port_range = 1024 65000" >> /etc/sysctl.conf
+    fi
+    sysctl -p
+
+    if ! grep -q "* soft nofile 1000000" /etc/security/limits.conf; then
+        echo "* soft nofile 1000000" >> /etc/security/limits.conf
+        echo "* hard nofile 1000000" >> /etc/security/limits.conf
+    fi
+
+    echo_green "[OK] 系统更新及 BBR+FQ+PIE 三合一网络优化完成"
 }
 
 install_singbox() {
