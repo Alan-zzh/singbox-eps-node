@@ -63,7 +63,7 @@ config = {
             "tag": "vless-reality",
             "listen": "0.0.0.0",
             "listen_port": 443,
-            "users": [{"id": vless_uuid, "flow": "xtls-rprx-vision"}],
+            "users": [{"uuid": vless_uuid, "flow": "xtls-rprx-vision"}],
             "tls": {
                 "enabled": True,
                 "server_name": "www.apple.com",
