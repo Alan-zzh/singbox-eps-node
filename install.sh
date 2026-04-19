@@ -120,9 +120,10 @@ generate_env_file() {
     SOCKS5_USER="socks5"
     SOCKS5_PASS=$(generate_random_string)
     REALITY_SHORT_ID=$(head -c 8 /dev/urandom | xxd -p)
+    SUB_TOKEN=$(generate_random_string 16)
 
     cat > "$CONFIG_DIR/.env" << EOF
-# Singbox Manager 配置文件 - v1.0.14
+# Singbox Manager 配置文件 - v1.0.16
 # 自动生成，禁止手动修改
 
 SERVER_IP=$SERVER_IP
@@ -139,6 +140,9 @@ HYSTERIA2_PASSWORD=$HYSTERIA2_PASSWORD
 
 SOCKS5_USER=$SOCKS5_USER
 SOCKS5_PASS=$SOCKS5_PASS
+
+SUB_TOKEN=$SUB_TOKEN
+SUB_PORT=6969
 
 AI_SOCKS5_SERVER=$AI_SOCKS5_SERVER
 AI_SOCKS5_PORT=$AI_SOCKS5_PORT

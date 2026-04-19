@@ -187,9 +187,10 @@ def check_cert_expiry():
     return True
 
 def restart_singbox():
-    """重启Singbox服务"""
+    """重启Singbox和订阅服务"""
     os.system('systemctl restart singbox')
-    logger.info("[OK] Singbox已重启")
+    os.system('systemctl restart singbox-sub')
+    logger.info("[OK] Singbox 与订阅服务已重启")
 
 def renew_cert():
     """续签证书"""

@@ -24,13 +24,16 @@ SERVER_IP = os.getenv('SERVER_IP', '')
 CF_DOMAIN = os.getenv('CF_DOMAIN', '')
 
 # 服务端口配置
-SUB_PORT = 2096
+SUB_PORT = int(os.getenv('SUB_PORT', '6969'))
 SINGBOX_PORT = 443
 VLESS_WS_PORT = 8443
 VLESS_UPGRADE_PORT = 8445
 TROJAN_WS_PORT = 8444
 HYSTERIA2_PORT = 4433
 SOCKS5_PORT = 1080
+
+# 订阅安全 Token
+SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 
 # Hysteria2 端口跳跃配置 (直连，不走CDN)
 HYSTERIA2_UDP_PORTS = list(range(21000, 21201))

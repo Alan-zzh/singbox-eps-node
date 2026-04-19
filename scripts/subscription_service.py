@@ -35,7 +35,8 @@ try:
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
-        AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS
+        AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
+        SUB_TOKEN
     )
     from logger import get_logger
 except ImportError:
@@ -51,7 +52,8 @@ CF_DOMAIN = os.getenv('CF_DOMAIN', '')
 DATA_DIR = os.getenv('DATA_DIR', '/root/singbox-manager')
 CERT_DIR = os.getenv('CERT_DIR', '/root/singbox-manager/cert')
 DB_PATH = os.path.join(DATA_DIR, 'singbox.db')
-SUB_PORT = int(os.getenv('SUB_PORT', '2096'))
+SUB_PORT = int(os.getenv('SUB_PORT', '6969'))
+SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 USE_DOMAIN = bool(CF_DOMAIN and CF_DOMAIN.strip() != '')
 
 VLESS_UUID = os.getenv('VLESS_UUID', '')
@@ -115,6 +117,9 @@ def generate_all_links():
     ws_addr = get_ws_address()
     links = []
 
+    use_cdn = (cdn_ip and cdn_ip != SERVER_IP)
+    cdn_suffix = "-CDN" if use_cdn else ""
+
     params = {
         'encryption': 'none',
         'flow': 'xtls-rprx-vision',
@@ -129,7 +134,7 @@ def generate_all_links():
         'headerType': 'none'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#ePS-JP-VLESS-Reality")
+    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#ePS-JP-VLESS-Reality{cdn_suffix}")
 
     params = {
         'encryption': 'none',
@@ -141,7 +146,7 @@ def generate_all_links():
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_WS_UUID}@{ws_addr}:{VLESS_WS_PORT}?{param_str}#ePS-JP-VLESS-WS")
+    links.append(f"vless://{VLESS_WS_UUID}@{ws_addr}:{VLESS_WS_PORT}?{param_str}#ePS-JP-VLESS-WS{cdn_suffix}")
 
     params = {
         'encryption': 'none',
@@ -153,7 +158,7 @@ def generate_all_links():
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_WS_UUID}@{ws_addr}:{VLESS_UPGRADE_PORT}?{param_str}#ePS-JP-VLESS-HTTPUpgrade")
+    links.append(f"vless://{VLESS_WS_UUID}@{ws_addr}:{VLESS_UPGRADE_PORT}?{param_str}#ePS-JP-VLESS-HTTPUpgrade{cdn_suffix}")
 
     params = {
         'type': 'ws',
@@ -164,7 +169,7 @@ def generate_all_links():
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"trojan://{TROJAN_PASSWORD}@{ws_addr}:{TROJAN_WS_PORT}?{param_str}#ePS-JP-Trojan-WS")
+    links.append(f"trojan://{TROJAN_PASSWORD}@{ws_addr}:{TROJAN_WS_PORT}?{param_str}#ePS-JP-Trojan-WS{cdn_suffix}")
 
     params = {
         'sni': REALITY_SNI,
@@ -204,7 +209,7 @@ def create_app():
             <h1>Singbox 订阅服务</h1>
             <div class="sub-box">
                 <p><strong>订阅链接：</strong></p>
-                <p class="sub-link">https://%s:%s/sub</p>
+                <p class="sub-link">https://%s:%s/%s</p>
                 <p class="info">（包含5个节点：ePS-JP-VLESS-Reality、ePS-JP-VLESS-WS、ePS-JP-VLESS-HTTPUpgrade、ePS-JP-Trojan-WS、ePS-JP-Hysteria2）</p>
             </div>
             <div class="info">
@@ -214,9 +219,10 @@ def create_app():
             </div>
         </body>
         </html>
-        """ % (server_addr, SUB_PORT, SERVER_IP, CF_DOMAIN if CF_DOMAIN else '未配置', '是' if USE_DOMAIN else '否')
+        """ % (server_addr, SUB_PORT, SUB_TOKEN, SERVER_IP, CF_DOMAIN if CF_DOMAIN else '未配置', '是' if USE_DOMAIN else '否')
         return Response(html, mimetype='text/html')
 
+    @app.route(f'/{SUB_TOKEN}')
     @app.route('/sub')
     def get_subscription():
         user_agent = request.headers.get('User-Agent', '').lower()
@@ -249,12 +255,14 @@ def create_app():
         ws_addr = get_ws_address()
         domain = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else ws_addr
         allow_insecure = True
+        use_cdn = (cdn_ip and cdn_ip != SERVER_IP)
+        cdn_suffix = "-CDN" if use_cdn else ""
 
         proxies = []
         proxy_groups = []
 
         proxies.append({
-            'name': 'ePS-JP-VLESS-Reality',
+            'name': f'ePS-JP-VLESS-Reality{cdn_suffix}',
             'type': 'vless',
             'server': SERVER_IP,
             'port': 443,
@@ -269,7 +277,7 @@ def create_app():
         })
 
         proxies.append({
-            'name': 'ePS-JP-VLESS-WS',
+            'name': f'ePS-JP-VLESS-WS{cdn_suffix}',
             'type': 'vless',
             'server': ws_addr,
             'port': VLESS_WS_PORT,
@@ -282,7 +290,7 @@ def create_app():
         })
 
         proxies.append({
-            'name': 'ePS-JP-VLESS-HTTPUpgrade',
+            'name': f'ePS-JP-VLESS-HTTPUpgrade{cdn_suffix}',
             'type': 'vless',
             'server': ws_addr,
             'port': VLESS_UPGRADE_PORT,
@@ -295,7 +303,7 @@ def create_app():
         })
 
         proxies.append({
-            'name': 'ePS-JP-Trojan-WS',
+            'name': f'ePS-JP-Trojan-WS{cdn_suffix}',
             'type': 'trojan',
             'server': ws_addr,
             'port': TROJAN_WS_PORT,

@@ -127,7 +127,9 @@ def get_sub_link():
     domain = os.getenv('CF_DOMAIN', '')
     ip = os.getenv('SERVER_IP', '')
     addr = domain if domain else ip
-    return f"🔗 订阅链接:\nhttps://{addr}:2096/sub"
+    sub_port = os.getenv('SUB_PORT', '6969')
+    sub_token = os.getenv('SUB_TOKEN', '')
+    return f"🔗 订阅链接:\nhttps://{addr}:{sub_port}/{sub_token}"
 
 def set_bot_commands():
     """设置 Telegram 内置命令菜单"""
