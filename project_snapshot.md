@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.10** (终极验收版)
+**v1.0.12** (HTTPUpgrade协议版)
 
 ---
 
@@ -12,34 +12,44 @@
 | v1.0.8 | 2026-04-20 | 修复5个严重Bug：无硬编码/动态密钥/OBFS参数 |
 | v1.0.9 | 2026-04-20 | 修复 Systemd 环境变量隔离盲区 |
 | v1.0.10 | 2026-04-20 | 终极验收：dotenv双保险/CF证书激活 |
+| v1.0.11 | 2026-04-20 | 合并订阅/重装系统/非ROOT自动切换 |
+| v1.0.12 | 2026-04-20 | 添加 VLESS-HTTPUpgrade 协议 (CDN节点) |
 
 ---
 
-## 最新更新内容 (v1.0.10)
+## 最新更新内容 (v1.0.12)
 
-### 修复一：Python dotenv 双保险
-- **问题**: 手动调试时 `os.getenv()` 读不到 `.env`
-- **修复方案**: `subscription_service.py` 顶部新增 `from dotenv import load_dotenv; load_dotenv('/root/singbox-manager/.env')`
-- **效果**: 无论手动运行还是 systemctl 启动，都能正确读取变量
+### 新增：VLESS-HTTPUpgrade 协议
+- **原理**: HTTPUpgrade 是对 HTTP 协议的升级机制，比传统 WebSocket 更轻量，握手过程更简单
+- **优势**: 
+  - 兼容性：解决了某些 CDN 或反向代理对 WS 支持不完美的问题
+  - 性能：在某些高并发场景下，性能表现优于 WS
+- **配置**:
+  - 端口: 8445
+  - 路径: /vless-upgrade
+  - 传输: httpupgrade
+  - 安全: TLS
+- **订阅链接**: 自动生成 `ePS-JP-VLESS-HTTPUpgrade` 节点，使用 CDN IP
 
-### 修复二：Cloudflare 15年证书激活
-- **问题**: `cert_manager.py` 已写好 CF API 证书申请，但 `install.sh` 没问用户要 Token
-- **修复方案**: 
-  - `generate_env_file()` 新增询问 `CF_API_TOKEN`
-  - `.env` 新增 `CF_API_TOKEN` 字段
-  - `generate_certificates()` 检测 Token 存在时自动调用 CF API 申请15年证书，失败自动降级自签
-- **效果**: 用户可选择输入 CF Token 获得15年证书，或直接回车使用自签证书
+### 当前节点列表 (5个)
+| 节点名称 | 协议 | 传输 | 安全 | CDN |
+|----------|------|------|------|-----|
+| ePS-JP-VLESS-Reality | VLESS | TCP | Reality | 否 |
+| ePS-JP-VLESS-WS | VLESS | WebSocket | TLS | 是 |
+| ePS-JP-VLESS-HTTPUpgrade | VLESS | HTTPUpgrade | TLS | 是 |
+| ePS-JP-Trojan-WS | Trojan | WebSocket | TLS | 是 |
+| ePS-JP-Hysteria2 | Hysteria2 | UDP | TLS | 否 |
 
 ---
 
 ## 核心目录树
 ```
 singbox-eps-node/
-├── install.sh          # 主安装脚本 (v1.0.10)
+├── install.sh          # 主安装脚本 (v1.0.12)
 ├── scripts/
 │   ├── config.py       # 配置中心 (从.env读取)
 │   ├── config_generator.py  # Singbox配置生成器
-│   ├── subscription_service.py  # 订阅服务 (+dotenv)
+│   ├── subscription_service.py  # 订阅服务 (+dotenv+合并订阅)
 │   ├── cdn_monitor.py  # CDN监控
 │   ├── cert_manager.py # 证书管理 (CF API)
 │   └── logger.py       # 日志模块

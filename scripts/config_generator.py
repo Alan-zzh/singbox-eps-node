@@ -90,6 +90,25 @@ config = {
             }
         },
         {
+            "type": "vless",
+            "tag": "vless-upgrade",
+            "listen": "0.0.0.0",
+            "listen_port": 8445,
+            "users": [{"id": vless_ws_uuid}],
+            "transport": {
+                "type": "httpupgrade",
+                "path": "/vless-upgrade",
+                "host": cf_domain or server_ip
+            },
+            "tls": {
+                "enabled": True,
+                "server_name": cf_domain or server_ip,
+                "certificate_path": "/root/singbox-manager/cert/cert.crt",
+                "key_path": "/root/singbox-manager/cert/cert.key",
+                "alpn": ["http/1.1"]
+            }
+        },
+        {
             "type": "trojan",
             "tag": "trojan-ws",
             "listen": "0.0.0.0",

@@ -55,6 +55,7 @@ USE_DOMAIN = bool(CF_DOMAIN and CF_DOMAIN.strip() != '')
 
 VLESS_UUID = os.getenv('VLESS_UUID', '')
 VLESS_WS_UUID = os.getenv('VLESS_WS_UUID', '')
+VLESS_UPGRADE_PORT = int(os.getenv('VLESS_UPGRADE_PORT', '8445'))
 TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
 HYSTERIA2_PASSWORD = os.getenv('HYSTERIA2_PASSWORD', '')
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
@@ -142,6 +143,18 @@ def generate_all_links():
     links.append(f"vless://{VLESS_WS_UUID}@{ws_addr}:{VLESS_WS_PORT}?{param_str}#ePS-JP-VLESS-WS")
 
     params = {
+        'encryption': 'none',
+        'type': 'httpupgrade',
+        'security': 'tls',
+        'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else ws_addr,
+        'path': '/vless-upgrade',
+        'host': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else ws_addr,
+        'allowInsecure': '1'
+    }
+    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
+    links.append(f"vless://{VLESS_WS_UUID}@{ws_addr}:{VLESS_UPGRADE_PORT}?{param_str}#ePS-JP-VLESS-HTTPUpgrade")
+
+    params = {
         'type': 'ws',
         'security': 'tls',
         'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else ws_addr,
@@ -191,7 +204,7 @@ def create_app():
             <div class="sub-box">
                 <p><strong>订阅链接：</strong></p>
                 <p class="sub-link">https://%s:%s/sub</p>
-                <p class="info">（包含4个节点：ePS-JP-VLESS-Reality、ePS-JP-VLESS-WS、ePS-JP-Trojan-WS、ePS-JP-Hysteria2）</p>
+                <p class="info">（包含5个节点：ePS-JP-VLESS-Reality、ePS-JP-VLESS-WS、ePS-JP-VLESS-HTTPUpgrade、ePS-JP-Trojan-WS、ePS-JP-Hysteria2）</p>
             </div>
             <div class="info">
                 <p>服务器IP: %s</p>

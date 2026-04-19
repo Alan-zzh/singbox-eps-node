@@ -101,7 +101,7 @@ generate_env_file() {
     REALITY_SHORT_ID=$(head -c 8 /dev/urandom | xxd -p)
 
     cat > "$CONFIG_DIR/.env" << EOF
-# Singbox Manager 配置文件 - v1.0.11
+# Singbox Manager 配置文件 - v1.0.12
 # 自动生成，禁止手动修改
 
 SERVER_IP=$SERVER_IP
@@ -111,6 +111,7 @@ EXTERNAL_SUBS=$EXTERNAL_SUBS
 
 VLESS_UUID=$VLESS_UUID
 VLESS_WS_UUID=$VLESS_WS_UUID
+VLESS_UPGRADE_PORT=8445
 TROJAN_PASSWORD=$TROJAN_PASSWORD
 HYSTERIA2_PASSWORD=$HYSTERIA2_PASSWORD
 
@@ -430,11 +431,12 @@ full_install() {
     echo "=============================================="
     echo ""
     echo "节点列表:"
-    echo "  - ePS-JP-VLESS-Reality  (殖民节点，苹果域名伪装)"
-    echo "  - ePS-JP-VLESS-WS       (CDN节点)"
-    echo "  - ePS-JP-Trojan-WS      (CDN节点)"
-    echo "  - ePS-JP-Hysteria2      (直连节点，端口跳跃21000-21200)"
-    echo "  - ePS-JP-SOCKS5         (本地SOCKS5代理)"
+    echo "  - ePS-JP-VLESS-Reality      (直连节点，苹果域名伪装)"
+    echo "  - ePS-JP-VLESS-WS           (CDN节点，WebSocket)"
+    echo "  - ePS-JP-VLESS-HTTPUpgrade  (CDN节点，HTTPUpgrade新传输)"
+    echo "  - ePS-JP-Trojan-WS          (CDN节点，WebSocket+TLS)"
+    echo "  - ePS-JP-Hysteria2          (直连节点，端口跳跃21000-21200)"
+    echo "  - ePS-JP-SOCKS5             (本地SOCKS5代理)"
     echo ""
     echo "订阅链接: https://${CF_DOMAIN:-$SERVER_IP}:2096/sub"
     echo ""
