@@ -48,6 +48,12 @@ CDN_TOP_IPS_COUNT = 5
 # 证书配置
 CERT_VALIDITY_DAYS = 365
 
+# AI 住宅IP SOCKS5 配置（链式代理）
+AI_SOCKS5_SERVER = os.getenv('AI_SOCKS5_SERVER', '')
+AI_SOCKS5_PORT = int(os.getenv('AI_SOCKS5_PORT', '0')) if os.getenv('AI_SOCKS5_PORT') else 0
+AI_SOCKS5_USER = os.getenv('AI_SOCKS5_USER', '')
+AI_SOCKS5_PASS = os.getenv('AI_SOCKS5_PASS', '')
+
 # 节点命名规则: ePS-{国家}-{协议}
 NODE_PREFIX = 'ePS-JP'
 

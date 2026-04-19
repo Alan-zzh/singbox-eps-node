@@ -94,6 +94,19 @@ generate_env_file() {
     read -p "  请输入 TG Bot Token (用于机器人总控, 回车跳过): " TG_BOT_TOKEN
     TG_BOT_TOKEN=${TG_BOT_TOKEN:-""}
 
+    echo ""
+    echo_yellow ">>> 是否配置 AI 住宅IP SOCKS5？（回车跳过）"
+    read -p "  住宅IP地址: " AI_SOCKS5_SERVER
+    AI_SOCKS5_SERVER=${AI_SOCKS5_SERVER:-""}
+    if [ -n "$AI_SOCKS5_SERVER" ]; then
+        read -p "  端口: " AI_SOCKS5_PORT
+        read -p "  用户名: " AI_SOCKS5_USER
+        read -p "  密码: " AI_SOCKS5_PASS
+    fi
+    AI_SOCKS5_PORT=${AI_SOCKS5_PORT:-""}
+    AI_SOCKS5_USER=${AI_SOCKS5_USER:-""}
+    AI_SOCKS5_PASS=${AI_SOCKS5_PASS:-""}
+
     echo "[INFO] 生成 Reality 密钥对..."
     KEYPAIR=$(generate_reality_keypair)
     REALITY_PRIVATE_KEY=$(echo "$KEYPAIR" | grep "PrivateKey:" | cut -d' ' -f2)
@@ -126,6 +139,11 @@ HYSTERIA2_PASSWORD=$HYSTERIA2_PASSWORD
 
 SOCKS5_USER=$SOCKS5_USER
 SOCKS5_PASS=$SOCKS5_PASS
+
+AI_SOCKS5_SERVER=$AI_SOCKS5_SERVER
+AI_SOCKS5_PORT=$AI_SOCKS5_PORT
+AI_SOCKS5_USER=$AI_SOCKS5_USER
+AI_SOCKS5_PASS=$AI_SOCKS5_PASS
 
 REALITY_PRIVATE_KEY=$REALITY_PRIVATE_KEY
 REALITY_PUBLIC_KEY=$REALITY_PUBLIC_KEY

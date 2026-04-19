@@ -33,6 +33,11 @@ cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
 socks5_user = env_vars.get('SOCKS5_USER', 'socks5')
 socks5_pass = env_vars.get('SOCKS5_PASS', 'socks5pass')
 
+ai_socks5_server = env_vars.get('AI_SOCKS5_SERVER', '')
+ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
+ai_socks5_user = env_vars.get('AI_SOCKS5_USER', '')
+ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
+
 config = {
     "log": {
         "disabled": False,
@@ -149,11 +154,29 @@ config = {
     "outbounds": [
         {"type": "direct", "tag": "direct"},
         {"type": "block", "tag": "block"}
-    ],
+    ] + ([{
+        "type": "socks",
+        "tag": "ai-residential",
+        "server": ai_socks5_server,
+        "server_port": int(ai_socks5_port),
+        "version": "5",
+        "username": ai_socks5_user,
+        "password": ai_socks5_pass
+    }] if ai_socks5_server and ai_socks5_port else []),
     "route": {
         "rules": [
             {"geoip": "cn", "outbound": "direct"},
             {"geosite": "cn", "outbound": "direct"},
+        ] + ([{
+            "domain_suffix": [
+                "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
+                "gemini.google.com", "bard.google.com", "ai.google",
+                "perplexity.ai", "midjourney.com", "stability.ai",
+                "cohere.com", "replicate.com"
+            ],
+            "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity"],
+            "outbound": "ai-residential"
+        }] if ai_socks5_server and ai_socks5_port else []) + [
             {"outbound": "direct"}
         ]
     }
