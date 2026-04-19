@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from config import (
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
-        VLESS_WS_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
+        VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI
     )
     from logger import get_logger
@@ -180,7 +180,7 @@ def generate_all_links():
 
 def create_app():
     """创建Flask应用"""
-    from flask import Flask, Response, jsonify
+    from flask import Flask, Response, jsonify, request
 
     app = Flask(__name__)
 
@@ -218,6 +218,9 @@ def create_app():
 
     @app.route('/sub')
     def get_subscription():
+        user_agent = request.headers.get('User-Agent', '').lower()
+        if 'clash' in user_agent or 'stash' in user_agent or 'shadowrocket' in user_agent:
+            return get_clash_subscription()
         links = generate_all_links()
         if EXTERNAL_SUBS:
             for sub_url in EXTERNAL_SUBS.split('|'):
@@ -238,6 +241,132 @@ def create_app():
         content = '\n'.join(links)
         sub = base64.b64encode(content.encode('utf-8')).decode('utf-8')
         return Response(sub, mimetype='text/plain')
+
+    def get_clash_subscription():
+        """生成 Clash YAML 订阅（负载均衡+故障切换+手动选择）"""
+        cdn_ip = get_cdn_ip()
+        ws_addr = get_ws_address()
+        domain = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else ws_addr
+        allow_insecure = True
+
+        proxies = []
+        proxy_groups = []
+
+        proxies.append({
+            'name': 'ePS-JP-VLESS-Reality',
+            'type': 'vless',
+            'server': SERVER_IP,
+            'port': 443,
+            'uuid': VLESS_UUID,
+            'network': 'tcp',
+            'tls': True,
+            'servername': REALITY_SNI,
+            'flow': 'xtls-rprx-vision',
+            'reality-opts': {'public-key': REALITY_PUBLIC_KEY[-32:] if (REALITY_PUBLIC_KEY and len(REALITY_PUBLIC_KEY) >= 32) else REALITY_PUBLIC_KEY, 'short-id': REALITY_SHORT_ID},
+            'client-fingerprint': 'chrome',
+            'skip-cert-verify': allow_insecure
+        })
+
+        proxies.append({
+            'name': 'ePS-JP-VLESS-WS',
+            'type': 'vless',
+            'server': ws_addr,
+            'port': VLESS_WS_PORT,
+            'uuid': VLESS_WS_UUID,
+            'network': 'ws',
+            'tls': True,
+            'servername': domain,
+            'ws-opts': {'path': '/vless-ws', 'headers': {'Host': domain}},
+            'skip-cert-verify': allow_insecure
+        })
+
+        proxies.append({
+            'name': 'ePS-JP-VLESS-HTTPUpgrade',
+            'type': 'vless',
+            'server': ws_addr,
+            'port': VLESS_UPGRADE_PORT,
+            'uuid': VLESS_WS_UUID,
+            'network': 'httpupgrade',
+            'tls': True,
+            'servername': domain,
+            'httpupgrade-opts': {'path': '/vless-upgrade', 'host': domain},
+            'skip-cert-verify': allow_insecure
+        })
+
+        proxies.append({
+            'name': 'ePS-JP-Trojan-WS',
+            'type': 'trojan',
+            'server': ws_addr,
+            'port': TROJAN_WS_PORT,
+            'password': TROJAN_PASSWORD,
+            'network': 'ws',
+            'ws-opts': {'path': '/trojan-ws', 'headers': {'Host': domain}},
+            'skip-cert-verify': allow_insecure
+        })
+
+        proxies.append({
+            'name': 'ePS-JP-Hysteria2',
+            'type': 'hysteria2',
+            'server': SERVER_IP,
+            'port': 4433,
+            'password': HYSTERIA2_PASSWORD,
+            'ports': '21000-21200',
+            'obfs': {'type': 'salamander', 'password': HYSTERIA2_PASSWORD[:8]},
+            'sni': REALITY_SNI,
+            'skip-cert-verify': allow_insecure
+        })
+
+        proxy_groups.append({
+            'name': '自动选择（负载均衡）',
+            'type': 'url-test',
+            'proxies': [p['name'] for p in proxies],
+            'url': 'https://www.google.com/generate_204',
+            'interval': 300,
+            'tolerance': 50
+        })
+
+        proxy_groups.append({
+            'name': '故障切换',
+            'type': 'fallback',
+            'proxies': [p['name'] for p in proxies],
+            'url': 'https://www.google.com/generate_204',
+            'interval': 300
+        })
+
+        proxy_groups.append({
+            'name': '手动选择',
+            'type': 'select',
+            'proxies': [p['name'] for p in proxies]
+        })
+
+        clash_config = {
+            'mixed-port': 7890,
+            'allow-lan': True,
+            'mode': 'rule',
+            'log-level': 'info',
+            'proxies': proxies,
+            'proxy-groups': proxy_groups + [
+                {
+                    'name': '🚀 节点选择',
+                    'type': 'select',
+                    'proxies': ['自动选择（负载均衡）', '故障切换', '手动选择'] + [p['name'] for p in proxies]
+                },
+                {'name': '🍎 苹果服务', 'type': 'select', 'proxies': ['ePS-JP-VLESS-Reality', '🚀 节点选择']},
+                {'name': '🌍 国外网站', 'type': 'select', 'proxies': ['🚀 节点选择']},
+                {'name': '🇨🇳 国内网站', 'type': 'select', 'proxies': ['DIRECT']}
+            ],
+            'rules': [
+                'DOMAIN-SUFFIX,apple.com,🍎 苹果服务',
+                'DOMAIN-SUFFIX,icloud.com,🍎 苹果服务',
+                'GEOIP,CN,🇨🇳 国内网站',
+                'GEOSITE,CN,🇨🇳 国内网站',
+                'MATCH,🌍 国外网站'
+            ]
+        }
+
+        import yaml
+        yaml_content = yaml.dump(clash_config, allow_unicode=True, default_flow_style=False)
+        return Response(yaml_content, mimetype='text/yaml', headers={'Content-Disposition': 'attachment; filename=clash.yaml'})
 
     @app.route('/health')
     def health():

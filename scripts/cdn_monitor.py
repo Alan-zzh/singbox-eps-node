@@ -32,6 +32,11 @@ except ImportError:
 logger = get_logger('cdn_monitor')
 
 CDN_DB_URL = 'https://api.uouin.com/cloudflare.html'
+CDN_BACKUP_URLS = [
+    'https://raw.githubusercontent.com/XIU2/CloudflareSpeedTest/master/ip.txt',
+    'https://cf.090227.xyz/',
+]
+CDN_FALLBACK_IPS = ['104.16.1.1', '104.16.132.229', '104.17.1.1']
 CDN_TOP_IPS_COUNT = 5
 MONITOR_INTERVAL = 3600
 
@@ -51,22 +56,27 @@ def init_db():
     return os.path.join(DATA_DIR, 'singbox.db')
 
 def fetch_cdn_ips():
-    """从CDN数据库获取优选IP"""
-    try:
-        logger.info(">>> 获取优选IP列表...")
-        response = requests.get(CDN_DB_URL, timeout=30)
-        if response.status_code == 200:
-            ips = [ip.strip() for ip in response.text.split('\n') if ip.strip()]
-            unique_ips = list(dict.fromkeys(ips))
-            top_ips = unique_ips[:CDN_TOP_IPS_COUNT]
-            logger.info(f"[OK] 获取到 {len(unique_ips)} 个优选IP")
-            logger.info(f"[INFO] 前{CDN_TOP_IPS_COUNT}个IP: {top_ips}")
-            return top_ips
-        logger.error(f"[ERROR] HTTP {response.status_code}")
-        return []
-    except Exception as e:
-        logger.error(f"[ERROR] 获取优选IP失败: {e}")
-        return []
+    """从CDN数据库获取优选IP，支持多源备用和降级"""
+    urls = [CDN_DB_URL] + CDN_BACKUP_URLS
+
+    for url in urls:
+        try:
+            logger.info(f">>> 尝试获取优选IP: {url}")
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                ips = [ip.strip() for ip in response.text.split('\n') if ip.strip() and '.' in ip]
+                if ips:
+                    unique_ips = list(dict.fromkeys(ips))
+                    top_ips = unique_ips[:CDN_TOP_IPS_COUNT]
+                    logger.info(f"[OK] 从 {url} 获取到 {len(unique_ips)} 个优选IP")
+                    logger.info(f"[INFO] 前{CDN_TOP_IPS_COUNT}个IP: {top_ips}")
+                    return top_ips
+        except Exception as e:
+            logger.warning(f"[WARN] {url} 获取失败: {e}")
+            continue
+
+    logger.warning("[WARN] 所有CDN IP源均失败，使用官方兜底IP")
+    return CDN_FALLBACK_IPS[:CDN_TOP_IPS_COUNT]
 
 def assign_and_save_ips(ips):
     """分配并保存优选IP（前5个随机选1个分配给所有CDN协议）"""

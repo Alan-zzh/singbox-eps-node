@@ -91,6 +91,9 @@ generate_env_file() {
     done
     EXTERNAL_SUBS=${EXTERNAL_SUBS:-""}
 
+    read -p "  请输入 TG Bot Token (用于机器人总控, 回车跳过): " TG_BOT_TOKEN
+    TG_BOT_TOKEN=${TG_BOT_TOKEN:-""}
+
     echo "[INFO] 生成 Reality 密钥对..."
     KEYPAIR=$(generate_reality_keypair)
     REALITY_PRIVATE_KEY=$(echo "$KEYPAIR" | grep "PrivateKey:" | cut -d' ' -f2)
@@ -106,13 +109,14 @@ generate_env_file() {
     REALITY_SHORT_ID=$(head -c 8 /dev/urandom | xxd -p)
 
     cat > "$CONFIG_DIR/.env" << EOF
-# Singbox Manager 配置文件 - v1.0.12
+# Singbox Manager 配置文件 - v1.0.14
 # 自动生成，禁止手动修改
 
 SERVER_IP=$SERVER_IP
 CF_DOMAIN=$CF_DOMAIN
 CF_API_TOKEN=$CF_API_TOKEN
 EXTERNAL_SUBS=$EXTERNAL_SUBS
+TG_BOT_TOKEN=$TG_BOT_TOKEN
 
 VLESS_UUID=$VLESS_UUID
 VLESS_WS_UUID=$VLESS_WS_UUID
@@ -174,9 +178,9 @@ update_system() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y curl wget unzip python3 python3-pip cron iptables-persistent net-tools git iproute2
-    apt-get install -y python3-flask python3-requests python3-dotenv 2>/dev/null || {
+    apt-get install -y python3-flask python3-requests python3-dotenv python3-yaml 2>/dev/null || {
         echo "[INFO] apt 安装失败，尝试 pip..."
-        pip3 install flask python-dotenv requests --break-system-packages 2>/dev/null || true
+        pip3 install flask python-dotenv requests pyyaml --break-system-packages 2>/dev/null || true
     }
 
     echo_yellow ">>> 执行系统网络级优化 (BBR + FQ + PIE 三合一加速)..."
@@ -242,13 +246,13 @@ setup_directories() {
 setup_scripts() {
     echo_yellow ">>> 部署脚本文件..."
     SCRIPT_DIR="/root/singbox-manager/scripts"
-    LOCAL_DIR="/root/singbox-eps-node"
 
-    if [ -d "$LOCAL_DIR/scripts" ]; then
-        cp -f "$LOCAL_DIR/scripts/"*.py "$SCRIPT_DIR/" 2>/dev/null || true
+    if [ -d "./scripts" ]; then
+        cp -f ./scripts/*.py "$SCRIPT_DIR/" 2>/dev/null || true
         echo_green "[OK] 脚本文件已复制"
     else
-        echo_yellow "[WARN] 未找到本地脚本目录"
+        echo_red "[ERROR] 未找到 ./scripts 目录，请确保在项目根目录下运行脚本！"
+        exit 1
     fi
 }
 
@@ -265,30 +269,9 @@ generate_certificates() {
     source /root/singbox-manager/.env
 
     if [ -n "$CF_API_TOKEN" ] && [ -n "$CF_DOMAIN" ]; then
-        echo "[INFO] 检测到 Cloudflare API Token，尝试申请15年证书..."
+        echo "[INFO] 检测到 Cloudflare API Token，使用 cert_manager 申请长期证书..."
         cd /root/singbox-manager
-        python3 -c "
-import sys
-sys.path.insert(0, 'scripts')
-from cert_manager import request_cf_ssl_certificate, generate_self_signed_cert, ensure_cert_dir
-import os
-token = os.getenv('CF_API_TOKEN', '')
-domain = os.getenv('CF_DOMAIN', '')
-if token and domain:
-    result = request_cf_ssl_certificate(domain, token)
-    if result:
-        ensure_cert_dir()
-        with open('/root/singbox-manager/cert/cert.crt', 'w') as f:
-            f.write(result['certificate'])
-        with open('/root/singbox-manager/cert/cert.key', 'w') as f:
-            f.write(result['private_key'])
-        print('[OK] Cloudflare 15年证书申请成功')
-    else:
-        print('[WARN] Cloudflare 证书申请失败，降级为自签证书')
-        generate_self_signed_cert(domain)
-else:
-    generate_self_signed_cert(domain)
-" 2>/dev/null || {
+        python3 scripts/cert_manager.py --cf-cert 2>/dev/null || {
             echo_yellow "[WARN] Cloudflare 证书申请失败，使用自签证书"
             openssl req -x509 -nodes -newkey rsa:2048 \
                 -keyout "$CERT_DIR/cert.key" -out "$CERT_DIR/cert.crt" \
@@ -383,14 +366,30 @@ WorkingDirectory=/root/singbox-manager
 WantedBy=multi-user.target
 EOF
 
+    cat > /etc/systemd/system/singbox-tgbot.service << 'EOF'
+[Unit]
+Description=Singbox TG Bot
+After=network.target
+
+[Service]
+EnvironmentFile=/root/singbox-manager/.env
+ExecStart=/usr/bin/python3 /root/singbox-manager/scripts/tg_bot.py
+Restart=always
+RestartSec=10
+WorkingDirectory=/root/singbox-manager
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     systemctl daemon-reload
     echo_green "[OK] 服务创建完成"
 }
 
 start_services() {
     echo_yellow ">>> 启动服务..."
-    systemctl enable singbox singbox-sub singbox-cdn 2>/dev/null || true
-    systemctl restart singbox singbox-sub singbox-cdn 2>/dev/null || true
+    systemctl enable singbox singbox-sub singbox-cdn singbox-tgbot 2>/dev/null || true
+    systemctl restart singbox singbox-sub singbox-cdn singbox-tgbot 2>/dev/null || true
     echo_green "[OK] 服务启动完成"
 }
 

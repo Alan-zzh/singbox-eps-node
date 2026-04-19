@@ -219,7 +219,9 @@ def setup_hysteria2_port_hopping():
     """设置 Hysteria2 端口跳跃规则"""
     logger.info(">>> 设置 Hysteria2 端口跳跃规则 (21000-21200)...")
 
-    os.system('iptables -t nat -F PREROUTING')
+    if os.popen('iptables-save | grep "DNAT.*4433"').read():
+        os.popen('iptables-save | grep -v "DNAT.*4433" | iptables-restore')
+        logger.info("[INFO] 旧规则已清理")
 
     for port in range(21000, 21201):
         os.system(f'iptables -t nat -A PREROUTING -p udp --dport {port} -j DNAT --to-destination :4433')
