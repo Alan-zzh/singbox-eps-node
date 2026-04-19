@@ -224,14 +224,15 @@ def create_app():
                 sub_url = sub_url.strip()
                 if sub_url:
                     try:
-                        req = urllib.request.Request(sub_url)
+                        req = urllib.request.Request(sub_url, headers={'User-Agent': 'Mozilla/5.0'})
                         with urllib.request.urlopen(req, timeout=10) as resp:
-                            raw = resp.read().decode('utf-8')
+                            raw = resp.read().decode('utf-8').strip()
                             try:
-                                decoded = base64.b64decode(raw).decode('utf-8')
-                                links.extend(decoded.strip().split('\n'))
+                                padded_raw = raw + '=' * (-len(raw) % 4)
+                                decoded = base64.b64decode(padded_raw).decode('utf-8')
+                                links.extend([line for line in decoded.split('\n') if line.strip()])
                             except Exception:
-                                links.extend(raw.strip().split('\n'))
+                                links.extend([line for line in raw.split('\n') if line.strip()])
                     except Exception as e:
                         logger.warning(f"合并订阅失败 {sub_url}: {e}")
         content = '\n'.join(links)

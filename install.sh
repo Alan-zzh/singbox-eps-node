@@ -67,6 +67,11 @@ generate_env_file() {
     read -p "  请输入域名（直接回车跳过，使用IP）: " CF_DOMAIN
     CF_DOMAIN=${CF_DOMAIN:-""}
 
+    if [ -z "$CF_DOMAIN" ]; then
+        echo_yellow "[WARN] 未配置域名，CDN节点（VLESS-WS、VLESS-HTTPUpgrade、Trojan-WS）将无法使用CDN加速，将降级为直连"
+        echo_yellow "[WARN] 如需使用CDN，请在Cloudflare添加A记录并开启小橙云"
+    fi
+
     read -p "  请输入 Cloudflare API Token (申请15年证书, 回车跳过使用自签): " CF_API_TOKEN
     CF_API_TOKEN=${CF_API_TOKEN:-""}
 
@@ -301,7 +306,11 @@ else:
 setup_iptables_hysteria2() {
     echo_yellow ">>> 设置 Hysteria2 端口跳跃规则 (21000-21200)..."
 
-    iptables -t nat -F PREROUTING 2>/dev/null || true
+    echo_yellow ">>> 清理旧的跳跃规则..."
+    if iptables-save | grep -q "DNAT.*4433"; then
+        iptables-save | grep -v "DNAT.*4433" | iptables-restore
+        echo "[INFO] 旧规则已清理"
+    fi
 
     for port in $(seq 21000 21200); do
         iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination :4433 2>/dev/null || true

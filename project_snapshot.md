@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.12** (HTTPUpgrade协议版)
+**v1.0.13** (Bug修复与优化版)
 
 ---
 
@@ -14,22 +14,34 @@
 | v1.0.10 | 2026-04-20 | 终极验收：dotenv双保险/CF证书激活 |
 | v1.0.11 | 2026-04-20 | 合并订阅/重装系统/非ROOT自动切换 |
 | v1.0.12 | 2026-04-20 | 添加 VLESS-HTTPUpgrade 协议 (CDN节点) |
+| v1.0.13 | 2026-04-20 | 修复CF证书API/Base64填充/iptables优化/域名提示 |
 
 ---
 
-## 最新更新内容 (v1.0.12)
+## 最新更新内容 (v1.0.13)
 
-### 新增：VLESS-HTTPUpgrade 协议
-- **原理**: HTTPUpgrade 是对 HTTP 协议的升级机制，比传统 WebSocket 更轻量，握手过程更简单
-- **优势**: 
-  - 兼容性：解决了某些 CDN 或反向代理对 WS 支持不完美的问题
-  - 性能：在某些高并发场景下，性能表现优于 WS
-- **配置**:
-  - 端口: 8445
-  - 路径: /vless-upgrade
-  - 传输: httpupgrade
-  - 安全: TLS
-- **订阅链接**: 自动生成 `ePS-JP-VLESS-HTTPUpgrade` 节点，使用 CDN IP
+### 修复一：Cloudflare 证书 API 致命错误
+- **问题**: 原代码使用错误的参数格式 (`type: origin`, `host: domain`)，CF API 直接返回 400 错误
+- **修复方案**: 
+  - 先用 `openssl` 本地生成私钥和 CSR
+  - 使用正确参数: `hostnames`, `request_type: origin-rsa`, `csr`
+  - 私钥在本地生成，不需要 CF 返回
+- **效果**: Cloudflare 15年证书申请功能现在可以正常工作
+
+### 修复二：外部订阅合并 Base64 填充炸裂
+- **问题**: 很多机场的 Base64 订阅链接结尾不带 `=` 填充符，Python 严格解码会崩溃
+- **修复方案**: 增加 Base64 安全补齐逻辑 `padded_raw = raw + '=' * (-len(raw) % 4)`
+- **效果**: 合并任何机场订阅都不会再崩溃
+
+### 优化一：iptables 精准清理
+- **问题**: `iptables -t nat -F PREROUTING` 会清空所有端口转发规则，影响 Docker 等服务
+- **修复方案**: 改为精准清理 `iptables-save | grep -v "DNAT.*4433" | iptables-restore`
+- **效果**: 只清理 Hysteria2 相关规则，不影响其他服务
+
+### 优化二：无域名 CDN 提示
+- **问题**: 用户没填域名时，CDN 节点会失效但没有提示
+- **修复方案**: 安装时检测未配置域名，显示警告提示
+- **效果**: 用户明确知道需要配置域名才能使用 CDN 加速
 
 ### 当前节点列表 (5个)
 | 节点名称 | 协议 | 传输 | 安全 | CDN |
@@ -45,13 +57,13 @@
 ## 核心目录树
 ```
 singbox-eps-node/
-├── install.sh          # 主安装脚本 (v1.0.12)
+├── install.sh          # 主安装脚本 (v1.0.13)
 ├── scripts/
 │   ├── config.py       # 配置中心 (从.env读取)
 │   ├── config_generator.py  # Singbox配置生成器
-│   ├── subscription_service.py  # 订阅服务 (+dotenv+合并订阅)
+│   ├── subscription_service.py  # 订阅服务 (+dotenv+合并订阅+Base64修复)
 │   ├── cdn_monitor.py  # CDN监控
-│   ├── cert_manager.py # 证书管理 (CF API)
+│   ├── cert_manager.py # 证书管理 (CF API修复)
 │   └── logger.py       # 日志模块
 ├── docs/
 │   └── architecture.md # 架构文档

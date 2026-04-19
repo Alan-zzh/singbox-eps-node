@@ -65,8 +65,19 @@ def request_cf_ssl_certificate(domain, cf_api_token):
     """
     try:
         logger.info(f">>> 请求 Cloudflare SSL 证书 for {domain}...")
+        ensure_cert_dir()
 
-        api_url = f"https://api.cloudflare.com/client/v4/certificates"
+        csr_file = os.path.join(CERT_DIR, 'domain.csr')
+        subprocess.run(
+            ['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
+             '-keyout', KEY_FILE, '-out', csr_file, '-subj', f'/CN={domain}'],
+            capture_output=True, check=True
+        )
+
+        with open(csr_file, 'r') as f:
+            csr_content = f.read()
+
+        api_url = "https://api.cloudflare.com/client/v4/certificates"
 
         headers = {
             'Content-Type': 'application/json',
@@ -74,9 +85,10 @@ def request_cf_ssl_certificate(domain, cf_api_token):
         }
 
         payload = {
-            'type': 'origin',
-            'host': domain,
-            'requested_validity': 5475
+            'hostnames': [domain],
+            'requested_validity': 5475,
+            'request_type': 'origin-rsa',
+            'csr': csr_content
         }
 
         req = Request(api_url, data=json.dumps(payload).encode(), headers=headers, method='POST')
@@ -91,7 +103,7 @@ def request_cf_ssl_certificate(domain, cf_api_token):
                 logger.info(f"  有效期: {cert_data.get('expires_on')}")
                 return {
                     'certificate': cert_data.get('certificate'),
-                    'private_key': cert_data.get('private_key'),
+                    'private_key': None,
                     'expires_on': cert_data.get('expires_on')
                 }
             else:
@@ -144,8 +156,9 @@ def obtain_certificate():
         if cf_cert:
             with open(CERT_FILE, 'w') as f:
                 f.write(cf_cert['certificate'])
-            with open(KEY_FILE, 'w') as f:
-                f.write(cf_cert['private_key'])
+            if cf_cert.get('private_key'):
+                with open(KEY_FILE, 'w') as f:
+                    f.write(cf_cert['private_key'])
             logger.info(f"[OK] Cloudflare 证书已保存")
             return True
         else:
