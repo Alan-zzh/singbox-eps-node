@@ -85,9 +85,37 @@
    - `TECHNICAL_DOC.md`: 如果涉及架构/功能/配置变更，更新对应章节
 4. **验证**: 确认文档内容与代码实际行为一致，不允许"代码改了文档没改"
 
+### 规则11：区分"用户可见节点"和"幕后路由出站"（强制红线）
+**教训来源**: v1.0.48中将AI-SOCKS5作为"节点"加入Base64订阅和selector列表
+**Bug现象**: 
+- 用户在V2rayN节点列表中看到"AI-SOCKS5"节点，手动选择后无法正常使用
+- AI-SOCKS5本质是一个出站代理链路，不是独立代理节点
+- 用户选它=所有流量走SOCKS5=失去其他节点的分流能力，且SOCKS5本身可能不稳定
+**根本原因**: 
+- 技术文档明确写了"无感路由，用户无需手动选择"，但AI只理解了"SOCKS5是个代理"的字面意思
+- AI没有理解设计意图：SOCKS5是"幕后工作者"，只在路由规则里默默把AI流量牵制过去
+- AI看到"SOCKS5"就当成"节点"塞进节点列表，完全忽略了"无感"这个关键词
+**正确做法**:
+1. **用户可见节点**（出现在Base64订阅和ePS-Auto selector中）：VLESS-Reality、VLESS-WS、VLESS-HTTPUpgrade、Trojan-WS、Hysteria2
+2. **幕后路由出站**（只出现在sing-box JSON的outbounds和route.rules中）：AI-SOCKS5
+3. 判断标准：如果一个出站的作用是"让特定流量自动走此出站，用户不需要手动选择"，那它就是幕后路由出站，不应暴露给用户
+4. 禁止将幕后路由出站加入：Base64订阅链接、ePS-Auto selector可选列表、首页HTML节点列表
+
 ---
 
 ## Bug 修复历史
+
+### Bug #9: AI-SOCKS5被错误地作为用户可见节点暴露
+- **版本**: v1.0.48 → v1.0.49
+- **日期**: 2026-04-21
+- **现象**: 用户在V2rayN节点列表中看到"AI-SOCKS5"节点，首页HTML写着"包含6个节点"
+- **根因**: AI实现SOCKS5功能时，只理解了"SOCKS5是个代理"的字面意思，把它当成普通节点塞进了Base64订阅链接和ePS-Auto selector。完全忽略了技术文档中"无感路由，用户无需手动选择"的设计意图
+- **修复**:
+  1. subscription_service.py: 移除generate_all_links()中的socks5://链接
+  2. subscription_service.py: 移除ePS-Auto selector中的"AI-SOCKS5"选项
+  3. subscription_service.py: 修复首页HTML从"6个节点"改为"5个节点"
+  4. TECHNICAL_DOC.md: 明确AI-SOCKS5是幕后路由出站，不是用户可见节点
+- **预防**: 规则11
 
 ### Bug #8: HY2端口跳跃目标端口错误（4433→443）
 - **版本**: v1.0.44 → v1.0.45

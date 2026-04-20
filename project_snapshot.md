@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.48** (脱敏处理+一键安装脚本+GitHub公开仓库)
+**v1.0.49** (修复AI-SOCKS5被错误暴露为用户节点)
 
 ---
 
@@ -23,28 +23,28 @@
 | v1.0.46 | 2026-04-21 | HY2双协议保障恢复+SOCKS5 AI路由文档补全+铁律10文档同步 |
 | v1.0.47 | 2026-04-21 | HY2端口跳跃无感切换：sing-box配置添加hop_ports字段 |
 | v1.0.48 | 2026-04-21 | 脱敏处理+一键安装脚本+GitHub仓库公开+临时脚本清理 |
+| v1.0.49 | 2026-04-21 | 修复AI-SOCKS5被错误暴露为用户节点+新增铁律11 |
 
 ---
 
-## 最新更新内容 (v1.0.48)
+## 最新更新内容 (v1.0.49)
 
-### 1. 全面脱敏处理
-- 所有代码和文档中的IP地址、域名、密码、Token替换为占位符或从环境变量读取
-- 删除26个临时check/deploy/test脚本（含硬编码凭据）
-- 创建 .gitignore 排除 .env、cert/、logs/、backups/ 等敏感目录
-- 创建 .env.example 作为配置模板
+### 修复AI-SOCKS5被错误暴露为用户可见节点
+**问题**: AI-SOCKS5被错误地加入Base64订阅链接和ePS-Auto selector，用户在客户端看到"AI-SOCKS5"节点
+**根因**: AI只理解了"SOCKS5是个代理"的字面意思，忽略了"无感路由，用户无需手动选择"的设计意图
+**修复**:
+- subscription_service.py: 移除generate_all_links()中的socks5://链接
+- subscription_service.py: 移除ePS-Auto selector中的"AI-SOCKS5"选项
+- subscription_service.py: 修复首页HTML从"6个节点"改为"5个节点"
+- TECHNICAL_DOC.md: 明确AI-SOCKS5是幕后路由出站，不是用户可见节点
+- AI_DEBUG_HISTORY.md: 新增铁律11（区分"用户可见节点"和"幕后路由出站"）
 
-### 2. 一键安装脚本 (install.sh)
-- 全自动部署：检测系统→安装依赖→安装Singbox→克隆仓库→生成密码→配置证书→启动服务
-- 自动生成UUID/密码/Reality密钥对
-- 自动检测服务器公网IP
-- 支持Cloudflare API Token自动申请15年证书
-- 自动配置HY2端口跳跃iptables规则（UDP+TCP双协议）
-- 安装完成后自动验证并输出订阅链接
-
-### 3. GitHub仓库
-- 仓库地址：https://github.com/Alan-zzh/singbox-eps-node
-- 一键安装命令：`bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)`
+### AI-SOCKS5的正确行为
+- ✅ 出现在sing-box JSON的outbounds（ai-residential出站）
+- ✅ 出现在sing-box JSON的route.rules（AI域名→ai-residential）
+- ❌ 不出现在Base64订阅链接中
+- ❌ 不出现在ePS-Auto selector可选列表中
+- ❌ 不出现在首页HTML节点列表中
 
 ---
 

@@ -17,13 +17,19 @@
 | singbox-sub订阅 | 2087 | HTTPS (CDN支持) | ✅ active |
 | singbox-cdn监控 | - | 定时任务(每小时) | ✅ active |
 
-### 节点列表（5-6个，取决于SOCKS5是否配置）
+### 节点列表（5个用户可见节点 + 1个幕后路由出站）
 1. **{CC}-VLESS-Reality**: {SERVER_IP}:443 (直连，Reality协议)
 2. **{CC}-VLESS-WS-CDN**: Cloudflare优选IP:8443 (CDN)
 3. **{CC}-VLESS-HTTPUpgrade-CDN**: Cloudflare优选IP:2053 (CDN)
 4. **{CC}-Trojan-WS-CDN**: Cloudflare优选IP:2083 (CDN)
 5. **{CC}-Hysteria2**: {SERVER_IP}:443 (直连，端口跳跃21000-21200→443)
-6. **AI-SOCKS5**: {AI_SOCKS5_SERVER}:{AI_SOCKS5_PORT} (外部代理，可选)
+
+⚠️ **AI-SOCKS5不是用户可见节点，是幕后路由出站**：
+- 不出现在Base64订阅链接中
+- 不出现在ePS-Auto selector的可选列表中
+- 仅出现在sing-box JSON的outbounds（ai-residential）和route.rules中
+- 用户在客户端节点列表中看不到AI-SOCKS5
+- AI网站流量自动走SOCKS5，用户无感，无需手动选择
 
 ---
 
@@ -75,9 +81,12 @@
 - **X/推特/groK排除**（不走SOCKS5，走直连）:
   - x.com, twitter.com, twimg.com, t.co, x.ai, grok.com
   - 关键词: twitter, grok
-- **Base64订阅**: 条件生成 `socks5://{user}:{pass}@{server}:{port}#AI-SOCKS5`
-- **sing-box配置**: 条件生成outbound + selector + 路由规则
+- **sing-box配置**: 条件生成outbound（ai-residential）+ 路由规则
 - **未配置时**: 不生成任何SOCKS5相关节点和规则，不影响其他节点
+- ⚠️ **AI-SOCKS5是幕后路由出站，不是用户可见节点**：
+  - 禁止将AI-SOCKS5加入Base64订阅链接
+  - 禁止将AI-SOCKS5加入ePS-Auto selector的可选列表
+  - 用户在客户端节点列表中不应看到AI-SOCKS5
 
 ---
 

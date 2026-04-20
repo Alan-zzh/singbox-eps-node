@@ -16,13 +16,18 @@ Date: 2026-04-20
   ⚠️ 必须使用域名访问（走CDN），IP访问会导致SSL证书不匹配
   ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
-节点命名规则: {国家代码}-{协议}
+节点命名规则: {国家代码}-{协议}（共5个用户可见节点）
 - JP-VLESS-Reality (直连节点，苹果域名伪装)
 - JP-VLESS-WS (CDN节点，独立优选IP)
 - JP-VLESS-HTTPUpgrade (CDN节点，独立优选IP)
 - JP-Trojan-WS (CDN节点，独立优选IP)
 - JP-Hysteria2 (直连节点，端口跳跃)
-- AI-SOCKS5 (外部代理节点)
+
+⚠️ AI-SOCKS5不是用户节点，是幕后路由出站：
+- 仅出现在sing-box JSON的outbounds和route.rules中
+- 用户在客户端节点列表中看不到AI-SOCKS5
+- AI网站流量自动走SOCKS5，用户无感，无需手动选择
+- 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
 """
 
 import os
@@ -192,18 +197,6 @@ def generate_all_links():
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
     links.append(f"hysteria2://{HYSTERIA2_PASSWORD}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-Hysteria2")
 
-    # 6. SOCKS5 (AI协议牵制节点) - 从环境变量读取，禁止硬编码凭据
-    # ⚠️ SOCKS5 AI路由规则说明（写死的，禁止随意修改域名列表）：
-    # - 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量时自动生效
-    # - AI网站自动走SOCKS5（出站标签ai-residential）：openai/chatgpt/anthropic/claude/gemini/aistudio/perplexity/midjourney/stability/cohere/replicate/google/googleapis/gstatic
-    # - X/推特/groK排除（走direct，不走SOCKS5）：x.com/twitter.com/twimg.com/t.co/x.ai/grok.com
-    # - 未配置SOCKS5时：不生成任何SOCKS5相关节点和规则，不影响其他节点
-    # - 这些规则在sing-box JSON配置中的route.rules里实现，用户导入后无感生效
-    if AI_SOCKS5_SERVER and AI_SOCKS5_PORT:
-        socks5_auth = f"{AI_SOCKS5_USER}:{AI_SOCKS5_PASS}@" if (AI_SOCKS5_USER and AI_SOCKS5_PASS) else ""
-        socks5_link = f"socks5://{socks5_auth}{AI_SOCKS5_SERVER}:{AI_SOCKS5_PORT}#AI-SOCKS5"
-        links.append(socks5_link)
-
     return links
 
 def generate_singbox_config():
@@ -277,6 +270,8 @@ def generate_singbox_config():
             }
         ],
         "outbounds": [
+            # ePS-Auto: 用户可见的节点选择器（只包含5个代理节点+direct）
+            # ⚠️ AI-SOCKS5不在此列表中，它是幕后路由出站，用户不应手动选择
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
@@ -286,12 +281,13 @@ def generate_singbox_config():
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
                     f"{COUNTRY_CODE}-Hysteria2",
-                ] + (["AI-SOCKS5"] if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else []) + [
                     "direct"
                 ],
                 "default": f"{COUNTRY_CODE}-VLESS-Reality"
             },
         ] + ([{
+                # ai-residential: 幕后路由出站，AI网站流量自动走此出站
+                # 用户在客户端看不到这个选项，路由规则自动匹配AI域名后走SOCKS5
                 "type": "selector",
                 "tag": "ai-residential",
                 "outbounds": ["AI-SOCKS5"],
@@ -544,7 +540,7 @@ def create_app():
             <div class="sub-box">
                 <p><strong>Base64订阅链接：</strong></p>
                 <p class="sub-link">https://{server}:{port}/sub/{country}</p>
-                <p class="info">（包含6个节点：{country}-VLESS-Reality、{country}-VLESS-WS、{country}-VLESS-HTTPUpgrade、{country}-Trojan-WS、{country}-Hysteria2、AI-SOCKS5）</p>
+                <p class="info">（包含5个节点：{country}-VLESS-Reality、{country}-VLESS-WS、{country}-VLESS-HTTPUpgrade、{country}-Trojan-WS、{country}-Hysteria2）</p>
             </div>
             <div class="sub-box">
                 <p><strong>sing-box JSON配置（含自动路由）：</strong></p>
