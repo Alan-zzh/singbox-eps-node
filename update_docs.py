@@ -1,4 +1,12 @@
-# 项目状态快照 (Project Snapshot)
+#!/usr/bin/env python3
+"""更新文档"""
+import os
+
+LOCAL_DIR = r'd:\Documents\Syncdisk\工作用\job\S-ui\singbox-eps-node'
+os.chdir(LOCAL_DIR)
+
+# 更新project_snapshot.md
+snapshot = """# 项目状态快照 (Project Snapshot)
 
 ## 当前版本
 **v1.0.35** (文档完善+状态确认)
@@ -24,9 +32,9 @@
 3. 申请证书: `~/.acme.sh/acme.sh --issue --dns dns_cf -d jp.290372913.xyz --server letsencrypt`
 4. 安装证书到项目: 
 ```bash
-~/.acme.sh/acme.sh --install-cert -d jp.290372913.xyz \
-    --cert-file /root/singbox-eps-node/cert/cert.pem \
-    --key-file /root/singbox-eps-node/cert/key.pem \
+~/.acme.sh/acme.sh --install-cert -d jp.290372913.xyz \\
+    --cert-file /root/singbox-eps-node/cert/cert.pem \\
+    --key-file /root/singbox-eps-node/cert/key.pem \\
     --fullchain-file /root/singbox-eps-node/cert/fullchain.pem
 ```
 
@@ -122,3 +130,18 @@
 - [ ] 清理重复的cron任务
 - [ ] 开发SOCKS5自动切换功能（需要更多节点）
 - [ ] 验证HTTPS订阅在客户端的连通性
+"""
+
+with open(os.path.join(LOCAL_DIR, 'project_snapshot.md'), 'w', encoding='utf-8') as f:
+    f.write(snapshot)
+print('✅ project_snapshot.md已更新')
+
+# 删除临时脚本
+import os
+for f in ['check_status.py']:
+    path = os.path.join(LOCAL_DIR, f)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f'✅ 已删除: {f}')
+
+print('\n✅ 完成')
