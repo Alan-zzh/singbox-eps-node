@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.49** (修复AI-SOCKS5被错误暴露为用户节点)
+**v1.0.50** (全面排查隐藏坑+跨文件一致性修复)
 
 ---
 
@@ -24,6 +24,58 @@
 | v1.0.47 | 2026-04-21 | HY2端口跳跃无感切换：sing-box配置添加hop_ports字段 |
 | v1.0.48 | 2026-04-21 | 脱敏处理+一键安装脚本+GitHub仓库公开+临时脚本清理 |
 | v1.0.49 | 2026-04-21 | 修复AI-SOCKS5被错误暴露为用户节点+新增铁律11 |
+| v1.0.50 | 2026-04-21 | 全面排查13个隐藏坑+跨文件一致性修复 |
+
+---
+
+## 最新更新内容 (v1.0.50)
+
+### 全面排查隐藏坑+跨文件一致性修复
+对项目所有文件进行逐行审查，发现并修复13个隐藏问题：
+
+**坑1: README.md仍把AI-SOCKS5列为"节点"** → 移除第6条，添加幕后路由出站说明
+
+**坑2+3: config_generator.py AI路由规则不完整**
+- 缺少aistudio.google.com、google.com、googleapis.com、gstatic.com
+- 缺少aistudio关键词
+- 缺少X/推特/groK排除规则
+→ 补全所有域名和排除规则，与subscription_service.py保持一致
+
+**坑4+5: tg_bot.py订阅链接端口硬编码6969**
+- 默认值是6969（v1.0.42之前的老端口）
+- 没有从config.py导入SUB_PORT
+→ 改为从config.py导入SUB_PORT=2087
+
+**坑6: tg_bot.py设置住宅后只重启singbox不重启singbox-sub**
+- SOCKS5配置变更后subscription_service.py也需要重启
+→ update_env_and_restart()增加重启singbox-sub
+
+**坑7: health_check.sh用curl -sk测试**
+- 本地测试用-k合理（localhost域名不匹配），但缺少域名访问测试
+→ 增加域名访问检查（不使用-k，模拟真实客户端验证SSL证书）
+
+**坑8: subscription_service.py SSL证书路径不一致**
+- Flask启动时硬编码fullchain.pem，但cert_manager.py自签名证书生成cert.crt
+→ 增加证书路径自动检测：优先fullchain.pem，降级cert.crt
+
+**坑9: config_generator.py SOCKS5出站结构与subscription_service.py不一致**
+- config_generator.py直接用socks类型tag=ai-residential
+- subscription_service.py用selector(ai-residential)包裹socks(AI-SOCKS5)
+→ 对齐为selector+socks双层结构
+
+**坑10: install.sh依赖包名错误**
+- `dig`不是独立包名，它在`dnsutils`包里
+→ 改为dnsutils
+
+**坑11: TECHNICAL_DOC.md版本号过时v1.0.45** → 更新为v1.0.50
+
+**坑12: subscription_service.py变量覆盖**
+- SERVER_IP/CF_DOMAIN/VLESS_UPGRADE_PORT从config.py导入后又被os.getenv覆盖
+→ 优先使用config.py的值，降级使用os.getenv
+
+**坑13: cert_manager.py重复导入和变量覆盖**
+- 两次from config import，os.getenv覆盖CF_DOMAIN
+→ 合并导入，CF_API_TOKEN改用_load_cf_api_token()函数读取
 
 ---
 
@@ -175,13 +227,14 @@ bash /root/singbox-eps-node/scripts/health_check.sh
 - ⚠️ **禁止用IP访问**: IP访问会导致SSL证书域名不匹配
 - ⚠️ **CF_DOMAIN从.env动态读取**: 不再硬编码域名
 
-## 节点列表（5-6个，取决于SOCKS5是否配置）
+## 节点列表（5个用户可见节点）
 1. ePS-JP-VLESS-Reality: {SERVER_IP}:443 (直连)
 2. ePS-JP-VLESS-WS-CDN: 优选IP:8443 (CDN，每小时DNS解析更新)
 3. ePS-JP-VLESS-HTTPUpgrade-CDN: 优选IP:2053 (CDN，每小时DNS解析更新)
 4. ePS-JP-Trojan-WS-CDN: 优选IP:2083 (CDN，每小时DNS解析更新)
 5. ePS-JP-Hysteria2: {SERVER_IP}:443 (直连，端口跳跃21000-21200→443，UDP+TCP)
-6. AI-SOCKS5: {AI_SOCKS5_SERVER}:{AI_SOCKS5_PORT} (外部代理，可选)
+
+⚠️ AI-SOCKS5不是用户可见节点，是幕后路由出站（仅出现在sing-box JSON的outbounds和route.rules中）
 
 ## 核心目录
 ```
@@ -253,6 +306,5 @@ SUB_TOKEN=          # 订阅Token（可选）
 11. **⚠️ 改代码必须同步更新文档**: 代码改了文档没改=文档过时=下一个AI犯错
 
 ## 下一步待办
-- [ ] 部署v1.0.45到服务器并验证所有功能
-- [ ] 修复服务器上HY2端口跳跃iptables规则（4433→443）
+- [ ] 部署v1.0.50到服务器并验证所有功能
 - [ ] 开发SOCKS5自动切换功能（需要更多节点）

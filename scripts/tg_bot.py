@@ -35,6 +35,16 @@ def load_env():
 
 load_env()
 
+# ⚠️ 从config.py读取端口，禁止硬编码（历史教训：v1.0.42前默认6969导致服务不可达）
+# SUB_PORT=2087硬编码在config.py中，不在.env中，必须从config.py导入
+sys.path.insert(0, os.path.join(BASE_DIR, 'scripts'))
+try:
+    from config import SUB_PORT as CONFIG_SUB_PORT, CF_DOMAIN as CONFIG_CF_DOMAIN, SERVER_IP as CONFIG_SERVER_IP
+except ImportError:
+    CONFIG_SUB_PORT = 2087
+    CONFIG_CF_DOMAIN = ''
+    CONFIG_SERVER_IP = ''
+
 if not BOT_TOKEN:
     print("[ERROR] 未配置 TG_BOT_TOKEN，请在 .env 中添加")
     sys.exit(1)
@@ -124,10 +134,10 @@ def update_cdn():
         return f"❌ 异常: {e}"
 
 def get_sub_link():
-    domain = os.getenv('CF_DOMAIN', '')
-    ip = os.getenv('SERVER_IP', '')
-    addr = domain if domain else ip
-    sub_port = os.getenv('SUB_PORT', '6969')
+    # ⚠️ 端口从config.py读取，禁止硬编码6969（历史教训：v1.0.42前默认6969导致服务不可达）
+    # 域名优先使用config.py的值（从.env读取+自动检测），不重复读环境变量
+    addr = CONFIG_CF_DOMAIN if CONFIG_CF_DOMAIN else CONFIG_SERVER_IP or os.getenv('SERVER_IP', '')
+    sub_port = CONFIG_SUB_PORT
     country = os.getenv('COUNTRY_CODE', 'JP')
     return f"🔗 订阅链接:\nhttps://{addr}:{sub_port}/sub/{country}"
 
@@ -155,7 +165,10 @@ def set_bot_commands():
         print(f"[WARN] 设置命令菜单失败: {e}")
 
 def update_env_and_restart(key, value):
-    """更新.env并重启Singbox"""
+    """更新.env并重启Singbox和订阅服务
+    ⚠️ SOCKS5配置变更后，subscription_service.py也需要重启才能生效
+    （它从环境变量读取AI_SOCKS5_*，不重启则生成的sing-box JSON不包含新配置）
+    """
     env_path = os.path.join(BASE_DIR, '.env')
     lines = []
     found = False
@@ -174,6 +187,7 @@ def update_env_and_restart(key, value):
     os.environ[key] = value
     subprocess.run(['python3', os.path.join(BASE_DIR, 'scripts/config_generator.py')], capture_output=True)
     subprocess.run(['systemctl', 'restart', 'singbox'], capture_output=True)
+    subprocess.run(['systemctl', 'restart', 'singbox-sub'], capture_output=True)
 
 def handle_ai_socks5(action, params=None):
     """处理AI SOCKS5设置"""

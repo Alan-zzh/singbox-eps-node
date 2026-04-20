@@ -20,13 +20,17 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 
 安装完成后，编辑 `/root/singbox-eps-node/.env` 填入你的配置。
 
-## 节点列表
+## 节点列表（5个用户可见节点）
 1. {CC}-VLESS-Reality (直连)
 2. {CC}-VLESS-WS-CDN (CDN优选IP)
 3. {CC}-VLESS-HTTPUpgrade-CDN (CDN优选IP)
 4. {CC}-Trojan-WS-CDN (CDN优选IP)
 5. {CC}-Hysteria2 (直连，端口跳跃)
-6. AI-SOCKS5 (外部SOCKS5节点，可选)
+
+⚠️ AI-SOCKS5不是用户可见节点，是幕后路由出站：
+- 仅出现在sing-box JSON的outbounds和route.rules中
+- AI网站流量自动走SOCKS5，用户无感，无需手动选择
+- 不出现在Base64订阅链接或客户端节点列表中
 
 ## 端口配置
 | 端口 | 协议 | 用途 |

@@ -102,21 +102,39 @@ check_ports() {
 
 # ============================================================
 # 4. 订阅接口可用性检查
+# ⚠️ 本地localhost测试用-k是合理的（证书颁发给域名，localhost域名不匹配）
+# 但同时需要验证域名访问的证书是否正常
 # ============================================================
 check_subscription() {
     log "--- 订阅接口检查 ---"
+    
+    # 本地进程检查（不验证证书，因为localhost域名不匹配）
     RESPONSE=$(curl -sk --connect-timeout 5 https://localhost:2087/sub/JP 2>&1)
     if [ -n "$RESPONSE" ] && [ ${#RESPONSE} -gt 50 ]; then
-        log "  订阅接口: ✅ 正常 (返回${#RESPONSE}字节)"
+        log "  订阅接口(本地): ✅ 正常 (返回${#RESPONSE}字节)"
     else
-        log "  订阅接口: ❌ 异常，尝试重启订阅服务..."
+        log "  订阅接口(本地): ❌ 异常，尝试重启订阅服务..."
         systemctl restart singbox-sub
         sleep 5
         RESPONSE2=$(curl -sk --connect-timeout 5 https://localhost:2087/sub/JP 2>&1)
         if [ -n "$RESPONSE2" ] && [ ${#RESPONSE2} -gt 50 ]; then
-            log "  订阅接口: ✅ 重启后恢复 (返回${#RESPONSE2}字节)"
+            log "  订阅接口(本地): ✅ 重启后恢复 (返回${#RESPONSE2}字节)"
         else
-            log "  订阅接口: ❌ 重启后仍异常，需要人工介入"
+            log "  订阅接口(本地): ❌ 重启后仍异常，需要人工介入"
+        fi
+    fi
+
+    # 域名访问检查（验证SSL证书是否匹配，不使用-k，模拟真实客户端）
+    CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+    if [ -n "$CF_DOMAIN" ]; then
+        DOMAIN_RESPONSE=$(curl -s --connect-timeout 5 "https://${CF_DOMAIN}:2087/sub/JP" 2>&1)
+        CURL_EXIT=$?
+        if [ $CURL_EXIT -eq 0 ] && [ -n "$DOMAIN_RESPONSE" ] && [ ${#DOMAIN_RESPONSE} -gt 50 ]; then
+            log "  订阅接口(域名${CF_DOMAIN}): ✅ 证书匹配，正常访问"
+        elif [ $CURL_EXIT -eq 60 ]; then
+            log "  订阅接口(域名${CF_DOMAIN}): ❌ SSL证书不匹配！需要检查证书配置"
+        else
+            log "  订阅接口(域名${CF_DOMAIN}): ⚠️ 无法通过域名访问（exit=$CURL_EXIT），可能CDN未配置"
         fi
     fi
 }

@@ -62,15 +62,21 @@ except ImportError:
 
 logger = get_logger('subscription_service')
 
-SERVER_IP = os.getenv('SERVER_IP', '')
-CF_DOMAIN = os.getenv('CF_DOMAIN', '')
+# ⚠️ 以下变量从环境变量读取，不从config.py导入（config.py不导出这些值）
+# SERVER_IP和CF_DOMAIN优先使用config.py的值（已从.env读取+自动检测）
+# 如果config.py导入失败，降级使用os.getenv
+SERVER_IP = SERVER_IP if SERVER_IP else os.getenv('SERVER_IP', '')
+CF_DOMAIN = CF_DOMAIN if CF_DOMAIN else os.getenv('CF_DOMAIN', '')
 DB_PATH = DB_FILE if 'DB_FILE' in dir() else os.path.join(DATA_DIR, 'singbox.db')
 COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'JP')
 USE_DOMAIN = bool(CF_DOMAIN and CF_DOMAIN.strip() != '')
 
+# 协议密码和UUID：这些值只在.env中，config.py不导出，必须从环境变量读取
 VLESS_UUID = os.getenv('VLESS_UUID', '')
 VLESS_WS_UUID = os.getenv('VLESS_WS_UUID', '')
-VLESS_UPGRADE_PORT = int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
+# ⚠️ VLESS_UPGRADE_PORT优先使用config.py的硬编码值（2053，已锁定）
+# 如果config.py导入失败，降级使用环境变量
+VLESS_UPGRADE_PORT = VLESS_UPGRADE_PORT if 'VLESS_UPGRADE_PORT' in dir() else int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
 TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
 HYSTERIA2_PASSWORD = os.getenv('HYSTERIA2_PASSWORD', '')
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
@@ -648,6 +654,24 @@ if __name__ == '__main__':
     logger.info(f"Starting HTTPS subscription service on 0.0.0.0:{SUB_PORT}")
     logger.info(f"Base64订阅: https://{sub_domain}:{SUB_PORT}/sub/{COUNTRY_CODE}")
     logger.info(f"sing-box JSON: https://{sub_domain}:{SUB_PORT}/singbox/{COUNTRY_CODE}")
+
+    # ⚠️ SSL证书路径：优先使用fullchain.pem（Let's Encrypt/Cloudflare正式证书）
+    # 如果fullchain.pem不存在，降级使用cert.crt（cert_manager.py自签名证书）
+    # cert_manager.py自签名证书文件名：cert.crt + cert.key
+    # Cloudflare API证书文件名：cert.crt + cert.key（写入CERT_FILE/KEY_FILE）
+    # Let's Encrypt证书文件名：fullchain.pem + key.pem（acme.sh生成）
+    cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
+    cert_key = os.path.join(CERT_DIR, 'key.pem')
+    if not os.path.exists(cert_chain):
+        cert_chain = os.path.join(CERT_DIR, 'cert.crt')
+    if not os.path.exists(cert_key):
+        cert_key = os.path.join(CERT_DIR, 'cert.key')
+
+    if not os.path.exists(cert_chain) or not os.path.exists(cert_key):
+        logger.error(f"SSL证书文件不存在: {cert_chain} 或 {cert_key}")
+        logger.error("请先运行 cert_manager.py 生成证书")
+        sys.exit(1)
+
+    logger.info(f"SSL证书: {cert_chain}")
     app.run(host='0.0.0.0', port=SUB_PORT, threaded=True,
-            ssl_context=(os.path.join(CERT_DIR, 'fullchain.pem'),
-                         os.path.join(CERT_DIR, 'key.pem')))
+            ssl_context=(cert_chain, cert_key))

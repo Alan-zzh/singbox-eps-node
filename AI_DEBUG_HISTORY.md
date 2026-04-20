@@ -101,6 +101,29 @@
 3. 判断标准：如果一个出站的作用是"让特定流量自动走此出站，用户不需要手动选择"，那它就是幕后路由出站，不应暴露给用户
 4. 禁止将幕后路由出站加入：Base64订阅链接、ePS-Auto selector可选列表、首页HTML节点列表
 
+### 规则12：修改功能必须同步更新所有实现该功能的文件（强制红线）
+**教训来源**: v1.0.50全面审查发现13个隐藏问题，根因是修改subscription_service.py时没有同步更新config_generator.py、tg_bot.py、README.md等
+**Bug现象**:
+- subscription_service.py的AI路由规则完整，config_generator.py缺少域名和排除规则
+- subscription_service.py的SOCKS5出站用selector+socks双层结构，config_generator.py用单层socks
+- tg_bot.py订阅链接端口硬编码6969，config.py已经改成2087
+- README.md把AI-SOCKS5列为第6个节点，与铁律11冲突
+**根本原因**:
+- AI只修改了"正在处理的文件"，没有全局搜索所有引用该功能的文件
+- 每个文件独立实现相同功能，没有统一引用config.py作为唯一真相源
+- 修改后只更新了"主要文档"，没有检查README、TECHNICAL_DOC等所有文档
+**正确做法**:
+1. 修改任何功能前，必须全局搜索所有引用该功能的文件：`grep -r "关键词" scripts/ *.md`
+2. 功能实现必须统一引用config.py作为唯一真相源，禁止各文件独立实现
+3. 修改后必须检查所有相关文件是否需要同步更新：
+   - subscription_service.py（订阅服务）
+   - config_generator.py（配置生成器）
+   - tg_bot.py（TG机器人）
+   - README.md（公开文档）
+   - TECHNICAL_DOC.md（技术文档）
+   - health_check.sh（健康检查）
+   - install.sh（安装脚本）
+
 ---
 
 ## Bug 修复历史
@@ -116,6 +139,18 @@
   3. subscription_service.py: 修复首页HTML从"6个节点"改为"5个节点"
   4. TECHNICAL_DOC.md: 明确AI-SOCKS5是幕后路由出站，不是用户可见节点
 - **预防**: 规则11
+
+### Bug #10: 跨文件配置不一致导致多处隐藏问题
+- **版本**: v1.0.49 → v1.0.50
+- **日期**: 2026-04-21
+- **现象**: 全面审查发现13个隐藏问题：README把AI-SOCKS5列为节点、config_generator.py缺少AI路由域名和排除规则、tg_bot.py端口硬编码6969、设置住宅后不重启singbox-sub、SSL证书路径不一致、SOCKS5出站结构不一致、install.sh包名错误、文档版本过时、变量覆盖等
+- **根因**: 
+  - 多个文件独立实现相同功能，没有统一引用config.py作为唯一真相源
+  - 修改一个文件时没有全局搜索所有引用该配置的文件（违反规则9）
+  - 新增功能时只在subscription_service.py实现，没有同步更新config_generator.py
+  - 文档更新不彻底（违反规则10）
+- **修复**: 详见project_snapshot.md v1.0.50更新内容
+- **预防**: 规则12
 
 ### Bug #8: HY2端口跳跃目标端口错误（4433→443）
 - **版本**: v1.0.44 → v1.0.45

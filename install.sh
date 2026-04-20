@@ -45,7 +45,7 @@ detect_os() {
 install_dependencies() {
     log_step "安装系统依赖..."
     apt-get update -y
-    apt-get install -y curl wget unzip python3 python3-pip python3-venv cron iptables-persistent sqlite3 dig openssl
+    apt-get install -y curl wget unzip python3 python3-pip python3-venv cron iptables-persistent sqlite3 dnsutils openssl
 }
 
 uninstall_old_panels() {

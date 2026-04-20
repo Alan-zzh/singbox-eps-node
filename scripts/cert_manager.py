@@ -30,31 +30,24 @@ except ImportError:
         logging.basicConfig(level=logging.INFO)
         return logging.getLogger(name)
 
-logger = get_logger('cert_manager')
-
-try:
-    from config import CERT_DIR, BASE_DIR
-except ImportError:
     CERT_DIR = '/root/singbox-eps-node/cert'
     BASE_DIR = '/root/singbox-eps-node'
+    CF_DOMAIN = ''
+    CERT_VALIDITY_DAYS = 365
+    SERVER_IP = ''
+
+logger = get_logger('cert_manager')
 
 CERT_FILE = os.path.join(CERT_DIR, 'cert.crt')
 KEY_FILE = os.path.join(CERT_DIR, 'cert.key')
-CERT_VALIDITY_DAYS = 365
 
-CF_API_TOKEN = os.getenv('CF_API_TOKEN', '')
-CF_DOMAIN = os.getenv('CF_DOMAIN', '')
-
-def ensure_cert_dir():
-    """确保证书目录存在"""
-    os.makedirs(CERT_DIR, exist_ok=True)
-
-def get_cf_api_token():
-    """获取 Cloudflare API Token"""
+# ⚠️ CF_API_TOKEN从.env读取，不直接用os.getenv覆盖config.py的CF_DOMAIN
+# config.py的CF_DOMAIN已经从.env读取过了，这里直接用导入的值
+def _load_cf_api_token():
+    """从.env文件读取CF_API_TOKEN（不在环境变量中，必须从文件读取）"""
     token = os.getenv('CF_API_TOKEN', '')
     if token:
         return token
-
     env_file = os.path.join(BASE_DIR, '.env')
     if os.path.exists(env_file):
         with open(env_file, 'r') as f:
@@ -62,6 +55,16 @@ def get_cf_api_token():
                 if line.startswith('CF_API_TOKEN='):
                     return line.split('=', 1)[1].strip()
     return ''
+
+CF_API_TOKEN = _load_cf_api_token()
+
+def ensure_cert_dir():
+    """确保证书目录存在"""
+    os.makedirs(CERT_DIR, exist_ok=True)
+
+def get_cf_api_token():
+    """获取 Cloudflare API Token"""
+    return CF_API_TOKEN
 
 def request_cf_ssl_certificate(domain, cf_api_token):
     """

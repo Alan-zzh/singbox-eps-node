@@ -169,8 +169,16 @@ config = {
         {"type": "direct", "tag": "direct"},
         {"type": "block", "tag": "block"}
     ] + ([{
-        "type": "socks",
+        # ⚠️ AI-SOCKS5是幕后路由出站，不是用户可见节点
+        # 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
+        # 用户在客户端节点列表中看不到AI-SOCKS5，AI网站流量自动走此出站
+        "type": "selector",
         "tag": "ai-residential",
+        "outbounds": ["AI-SOCKS5"],
+        "default": "AI-SOCKS5"
+    }, {
+        "type": "socks",
+        "tag": "AI-SOCKS5",
         "server": ai_socks5_server,
         "server_port": int(ai_socks5_port),
         "version": "5",
@@ -182,14 +190,26 @@ config = {
             {"geoip": "cn", "outbound": "direct"},
             {"geosite": "cn", "outbound": "direct"},
         ] + ([{
+            # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
+            # 出站标签ai-residential → AI-SOCKS5节点
+            # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
+            # 排除规则在下方（X/推特/groK走direct）
             "domain_suffix": [
                 "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
                 "gemini.google.com", "bard.google.com", "ai.google",
-                "perplexity.ai", "midjourney.com", "stability.ai",
-                "cohere.com", "replicate.com"
+                "aistudio.google.com", "perplexity.ai", "midjourney.com",
+                "stability.ai", "cohere.com", "replicate.com",
+                "google.com", "googleapis.com", "gstatic.com"
             ],
-            "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity"],
+            "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio"],
             "outbound": "ai-residential"
+        }, {
+            # ⚠️ 排除X/推特/groK（不走SOCKS5，走direct）
+            # 这些网站虽然也是AI相关，但不需要走SOCKS5代理
+            # 禁止将以下域名移入AI规则
+            "domain_suffix": ["x.com", "twitter.com", "twimg.com", "t.co", "x.ai", "grok.com"],
+            "domain_keyword": ["twitter", "grok"],
+            "outbound": "direct"
         }] if ai_socks5_server and ai_socks5_port else []) + [
             {"outbound": "direct"}
         ]
