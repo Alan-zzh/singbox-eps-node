@@ -15,7 +15,7 @@
 ## 快速安装
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/gulucat/singbox-eps-node/main/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 ```
 
 安装完成后，编辑 `/root/singbox-eps-node/.env` 填入你的配置。

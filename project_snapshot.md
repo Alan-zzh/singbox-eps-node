@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.47** (HY2端口跳跃无感切换：sing-box配置添加hop_ports字段)
+**v1.0.48** (脱敏处理+一键安装脚本+GitHub公开仓库)
 
 ---
 
@@ -22,6 +22,29 @@
 | v1.0.45 | 2026-04-21 | 全面消除硬编码+DNS优选CDN+HY2规避修复+新VPS适配 |
 | v1.0.46 | 2026-04-21 | HY2双协议保障恢复+SOCKS5 AI路由文档补全+铁律10文档同步 |
 | v1.0.47 | 2026-04-21 | HY2端口跳跃无感切换：sing-box配置添加hop_ports字段 |
+| v1.0.48 | 2026-04-21 | 脱敏处理+一键安装脚本+GitHub仓库公开+临时脚本清理 |
+
+---
+
+## 最新更新内容 (v1.0.48)
+
+### 1. 全面脱敏处理
+- 所有代码和文档中的IP地址、域名、密码、Token替换为占位符或从环境变量读取
+- 删除26个临时check/deploy/test脚本（含硬编码凭据）
+- 创建 .gitignore 排除 .env、cert/、logs/、backups/ 等敏感目录
+- 创建 .env.example 作为配置模板
+
+### 2. 一键安装脚本 (install.sh)
+- 全自动部署：检测系统→安装依赖→安装Singbox→克隆仓库→生成密码→配置证书→启动服务
+- 自动生成UUID/密码/Reality密钥对
+- 自动检测服务器公网IP
+- 支持Cloudflare API Token自动申请15年证书
+- 自动配置HY2端口跳跃iptables规则（UDP+TCP双协议）
+- 安装完成后自动验证并输出订阅链接
+
+### 3. GitHub仓库
+- 仓库地址：https://github.com/Alan-zzh/singbox-eps-node
+- 一键安装命令：`bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)`
 
 ---
 

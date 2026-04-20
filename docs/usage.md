@@ -5,7 +5,7 @@
 ### 一键安装
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/gulucat/singbox-eps-node/main/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 ```
 
 ### 安装后配置

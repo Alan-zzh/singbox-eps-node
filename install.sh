@@ -3,7 +3,7 @@
 # Singbox EPS Node 一键安装脚本
 # 版本: v1.0.48
 # 用途: 新VPS全自动部署
-# 使用: bash <(curl -sL https://raw.githubusercontent.com/gulucat/singbox-eps-node/main/install.sh)
+# 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 # ============================================================
 
 set -e
@@ -15,7 +15,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 BASE_DIR="/root/singbox-eps-node"
-REPO_URL="https://github.com/gulucat/singbox-eps-node"
+REPO_URL="https://github.com/Alan-zzh/singbox-eps-node"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
