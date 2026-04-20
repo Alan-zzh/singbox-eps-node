@@ -28,6 +28,7 @@ vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
 trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 hysteria2_pass = env_vars.get('HYSTERIA2_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
+reality_short_id = env_vars.get('REALITY_SHORT_ID', 'abcd1234')
 server_ip = env_vars.get('SERVER_IP', '')
 cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
 socks5_user = env_vars.get('SOCKS5_USER', 'socks5')
@@ -71,7 +72,7 @@ config = {
                     "enabled": True,
                     "handshake": {"server": "www.apple.com", "server_port": 443},
                     "private_key": reality_private_key,
-                    "short_id": ["abcd1234"]
+                    "short_id": [reality_short_id]
                 }
             }
         },

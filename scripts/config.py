@@ -12,7 +12,7 @@ import os
 # 路径配置
 BASE_DIR = '/root/singbox-manager'
 CERT_DIR = os.path.join(BASE_DIR, 'cert')
-DATA_DIR = BASE_DIR
+DATA_DIR = os.path.join(BASE_DIR, 'data')
 GEO_DIR = os.path.join(BASE_DIR, 'geo')
 LOG_DIR = '/var/log'
 ENV_FILE = os.path.join(BASE_DIR, '.env')
