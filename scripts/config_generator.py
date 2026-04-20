@@ -2,9 +2,10 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v1.0.18
-Date: 2026-04-20
+Version: v1.0.19
+Date: 2026-04-21
 功能：生成完整的 Singbox 配置
+⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码
 """
 
 import sys
@@ -14,14 +15,24 @@ import json
 import random
 import string
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from config import BASE_DIR, CERT_DIR
+except ImportError:
+    BASE_DIR = '/root/singbox-eps-node'
+    CERT_DIR = os.path.join(BASE_DIR, 'cert')
+
 # 读取环境变量
 env_vars = {}
-with open('/root/singbox-eps-node/.env', 'r') as f:
-    for line in f:
-        line = line.strip()
-        if '=' in line and not line.startswith('#'):
-            key, value = line.split('=', 1)
-            env_vars[key] = value
+env_file = os.path.join(BASE_DIR, '.env')
+if os.path.exists(env_file):
+    with open(env_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if '=' in line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                env_vars[key] = value
 
 vless_uuid = env_vars.get('VLESS_UUID', str(uuid.uuid4()))
 vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
@@ -90,8 +101,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": "/root/singbox-eps-node/cert/cert.pem",
-                "key_path": "/root/singbox-eps-node/cert/key.pem",
+                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
+                "key_path": os.path.join(CERT_DIR, "key.pem"),
                 "alpn": ["http/1.1"]
             }
         },
@@ -109,8 +120,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": "/root/singbox-eps-node/cert/cert.pem",
-                "key_path": "/root/singbox-eps-node/cert/key.pem",
+                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
+                "key_path": os.path.join(CERT_DIR, "key.pem"),
                 "alpn": ["http/1.1"]
             }
         },
@@ -128,8 +139,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": "/root/singbox-eps-node/cert/cert.pem",
-                "key_path": "/root/singbox-eps-node/cert/key.pem",
+                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
+                "key_path": os.path.join(CERT_DIR, "key.pem"),
                 "alpn": ["http/1.1"]
             }
         },
@@ -138,12 +149,14 @@ config = {
             "tag": "hysteria2",
             "listen": "0.0.0.0",
             "listen_port": 443,
+            # 端口跳跃：客户端可通过21000-21200范围内的端口连接
+            # iptables将21000-21200 DNAT到443，服务端只需监听443
             "users": [{"password": hysteria2_pass}],
             "tls": {
                 "enabled": True,
                 "server_name": "www.apple.com",
-                "certificate_path": "/root/singbox-eps-node/cert/cert.pem",
-                "key_path": "/root/singbox-eps-node/cert/key.pem",
+                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
+                "key_path": os.path.join(CERT_DIR, "key.pem"),
                 "alpn": ["h3"]
             },
             "obfs": {
@@ -183,13 +196,9 @@ config = {
     }
 }
 
-with open("/root/singbox-eps-node/config.json", 'w') as f:
+with open(os.path.join(BASE_DIR, "config.json"), 'w') as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
 
 print("[OK] Singbox配置已保存")
-print(f"  - SOCKS5 用户: {socks5_user}")
-print(f"  - SOCKS5 密码: {socks5_pass}")
-print(f"  - VLESS UUID: {vless_uuid}")
-print(f"  - VLESS WS UUID: {vless_ws_uuid}")
-print(f"  - Trojan Password: {trojan_pass}")
-print(f"  - Hysteria2 Password: {hysteria2_pass}")
+print(f"  配置文件: {os.path.join(BASE_DIR, 'config.json')}")
+print(f"  入站协议: VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2, SOCKS5")

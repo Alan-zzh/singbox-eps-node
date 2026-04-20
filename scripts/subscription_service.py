@@ -11,8 +11,10 @@ Date: 2026-04-20
   - HTTPS支持（Cloudflare正式证书）
 
 订阅链接格式: 
-  - Base64: https://SERVER_IP:9443/sub/{国家代码}
-  - sing-box JSON: https://SERVER_IP:9443/singbox/{国家代码}
+  - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
+  - sing-box JSON: https://{CF_DOMAIN}:{SUB_PORT}/singbox/{国家代码}
+  ⚠️ 必须使用域名访问（走CDN），IP访问会导致SSL证书不匹配
+  ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
 节点命名规则: {国家代码}-{协议}
 - JP-VLESS-Reality (直连节点，苹果域名伪装)
@@ -34,7 +36,7 @@ from datetime import datetime
 import ssl
 
 from dotenv import load_dotenv
-load_dotenv('/root/singbox-eps-node/.env')
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,7 +45,8 @@ try:
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
-        AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS
+        AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
+        get_sub_domain, BASE_DIR
     )
     from logger import get_logger
 except ImportError:
@@ -57,7 +60,6 @@ logger = get_logger('subscription_service')
 SERVER_IP = os.getenv('SERVER_IP', '')
 CF_DOMAIN = os.getenv('CF_DOMAIN', '')
 DB_PATH = DB_FILE if 'DB_FILE' in dir() else os.path.join(DATA_DIR, 'singbox.db')
-SUB_PORT = int(os.getenv('SUB_PORT', '6969'))
 COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'JP')
 USE_DOMAIN = bool(CF_DOMAIN and CF_DOMAIN.strip() != '')
 
@@ -104,10 +106,8 @@ def get_cdn_ip_for_protocol(protocol_key):
     return SERVER_IP
 
 def get_sub_address():
-    """获取订阅服务地址（域名或IP）"""
-    if CF_DOMAIN and CF_DOMAIN.strip():
-        return CF_DOMAIN
-    return SERVER_IP
+    """获取订阅服务地址（域名或IP）- 使用config.py统一逻辑"""
+    return get_sub_domain()
 
 def generate_all_links():
     """生成所有节点链接"""
@@ -150,7 +150,7 @@ def generate_all_links():
         'host': cdn_sni,
         'allowInsecure': '1'
     }
-    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
+    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
     links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-WS{cdn_suffix}")
 
     # 3. VLESS-HTTPUpgrade (CDN)
@@ -163,7 +163,7 @@ def generate_all_links():
         'host': cdn_sni,
         'allowInsecure': '1'
     }
-    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
+    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
     links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-HTTPUpgrade{cdn_suffix}")
 
     # 4. Trojan-WS (CDN)
@@ -179,20 +179,30 @@ def generate_all_links():
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
     links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{COUNTRY_CODE}-Trojan-WS{cdn_suffix}")
 
-    # 5. Hysteria2 (直连) - 端口443，iptables端口跳跃22000-22200
+    # 5. Hysteria2 (直连) - 端口443，iptables端口跳跃21000-21200→443
+    # ⚠️ mport范围必须与cert_manager.py中setup_hysteria2_port_hopping()一致
+    # ⚠️ obfs=salamander用于规避QUIC检测，obfs-password取HY2密码前8位
     params = {
         'sni': REALITY_SNI,
         'insecure': '1',
         'obfs': 'salamander',
         'obfs-password': HYSTERIA2_PASSWORD[:8],
-        'mport': '443,22000-22200'
+        'mport': '443,21000-21200'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
     links.append(f"hysteria2://{HYSTERIA2_PASSWORD}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-Hysteria2")
 
-    # 6. SOCKS5 (AI协议牵制节点)
-    socks5_link = f"socks5://4KKsLB7F:KgEKVmVgxJ@206.163.4.241:36753#AI-SOCKS5"
-    links.append(socks5_link)
+    # 6. SOCKS5 (AI协议牵制节点) - 从环境变量读取，禁止硬编码凭据
+    # ⚠️ SOCKS5 AI路由规则说明（写死的，禁止随意修改域名列表）：
+    # - 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量时自动生效
+    # - AI网站自动走SOCKS5（出站标签ai-residential）：openai/chatgpt/anthropic/claude/gemini/aistudio/perplexity/midjourney/stability/cohere/replicate/google/googleapis/gstatic
+    # - X/推特/groK排除（走direct，不走SOCKS5）：x.com/twitter.com/twimg.com/t.co/x.ai/grok.com
+    # - 未配置SOCKS5时：不生成任何SOCKS5相关节点和规则，不影响其他节点
+    # - 这些规则在sing-box JSON配置中的route.rules里实现，用户导入后无感生效
+    if AI_SOCKS5_SERVER and AI_SOCKS5_PORT:
+        socks5_auth = f"{AI_SOCKS5_USER}:{AI_SOCKS5_PASS}@" if (AI_SOCKS5_USER and AI_SOCKS5_PASS) else ""
+        socks5_link = f"socks5://{socks5_auth}{AI_SOCKS5_SERVER}:{AI_SOCKS5_PORT}#AI-SOCKS5"
+        links.append(socks5_link)
 
     return links
 
@@ -276,17 +286,17 @@ def generate_singbox_config():
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
                     f"{COUNTRY_CODE}-Hysteria2",
-                    "AI-SOCKS5",
+                ] + (["AI-SOCKS5"] if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else []) + [
                     "direct"
                 ],
                 "default": f"{COUNTRY_CODE}-VLESS-Reality"
             },
-            {
+        ] + ([{
                 "type": "selector",
                 "tag": "ai-residential",
                 "outbounds": ["AI-SOCKS5"],
                 "default": "AI-SOCKS5"
-            },
+            }] if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else []) + [
             {
                 "type": "direct",
                 "tag": "direct"
@@ -390,12 +400,17 @@ def generate_singbox_config():
                     }
                 }
             },
-            # Hysteria2
+            # Hysteria2 - 支持端口跳跃，无感切换不掉线
+            # hop_ports：客户端在连接时自动在指定端口范围内跳跃
+            # 工作原理：客户端初始连443，后续QUIC连接自动切换到21000-21200范围内的端口
+            # 服务端iptables将21000-21200全部DNAT到443，所以无论客户端跳到哪个端口都能到达HY2
+            # 效果：当某个端口被封锁/干扰时，客户端自动跳到其他端口，无需断线重连
             {
                 "type": "hysteria2",
                 "tag": f"{COUNTRY_CODE}-Hysteria2",
                 "server": SERVER_IP,
                 "server_port": 443,
+                "hop_ports": "21000-21200",
                 "password": HYSTERIA2_PASSWORD,
                 "tls": {
                     "enabled": True,
@@ -409,16 +424,16 @@ def generate_singbox_config():
                 "up_mbps": 100,
                 "down_mbps": 100
             },
-            # AI-SOCKS5
+            # AI-SOCKS5 - 从环境变量读取，禁止硬编码凭据
             {
                 "type": "socks",
                 "tag": "AI-SOCKS5",
-                "server": "206.163.4.241",
-                "server_port": 36753,
+                "server": AI_SOCKS5_SERVER,
+                "server_port": AI_SOCKS5_PORT,
                 "version": "5",
-                "username": "4KKsLB7F",
-                "password": "KgEKVmVgxJ"
-            }
+                "username": AI_SOCKS5_USER,
+                "password": AI_SOCKS5_PASS
+            } if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else None
         ],
         "route": {
             "rules": [
@@ -435,7 +450,10 @@ def generate_singbox_config():
                     "geoip": ["cn", "private"],
                     "outbound": "direct"
                 },
-                # AI网站自动走SOCKS5（无感路由）
+                # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
+                # 出站标签ai-residential → AI-SOCKS5节点
+                # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
+                # 排除规则在下方（X/推特/groK走direct）
                 {
                     "domain_suffix": [
                         "openai.com",
@@ -465,7 +483,9 @@ def generate_singbox_config():
                     ],
                     "outbound": "ai-residential"
                 },
-                # 排除X/推特/groK（不走SOCKS5）
+                # ⚠️ 排除X/推特/groK（不走SOCKS5，走direct）
+                # 这些网站虽然也是AI相关，但不需要走SOCKS5代理
+                # 禁止将以下域名移入AI规则
                 {
                     "domain_suffix": [
                         "x.com",
@@ -496,6 +516,7 @@ def generate_singbox_config():
         }
     }
 
+    config["outbounds"] = [ob for ob in config["outbounds"] if ob is not None]
     return config
 
 def create_app():
@@ -614,10 +635,23 @@ def create_app():
 
 if __name__ == '__main__':
     init_db()
+
+    try:
+        from config import verify_port_integrity, save_port_lock
+        is_valid, msg = verify_port_integrity()
+        if not is_valid:
+            logger.warning(f"端口完整性校验失败: {msg}，重新生成锁定文件")
+            save_port_lock()
+        else:
+            logger.info(f"端口完整性校验通过: {msg}")
+    except Exception as e:
+        logger.warning(f"端口校验异常: {e}")
+
+    sub_domain = get_sub_domain()
     app = create_app()
     logger.info(f"Starting HTTPS subscription service on 0.0.0.0:{SUB_PORT}")
-    logger.info(f"Base64订阅: https://SERVER_IP:{SUB_PORT}/sub/{COUNTRY_CODE}")
-    logger.info(f"sing-box JSON: https://SERVER_IP:{SUB_PORT}/singbox/{COUNTRY_CODE}")
+    logger.info(f"Base64订阅: https://{sub_domain}:{SUB_PORT}/sub/{COUNTRY_CODE}")
+    logger.info(f"sing-box JSON: https://{sub_domain}:{SUB_PORT}/singbox/{COUNTRY_CODE}")
     app.run(host='0.0.0.0', port=SUB_PORT, threaded=True,
-            ssl_context=('/root/singbox-eps-node/cert/fullchain.pem',
-                         '/root/singbox-eps-node/cert/key.pem'))
+            ssl_context=(os.path.join(CERT_DIR, 'fullchain.pem'),
+                         os.path.join(CERT_DIR, 'key.pem')))

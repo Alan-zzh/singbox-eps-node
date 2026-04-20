@@ -22,7 +22,7 @@ from urllib.error import URLError
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import CERT_DIR, CF_DOMAIN, CERT_VALIDITY_DAYS, SERVER_IP
+    from config import CERT_DIR, CF_DOMAIN, CERT_VALIDITY_DAYS, SERVER_IP, BASE_DIR
     from logger import get_logger
 except ImportError:
     def get_logger(name):
@@ -32,11 +32,11 @@ except ImportError:
 
 logger = get_logger('cert_manager')
 
-# 从config.py统一读取路径，不再硬编码
 try:
-    from config import CERT_DIR
+    from config import CERT_DIR, BASE_DIR
 except ImportError:
     CERT_DIR = '/root/singbox-eps-node/cert'
+    BASE_DIR = '/root/singbox-eps-node'
 
 CERT_FILE = os.path.join(CERT_DIR, 'cert.crt')
 KEY_FILE = os.path.join(CERT_DIR, 'cert.key')
@@ -55,7 +55,7 @@ def get_cf_api_token():
     if token:
         return token
 
-    env_file = '/root/singbox-eps-node/.env'
+    env_file = os.path.join(BASE_DIR, '.env')
     if os.path.exists(env_file):
         with open(env_file, 'r') as f:
             for line in f:
@@ -222,18 +222,32 @@ def setup_iptables_persistent():
     logger.info("[OK] iptables-persistent 已安装")
 
 def setup_hysteria2_port_hopping():
-    """设置 Hysteria2 端口跳跃规则"""
-    logger.info(">>> 设置 Hysteria2 端口跳跃规则 (21000-21200)...")
+    """设置 Hysteria2 端口跳跃规则
+
+    ⚠️ 端口跳跃目标必须与singbox配置中HY2的listen_port一致
+    当前HY2监听443端口（与VLESS-Reality共用）
+    历史Bug：之前转发到4433，但HY2不在4433监听，导致端口跳跃无效
+
+    ⚠️ 必须同时设置UDP和TCP规则：
+    - UDP：HY2主要使用QUIC(UDP)协议，这是核心
+    - TCP：当UDP被封锁或不稳定时，HY2可降级使用TCP，确保节点可用
+    - 双协议保障：UDP不通→TCP兜底，TCP不通→UDP兜底
+    """
+    logger.info(">>> 设置 Hysteria2 端口跳跃规则 (21000-21200 → 443, UDP+TCP)...")
 
     if os.popen('iptables-save | grep "DNAT.*4433"').read():
         os.popen('iptables-save | grep -v "DNAT.*4433" | iptables-restore')
-        logger.info("[INFO] 旧规则已清理")
+        logger.info("[INFO] 旧规则(→4433)已清理")
+
+    if os.popen('iptables-save | grep "DNAT.*:443"').read():
+        os.popen('iptables-save | grep -v "DNAT.*:443" | iptables-restore')
+        logger.info("[INFO] 旧规则(→443)已清理")
 
     for port in range(21000, 21201):
-        os.system(f'iptables -t nat -A PREROUTING -p udp --dport {port} -j DNAT --to-destination :4433')
-        os.system(f'iptables -t nat -A PREROUTING -p tcp --dport {port} -j DNAT --to-destination :4433')
+        os.system(f'iptables -t nat -A PREROUTING -p udp --dport {port} -j DNAT --to-destination :443')
+        os.system(f'iptables -t nat -A PREROUTING -p tcp --dport {port} -j DNAT --to-destination :443')
 
-    logger.info("[OK] 端口跳跃规则已设置 (21000-21200)")
+    logger.info("[OK] 端口跳跃规则已设置 (21000-21200 → 443, UDP+TCP双协议保障)")
 
     setup_iptables_persistent()
 

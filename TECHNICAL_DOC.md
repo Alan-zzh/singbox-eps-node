@@ -2,9 +2,9 @@
 
 ## 项目概述
 - **项目名称**: Singbox EPS Node (代理节点订阅系统)
-- **服务器**: 54.250.149.157 (日本AWS)
-- **域名**: jp.290372913.xyz (Cloudflare DNS)
-- **当前版本**: v1.0.34
+- **服务器**: 从.env动态读取SERVER_IP（自动检测公网IP）
+- **域名**: 从.env动态读取CF_DOMAIN（用于CDN和SSL证书）
+- **当前版本**: v1.0.45
 
 ---
 
@@ -14,180 +14,160 @@
 | 服务 | 端口 | 协议 | 状态 |
 |------|------|------|------|
 | singbox主服务 | 443, 8443, 2053, 2083 | TCP/UDP | ✅ active |
-| singbox-sub订阅 | 9443 | HTTPS | ✅ active |
-| singbox-cdn监控 | - | 定时任务 | ✅ active |
+| singbox-sub订阅 | 2087 | HTTPS (CDN支持) | ✅ active |
+| singbox-cdn监控 | - | 定时任务(每小时) | ✅ active |
 
-### 节点列表（6个）
-1. **JP-VLESS-Reality**: 54.250.149.157:443 (直连，Reality协议)
-2. **JP-VLESS-WS-CDN**: Cloudflare优选IP:8443 (CDN)
-3. **JP-VLESS-HTTPUpgrade-CDN**: Cloudflare优选IP:2053 (CDN)
-4. **JP-Trojan-WS-CDN**: Cloudflare优选IP:2083 (CDN)
-5. **JP-Hysteria2**: 54.250.149.157:443 (直连，iptables端口跳跃22000-22200)
-6. **AI-SOCKS5**: 206.163.4.241:36753 (外部代理，固定配置)
+### 节点列表（5-6个，取决于SOCKS5是否配置）
+1. **{CC}-VLESS-Reality**: {SERVER_IP}:443 (直连，Reality协议)
+2. **{CC}-VLESS-WS-CDN**: Cloudflare优选IP:8443 (CDN)
+3. **{CC}-VLESS-HTTPUpgrade-CDN**: Cloudflare优选IP:2053 (CDN)
+4. **{CC}-Trojan-WS-CDN**: Cloudflare优选IP:2083 (CDN)
+5. **{CC}-Hysteria2**: {SERVER_IP}:443 (直连，端口跳跃21000-21200→443)
+6. **AI-SOCKS5**: {AI_SOCKS5_SERVER}:{AI_SOCKS5_PORT} (外部代理，可选)
 
 ---
 
 ## 已完成功能
 
 ### 1. HTTPS订阅服务 ✅
-- **订阅链接**: `https://jp.290372913.xyz:9443/sub/JP`
+- **订阅链接**: `https://{CF_DOMAIN}:2087/sub/{CC}`（域名访问，走CDN）
+- **sing-box JSON**: `https://{CF_DOMAIN}:2087/singbox/{CC}`（含自动路由规则）
 - **证书**: Let's Encrypt正式证书（acme.sh + Cloudflare DNS API）
-- **端口**: 9443（避免与singbox主服务冲突）
+- **端口**: 2087（Cloudflare CDN支持的端口）
 - **自动续期**: acme.sh已配置
+- ⚠️ **禁止用IP访问**: IP访问导致SSL证书域名不匹配
 
 ### 2. Hysteria2端口跳跃 ✅
-- **实现方式**: iptables DNAT规则
-- **规则**: `iptables -t nat -A PREROUTING -p udp --dport 22000:22200 -j DNAT --to-destination :443`
-- **订阅参数**: `mport=443,22000-22200`
+- **实现方式**: iptables DNAT规则 + 客户端hop_ports字段
+- **服务端规则**: 
+  - UDP: `iptables -t nat -A PREROUTING -p udp --dport 21000:21200 -j DNAT --to-destination :443`
+  - TCP: `iptables -t nat -A PREROUTING -p tcp --dport 21000:21200 -j DNAT --to-destination :443`
+- **客户端配置**: `"hop_ports": "21000-21200"`（sing-box JSON）或 `mport=443,21000-21200`（Base64链接）
+- **无感切换原理**: 客户端初始连443，后续QUIC连接自动在21000-21200范围内跳跃，服务端iptables全部DNAT到443，某个端口被封自动跳到其他端口，无需断线重连
+- **双协议保障**: UDP是HY2核心(QUIC)，TCP是降级兜底(UDP被封时)
 - **持久化**: `/etc/iptables/rules.v4`
+- **规避措施**:
+  - obfs=salamander：规避QUIC/UDP流量特征检测
+  - obfs-password：取HY2密码前8位
+  - 端口跳跃21000-21200：扩大端口范围规避封锁，无感切换不掉线
+  - alpn=["h3"]：HY2使用QUIC协议
 
 ### 3. CDN优选IP ✅
-- **机制**: 使用固定优选IP池（中国用户实测50ms左右）
-- **存储**: 代码硬编码（`cdn_monitor.py`中的`PREFERRED_IPS`列表）
+- **机制**: 使用指定DNS（222.246.129.80 | 59.51.78.210）解析域名获取IP
+- **降级方案**: 114DNS → 固定优选IP池
+- **存储**: SQLite数据库（data/singbox.db）
 - **分配**: 每个CDN协议独立优选IP
-- **IP池来源**: 用户本地通过湖南电信DNS实测
+- **更新频率**: 每小时自动查询
 
-**CDN IP问题记录 (v1.0.36-v1.0.37)**:
-- **问题**: v1.0.36版本将固定IP池改为从日本服务器DNS实时解析获取IP（如104.21.35.190等）
-- **影响**: 日本服务器解析的IP对中国用户延迟高（150-200ms），而固定IP池仅50ms左右
-- **根因**: 日本服务器DNS解析返回的Cloudflare IP是针对日本优化的，不适合中国用户
-- **解决**: v1.0.37恢复固定优选IP池（172.64.33.166、162.159.45.15等中国用户实测低延迟IP）
-- **教训**: CDN IP优选必须基于目标用户地理位置，不能用服务器所在地DNS解析
-
-**当前优选IP池** (中国用户实测):
-```python
-PREFERRED_IPS = [
-    '172.64.33.166',    # 46.06ms - 最快
-    '162.159.45.15',    # 51.39ms
-    '172.64.53.179',    # 51.98ms
-    '108.162.198.145',  # 52.01ms
-    '172.64.52.205',    # 52.41ms
-    '162.159.44.103',   # 52.51ms
-    '162.159.39.190',   # 52.68ms
-    '162.159.38.26',    # 53.14ms
-    '162.159.7.250',    # 53.83ms
-    '104.18.37.65',     # 53.78ms
-    '172.67.178.214',   # 备用
-    '104.21.35.190',    # 备用
-    '104.16.123.96',    # 备用
-    '104.16.124.96',    # 备用
-]
-```
-
-**Trojan-WS协议问题记录 (v1.0.38-v1.0.39)**:
-- **问题**: v1.0.38更新后Trojan-WS链接无法打开
-- **影响**: 用户提供的可用链接包含`insecure=1`参数，但生成的链接缺少此参数
-- **根因**: 代码更新时未保留`insecure=1`参数
-- **解决**: v1.0.39在Trojan-WS参数中添加`'insecure': '1'`和`'allowInsecure': '1'`
-- **正确链接格式**: `trojan://uG3hixuWQUJTq6_-Qiakow@104.16.124.96:2083?security=tls&sni=jp.290372913.xyz&insecure=1&allowInsecure=1&type=ws&host=jp.290372913.xyz&path=%2Ftrojan-ws#JP-Trojan-WS-CDN`
+### 4. SOCKS5 AI路由规则 ✅
+- **实现方式**: sing-box路由规则自动分流
+- **出站标签**: `ai-residential`（SOCKS5代理）
+- **触发条件**: 配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量时自动生效
+- **AI网站自动走SOCKS5**（无感路由，用户无需手动选择）:
+  - openai.com, chatgpt.com
+  - anthropic.com, claude.ai
+  - gemini.google.com, bard.google.com, ai.google, aistudio.google.com
+  - perplexity.ai
+  - midjourney.com, stability.ai
+  - cohere.com, replicate.com
+  - google.com, googleapis.com, gstatic.com
+  - 关键词: openai, anthropic, claude, gemini, perplexity, aistudio
+- **X/推特/groK排除**（不走SOCKS5，走直连）:
+  - x.com, twitter.com, twimg.com, t.co, x.ai, grok.com
+  - 关键词: twitter, grok
+- **Base64订阅**: 条件生成 `socks5://{user}:{pass}@{server}:{port}#AI-SOCKS5`
+- **sing-box配置**: 条件生成outbound + selector + 路由规则
+- **未配置时**: 不生成任何SOCKS5相关节点和规则，不影响其他节点
 
 ---
 
-## 待解决问题（需要其他AI帮助）
+## 配置管理
+
+### .env 必需变量
+```
+SERVER_IP=          # 服务器公网IP（留空则自动检测）
+CF_DOMAIN=          # Cloudflare域名（用于CDN和SSL证书）
+VLESS_UUID=         # VLESS-Reality UUID
+VLESS_WS_UUID=      # VLESS-WS/HTTPUpgrade UUID
+TROJAN_PASSWORD=    # Trojan-WS密码
+HYSTERIA2_PASSWORD= # Hysteria2密码
+REALITY_PRIVATE_KEY=# Reality私钥
+REALITY_PUBLIC_KEY= # Reality公钥
+CF_API_TOKEN=       # Cloudflare API Token（证书申请用）
+COUNTRY_CODE=JP     # 国家代码
+SUB_TOKEN=          # 订阅Token（可选）
+AI_SOCKS5_SERVER=   # AI SOCKS5服务器（可选，配置后AI路由自动生效）
+AI_SOCKS5_PORT=     # AI SOCKS5端口（可选）
+AI_SOCKS5_USER=     # AI SOCKS5用户名（可选）
+AI_SOCKS5_PASS=     # AI SOCKS5密码（可选）
+```
+
+### 端口分配
+```
+443    - singbox VLESS-Reality + Hysteria2入站
+2053   - singbox VLESS-HTTPUpgrade-CDN入站
+2083   - singbox Trojan-WS-CDN入站
+2087   - Flask订阅服务（HTTPS，CDN支持）
+8443   - singbox VLESS-WS-CDN入站
+1080   - singbox SOCKS5本地代理
+21000-21200 - Hysteria2端口跳跃（iptables DNAT → 443, UDP+TCP）
+```
+
+### 文件路径
+```
+/root/singbox-eps-node/
+├── .env                           # 环境变量（所有配置集中管理）
+├── config.json                    # singbox配置
+├── cert/                          # SSL证书
+│   ├── cert.pem                   # Let's Encrypt证书
+│   ├── key.pem                    # 私钥
+│   └── fullchain.pem              # 完整证书链
+├── data/
+│   ├── singbox.db                 # SQLite数据库（CDN IP等）
+│   └── .port_lock                 # 端口锁定文件（防篡改）
+├── scripts/
+│   ├── config.py                  # 全局配置（自动检测IP+统一读取.env）
+│   ├── logger.py                  # 日志管理
+│   ├── cdn_monitor.py             # CDN监控（指定DNS解析+降级方案）
+│   ├── subscription_service.py    # 订阅服务（HTTPS，消除硬编码）
+│   ├── config_generator.py        # 配置生成器（消除硬编码路径）
+│   ├── cert_manager.py            # 证书管理+HY2端口跳跃
+│   ├── tg_bot.py                  # Telegram机器人
+│   └── health_check.sh            # 健康检查与自动恢复（每5分钟）
+├── logs/
+│   └── health_check.log           # 健康检查日志
+└── backups/                       # 备份目录
+```
+
+---
+
+## 待解决问题
 
 ### 问题1: SOCKS5自动切换 ❌
 **现状**: 
-- 当前SOCKS5节点是固定配置在订阅中的
-- 只有一个节点: `socks5://4KKsLB7F:KgEKVmVgxJ@206.163.4.241:36753#AI-SOCKS5`
+- 当前SOCKS5节点从环境变量读取，只有一个节点
+- 未实现多节点池和自动切换
 
 **需求**:
 - 实现SOCKS5节点自动切换功能
 - 当当前节点不可用时，自动切换到备用节点
 - 需要维护一个SOCKS5节点池
 
-**可能方案**:
-1. 在订阅服务中添加多个SOCKS5节点
-2. 实现健康检查机制，定期测试节点可用性
-3. 根据延迟自动排序，优先返回最快节点
-
 ### 问题2: acme.sh自动续期验证 ⚠️
-**现状**:
-- acme.sh已安装并申请证书
-- 证书有效期至2026-07-19
-- 需要确认cron自动续期任务是否配置
-
-**需要验证**:
-```bash
-crontab -l | grep acme
-```
-
-### 问题3: 订阅服务HTTPS证书CN匹配 ✅ 已解决
-**原问题**: 自签证书CN为`www.apple.com`，导致HTTPS订阅时客户端拒绝
-**解决方案**: 使用Cloudflare DNS API + acme.sh申请Let's Encrypt正式证书
-
----
-
-## 技术细节
-
-### Cloudflare凭证
-- **类型**: API Token
-- **变量**: `CF_Token`（acme.sh使用）
-- **权限**: 需要Zone.DNS编辑权限
-
-### 端口分配
-```
-443    - singbox VLESS-Reality入站
-8443   - singbox VLESS-WS-CDN入站
-2053   - singbox VLESS-HTTPUpgrade-CDN入站
-2083   - singbox Trojan-WS-CDN入站
-9443   - Flask订阅服务（HTTPS）
-22000-22200 - Hysteria2端口跳跃（iptables转发到443）
-```
-
-### 文件路径
-```
-/root/singbox-eps-node/
-├── .env                           # 环境变量
-├── config.json                    # singbox配置
-├── cert/                          # SSL证书
-│   ├── cert.pem                   # Let's Encrypt证书
-│   ├── key.pem                    # 私钥
-│   └── fullchain.pem              # 完整证书链
-├── data/singbox.db                # SQLite数据库
-├── scripts/
-│   ├── config.py                  # 全局配置
-│   ├── logger.py                  # 日志管理
-│   ├── cdn_monitor.py             # CDN监控
-│   ├── subscription_service.py    # 订阅服务（HTTPS）
-│   └── config_generator.py        # 配置生成器
-└── logs/                          # 日志目录
-```
-
----
-
-## 订阅服务代码关键部分
-
-### SSL配置 (subscription_service.py)
-```python
-app.run(host='0.0.0.0', port=SUB_PORT, threaded=True, 
-        ssl_context=('/root/singbox-eps-node/cert/fullchain.pem', 
-                     '/root/singbox-eps-node/cert/key.pem'))
-```
-
-### Hysteria2节点生成
-```python
-params = {
-    'sni': REALITY_SNI,
-    'insecure': '1',
-    'obfs': 'salamander',
-    'obfs-password': HYSTERIA2_PASSWORD[:8],
-    'mport': '443,22000-22200'  # 端口跳跃
-}
-links.append(f"hysteria2://{HYSTERIA2_PASSWORD}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-Hysteria2")
-```
+**现状**: 证书有效期至2026-07-19，需确认cron自动续期任务是否配置
 
 ---
 
 ## 给其他AI的建议
 
-1. **修改代码前**: 先查阅 `project_snapshot.md` 了解当前状态
-2. **端口冲突**: 避免使用443/8443/2053/2083/9443
-3. **证书路径**: 使用 `/root/singbox-eps-node/cert/` 下的证书文件
-4. **环境变量**: 从 `/root/singbox-eps-node/.env` 读取配置
-5. **测试方法**: 修改后重启服务 `systemctl restart singbox-sub`
-
----
-
-## 联系方式
-- **GitHub**: https://github.com/Alan-zzh/singbox-eps-node-v2
-- **服务器**: 54.250.149.157 (SSH root)
+1. **修改代码前**: 先查阅 `project_snapshot.md` 和 `AI_DEBUG_HISTORY.md` 了解当前状态和已踩过的坑
+2. **禁止硬编码**: 所有IP、域名、端口、密码必须从.env读取，禁止在代码中硬编码
+3. **HTTPS订阅必须用域名**: SSL证书颁发给域名，IP访问导致证书不匹配
+4. **订阅端口必须在CDN支持列表**: 443/2053/2083/2087/2096/8443
+5. **CDN IP获取必须用指定DNS**: 222.246.129.80 | 59.51.78.210（湖南电信DNS）
+6. **测试必须模拟真实客户端**: 不使用-k/--insecure参数
+7. **证书路径**: 从config.py的CERT_DIR读取，禁止硬编码
+8. **环境变量**: 从.env文件读取，路径从BASE_DIR拼接
+9. **HY2端口跳跃**: 必须UDP+TCP双规则，目标端口与singbox配置的listen_port一致
+10. **SOCKS5 AI路由**: 配置AI_SOCKS5_SERVER后自动生效，AI网站走SOCKS5，X/推特/groK排除
+11. **跨文件配置一致性**: 修改任何配置必须全局搜索所有引用该配置的文件

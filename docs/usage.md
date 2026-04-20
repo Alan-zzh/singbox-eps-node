@@ -1,78 +1,102 @@
-# Singbox Manager 使用说明
+# Singbox EPS Node 使用说明
 
 ## 快速开始
 
 ### 一键安装
 
 ```bash
-wget -O install.sh https://your-domain.com/install.sh
-chmod +x install.sh
-./install.sh
+bash <(curl -sL https://raw.githubusercontent.com/gulucat/singbox-eps-node/main/install.sh)
 ```
 
-### 安装后信息
+### 安装后配置
 
-- **订阅链接**: `https://服务器IP:2096/sub`
-- **节点数量**: 4 个（包含在订阅中）
-- **SOCKS5 代理**: 端口 1080（不在订阅中）
+1. 编辑环境变量：
+```bash
+nano /root/singbox-eps-node/.env
+```
+
+2. 填写必填项（SERVER_IP留空可自动检测，CF_DOMAIN填写你的域名）
+
+3. 重启服务：
+```bash
+systemctl restart singbox singbox-sub singbox-cdn
+```
+
+### 获取订阅链接
+
+```bash
+# 查看订阅地址
+cat /root/singbox-eps-node/.env | grep -E "CF_DOMAIN|SERVER_IP|SUB_PORT"
+```
+
+订阅地址格式：`https://{域名或IP}:2087/sub/{国家代码}`
 
 ## 节点列表
 
 | 节点名称 | 协议 | 用途 | 端口 |
 |---------|------|------|------|
-| ePS-JP-VLESS-Reality | VLESS + Reality | 殖民节点 | 443 |
-| ePS-JP-VLESS-WS | VLESS + WebSocket | CDN 节点 | 8443 |
-| ePS-JP-Trojan-WS | Trojan + WebSocket | CDN 节点 | 8444 |
-| ePS-JP-Hysteria2 | Hysteria2 + 端口跳跃 | CDN 节点 | 4433 (跳跃端口: 4434-4450) |
-| ePS-JP-SOCKS5 | SOCKS5 | 本地代理 | 1080 |
+| ePS-JP-VLESS-Reality | VLESS + Reality | 直连节点 | 443 |
+| ePS-JP-VLESS-WS | VLESS + WebSocket | CDN节点 | 8443 |
+| ePS-JP-VLESS-HTTPUpgrade | VLESS + HTTPUpgrade | CDN节点 | 2053 |
+| ePS-JP-Trojan-WS | Trojan + WebSocket | CDN节点 | 2083 |
+| ePS-JP-Hysteria2 | Hysteria2 + 端口跳跃 | 直连节点 | 443 (跳跃: 21000-21200) |
+| AI-SOCKS5 | SOCKS5 | AI流量路由 | 外部端口 |
 
 ## 服务管理
 
 ### 查看服务状态
 
 ```bash
-systemctl status singbox        # Singbox 内核
+systemctl status singbox        # Singbox内核
 systemctl status singbox-sub    # 订阅服务
-systemctl status singbox-cdn    # CDN 监控
+systemctl status singbox-cdn    # CDN监控
 ```
 
 ### 重启服务
 
 ```bash
-systemctl restart singbox        # 重启 Singbox
-systemctl restart singbox-sub     # 重启订阅服务
-systemctl restart singbox-cdn    # 重启 CDN 监控
+systemctl restart singbox        # 重启Singbox
+systemctl restart singbox-sub    # 重启订阅服务
+systemctl restart singbox-cdn    # 重启CDN监控
 ```
 
 ### 查看日志
 
 ```bash
-tail -f /var/log/singbox.log
-journalctl -u singbox -f
+journalctl -u singbox -f         # Singbox日志
+journalctl -u singbox-sub -f     # 订阅服务日志
+journalctl -u singbox-cdn -f     # CDN监控日志
 ```
 
 ## 配置文件位置
 
 | 文件 | 路径 | 说明 |
 |------|------|------|
-| Singbox 配置 | `/root/singbox-manager/config.json` | Singbox 主配置 |
-| 证书 | `/root/singbox-manager/cert/cert.crt` | 自签名证书 |
-| 私钥 | `/root/singbox-manager/cert/cert.key` | 证书私钥 |
-| 数据库 | `/root/singbox-manager/singbox.db` | CDN IP 存储 |
-| 环境变量 | `/root/singbox-manager/.env` | 密码和密钥 |
+| 环境变量 | `/root/singbox-eps-node/.env` | 所有密码和密钥 |
+| Singbox配置 | `/root/singbox-eps-node/config.json` | Singbox主配置 |
+| 证书 | `/root/singbox-eps-node/cert/` | SSL证书目录 |
+| 数据库 | `/root/singbox-eps-node/data/singbox.db` | CDN IP存储 |
+| 健康检查日志 | `/root/singbox-eps-node/logs/` | 健康检查日志 |
 
 ## 证书管理
 
 ### 手动续签证书
 
 ```bash
-python3 /root/singbox-manager/scripts/cert_manager.py --renew
+python3 /root/singbox-eps-node/scripts/cert_manager.py --renew
+```
+
+### 使用Cloudflare API申请15年证书
+
+```bash
+# 先在.env中配置CF_API_TOKEN
+python3 /root/singbox-eps-node/scripts/cert_manager.py --cf-cert
 ```
 
 ### 查看证书状态
 
 ```bash
-openssl x509 -in /root/singbox-manager/cert/cert.crt -noout -dates
+openssl x509 -in /root/singbox-eps-node/cert/cert.crt -noout -dates
 ```
 
 ## CDN 优选 IP
@@ -80,23 +104,16 @@ openssl x509 -in /root/singbox-manager/cert/cert.crt -noout -dates
 ### 手动更新 CDN IP
 
 ```bash
-python3 /root/singbox-manager/scripts/cdn_monitor.py
+python3 /root/singbox-eps-node/scripts/cdn_monitor.py
 ```
 
-### 守护进程模式
+### 查看当前CDN IP
 
-CDN 监控默认以守护进程运行，每 3600 秒更新一次。
-
-查看进程：
 ```bash
-ps aux | grep cdn_monitor
+sqlite3 /root/singbox-eps-node/data/singbox.db "SELECT * FROM cdn_settings"
 ```
 
 ## Hysteria2 端口跳跃
-
-### 原理
-
-客户端连接到 4434-4450 中的随机端口，iptables 将请求转发到 4433。
 
 ### 查看端口跳跃规则
 
@@ -104,32 +121,59 @@ ps aux | grep cdn_monitor
 iptables -t nat -L PREROUTING -n | grep 443
 ```
 
+### 重新设置端口跳跃规则
+
+```bash
+python3 /root/singbox-eps-node/scripts/cert_manager.py --setup-iptables
+```
+
 ### 规则持久化
 
-重启后规则自动恢复，无需手动操作。
-
-如果需要重新保存规则：
+重启后规则自动恢复。如需手动保存：
 ```bash
 netfilter-persistent save
 ```
 
+## 健康检查
+
+健康检查脚本每5分钟自动运行（通过cron），检查：
+- 端口完整性
+- 服务状态（自动重启异常服务）
+- 订阅接口可用性
+- 防火墙状态
+- 证书有效期
+- 磁盘空间
+
+手动运行：
+```bash
+bash /root/singbox-eps-node/scripts/health_check.sh
+```
+
+## Telegram 机器人
+
+在.env中配置 `TG_BOT_TOKEN` 和 `TG_ADMIN_CHAT_ID` 后启动：
+
+```bash
+python3 /root/singbox-eps-node/scripts/tg_bot.py
+```
+
+可用命令：
+- `/状态` - 查看服务器状态
+- `/续签` - 强制续签证书
+- `/订阅` - 获取订阅链接
+- `/重启` - 重启Singbox
+- `/优选` - 更新CDN IP
+- `/设置住宅` - 设置AI住宅IP SOCKS5
+- `/删除住宅` - 删除AI住宅IP
+
 ## 卸载
 
 ```bash
-# 停止所有服务
 systemctl stop singbox singbox-sub singbox-cdn
-
-# 禁用服务
 systemctl disable singbox singbox-sub singbox-cdn
-
-# 删除服务文件
 rm /etc/systemd/system/singbox*.service
 systemctl daemon-reload
-
-# 删除目录
-rm -rf /root/singbox-manager
-
-# 清理 iptables 规则
+rm -rf /root/singbox-eps-node
 iptables -t nat -F PREROUTING
 netfilter-persistent save
 ```
@@ -138,49 +182,28 @@ netfilter-persistent save
 
 ### Q: 订阅链接打不开？
 
-检查订阅服务状态：
 ```bash
 systemctl status singbox-sub
-```
-
-检查端口是否开放：
-```bash
-netstat -tlnp | grep 2096
+ss -tlnp | grep 2087
 ```
 
 ### Q: Hysteria2 连接失败？
 
-检查端口跳跃规则：
 ```bash
-iptables -t nat -L PREROUTING -n | grep 4433
+iptables -t nat -L PREROUTING -n | grep 443
 ```
 
-确保 4434-4450 端口已开放。
+确保21000-21200端口跳跃规则存在。
 
 ### Q: CDN 节点无法连接？
 
-手动更新 CDN IP：
 ```bash
-python3 /root/singbox-manager/scripts/cdn_monitor.py
+python3 /root/singbox-eps-node/scripts/cdn_monitor.py
 ```
 
 ### Q: 如何修改节点密码？
 
-编辑 `/root/singbox-manager/.env` 文件，修改对应密码后重启：
+编辑 `/root/singbox-eps-node/.env`，修改对应密码后：
 ```bash
 systemctl restart singbox singbox-sub
 ```
-
-## 更新日志
-
-### v1.0.4 (2026-04-20)
-- 模块化架构优化
-- 统一配置、日志、错误处理
-- 添加文档（架构设计、使用说明）
-- Hysteria2 端口跳跃 iptables 持久化
-
-### v1.0.3
-- 添加 SOCKS5 协议
-- CDN 优选 IP 随机分配
-- Reality 协议支持
-- 自签名证书自动续签

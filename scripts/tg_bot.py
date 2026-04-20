@@ -22,7 +22,7 @@ from datetime import datetime
 
 BOT_TOKEN = os.getenv('TG_BOT_TOKEN', '')
 ADMIN_CHAT_ID = os.getenv('TG_ADMIN_CHAT_ID', '')
-BASE_DIR = '/root/singbox-manager'
+BASE_DIR = '/root/singbox-eps-node'
 ENV_FILE = os.path.join(BASE_DIR, '.env')
 
 def load_env():
