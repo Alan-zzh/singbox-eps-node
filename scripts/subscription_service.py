@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v1.0.54
-Date: 2026-04-21
+Version: v1.0.60
+Date: 2026-04-22
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -123,10 +123,119 @@ def init_db():
                 value TEXT
             )
         """)
+        # 按月流量统计表（每月14号自动归零）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS traffic_stats (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         conn.commit()
     finally:
         if conn:
             conn.close()
+
+def update_traffic(bytes_count):
+    """更新流量统计（按月统计，每月14号自动归零）
+    - 检查月份是否变化，变化则重置
+    - 检查今天是否14号且本月未重置过，是则重置
+    - 累加字节数
+    """
+    now = datetime.now()
+    current_month = now.strftime('%Y-%m')
+    today_str = now.strftime('%Y-%m-%d')
+    need_reset = False
+
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # 读取当前统计值
+        cursor.execute("SELECT key, value FROM traffic_stats")
+        rows = cursor.fetchall()
+        stats = {row[0]: row[1] for row in rows}
+
+        stored_month = stats.get('current_month', '')
+        stored_bytes = int(stats.get('current_bytes', '0'))
+        last_reset = stats.get('last_reset', '')
+
+        # 判断是否需要重置：月份变了，或者今天是14号且本月还没重置过
+        if stored_month != current_month:
+            need_reset = True
+        elif now.day == 14 and not last_reset.startswith(current_month):
+            need_reset = True
+
+        if need_reset:
+            stored_bytes = 0
+            cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                           ('current_month', current_month))
+            cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                           ('last_reset', today_str))
+
+        # 累加流量
+        new_bytes = stored_bytes + bytes_count
+        cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                       ('current_bytes', str(new_bytes)))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"流量统计更新失败: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def get_traffic_stats():
+    """获取当月流量统计数据"""
+    now = datetime.now()
+    current_month = now.strftime('%Y-%m')
+
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM traffic_stats")
+        rows = cursor.fetchall()
+        stats = {row[0]: row[1] for row in rows}
+
+        stored_month = stats.get('current_month', '')
+        stored_bytes = int(stats.get('current_bytes', '0'))
+        last_reset = stats.get('last_reset', '')
+
+        # 如果月份变了但还没被update_traffic触发重置，返回0
+        if stored_month != current_month:
+            stored_bytes = 0
+            last_reset = ''
+
+        return {
+            'month': current_month,
+            'bytes_used': stored_bytes,
+            'mb_used': round(stored_bytes / (1024 * 1024), 2),
+            'gb_used': round(stored_bytes / (1024 * 1024 * 1024), 2),
+            'reset_day': 14,
+            'last_reset': last_reset
+        }
+    except Exception as e:
+        logger.error(f"流量统计读取失败: {e}")
+        return {
+            'month': current_month,
+            'bytes_used': 0,
+            'mb_used': 0.0,
+            'gb_used': 0.0,
+            'reset_day': 14,
+            'last_reset': ''
+        }
+    finally:
+        if conn:
+            conn.close()
+
+def format_traffic(bytes_count):
+    """格式化流量显示：小于1MB显示KB，小于1GB显示MB，大于1GB显示GB"""
+    if bytes_count < 1024 * 1024:
+        return f"{bytes_count / 1024:.2f} KB"
+    elif bytes_count < 1024 * 1024 * 1024:
+        return f"{bytes_count / (1024 * 1024):.2f} MB"
+    else:
+        return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
 
 def get_cdn_ip_for_protocol(protocol_key):
     """获取指定协议的CDN优选IP"""
@@ -560,6 +669,10 @@ def create_app():
 
     @app.route('/')
     def home():
+        # 获取当月流量统计
+        traffic = get_traffic_stats()
+        traffic_display = format_traffic(traffic['bytes_used'])
+
         html = """
         <html>
         <head>
@@ -570,10 +683,18 @@ def create_app():
                 .sub-box {{ background: #f5f5f5; padding: 20px; border-radius: 10px; margin: 20px 0; }}
                 .sub-link {{ font-size: 18px; color: #0066cc; word-break: break-all; }}
                 .info {{ color: #666; font-size: 14px; }}
+                .traffic-box {{ background: #e8f4fd; padding: 20px; border-radius: 10px; margin: 20px 0; border: 1px solid #b3d9f2; }}
+                .traffic-value {{ font-size: 28px; color: #0066cc; font-weight: bold; }}
+                .traffic-label {{ color: #666; font-size: 14px; margin-top: 5px; }}
             </style>
         </head>
         <body>
             <h1>Singbox 订阅服务</h1>
+            <div class="traffic-box">
+                <p><strong>当月流量统计</strong></p>
+                <p class="traffic-value">{traffic_display}</p>
+                <p class="traffic-label">统计月份：{month} | 每月{reset_day}号自动归零 | 上次重置：{last_reset}</p>
+            </div>
             <div class="sub-box">
                 <p><strong>Base64订阅链接：</strong></p>
                 <p class="sub-link">https://{server}:{port}/sub/{country}</p>
@@ -595,7 +716,11 @@ def create_app():
             server=CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
             port=SUB_PORT,
             country=COUNTRY_CODE,
-            domain=CF_DOMAIN if CF_DOMAIN else '未配置'
+            domain=CF_DOMAIN if CF_DOMAIN else '未配置',
+            traffic_display=traffic_display,
+            month=traffic['month'],
+            reset_day=traffic['reset_day'],
+            last_reset=traffic['last_reset'] if traffic['last_reset'] else '尚未重置'
         )
         return Response(html, mimetype='text/html')
 
@@ -626,6 +751,8 @@ def create_app():
                         logger.warning(f"Failed to fetch external sub {sub_url}: {e}")
         sub_text = '\n'.join(links)
         sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
+        # 记录本次请求产生的流量
+        update_traffic(len(sub_b64.encode('utf-8')))
         return Response(sub_b64, mimetype='text/plain')
 
     @app.route(f'/singbox/{COUNTRY_CODE}')
@@ -635,11 +762,22 @@ def create_app():
         ⚠️ 禁止加token认证！同/sub路由，直接访问。
         """
         config = generate_singbox_config()
+        config_json = json.dumps(config, indent=2, ensure_ascii=False)
+        # 记录本次请求产生的流量
+        update_traffic(len(config_json.encode('utf-8')))
         return Response(
-            json.dumps(config, indent=2, ensure_ascii=False),
+            config_json,
             mimetype='application/json',
             headers={'Content-Disposition': 'attachment; filename=singbox-config.json'}
         )
+
+    @app.route('/api/traffic')
+    def traffic_api():
+        """流量统计API（不加token认证，铁律13）
+        返回当月流量使用情况JSON
+        """
+        stats = get_traffic_stats()
+        return jsonify(stats)
 
     @app.route('/api/cdn', methods=['GET', 'POST'])
     def cdn_api():

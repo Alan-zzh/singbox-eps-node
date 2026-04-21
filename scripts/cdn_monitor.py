@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.59
+Version: v1.0.60
 Date: 2026-04-21
 功能：
   - 从WeTest.vip电信优选DNS获取实时Cloudflare优选IP
@@ -11,12 +11,16 @@ Date: 2026-04-21
   - 自动分配每个协议独立IP
 
 ⚠️ CDN优选IP获取策略（按优先级）：
-  1. WeTest.vip电信优选DNS（ct.cloudflare.182682.xyz）
+  1. 本地实测IP池（CDN_PREFERRED_IPS）
+     - 湖南电信实测最优IP，按延迟排序
+     - TCPing验证可达性，不可达自动替换
+  1.5. cf.001315.xyz/ct电信API（补充方案1）
+     - 返回格式为 `IP#电信`，解析提取电信专用IP
+     - 按运营商分类，补充本地池不足
+  2. WeTest.vip电信优选DNS（ct.cloudflare.182682.xyz）
      - 通过DNS解析获取电信线路最优IP
      - 每15分钟更新，按运营商分类
      - 从日本服务器用Google DNS(8.8.8.8)解析即可获取
-  2. cf.001315.xyz电信API（降级方案1）
-     - 返回电信专用IP列表
   3. IPDB API bestcf（降级方案2）
      - 返回通用优选IP，不按运营商分类
   4. 本地降级IP池（最后降级）
@@ -46,7 +50,7 @@ try:
     from config import (
         SERVER_IP, DATA_DIR, CF_DOMAIN,
         CDN_MONITOR_INTERVAL, CDN_TOP_IPS_COUNT,
-        CDN_PREFERRED_IPS, CDN_API_WETEST_CT, CDN_API_IPDB,
+        CDN_PREFERRED_IPS, CDN_API_WETEST_CT, CDN_API_IPDB, CDN_API_001315_CT,
     )
     from logger import get_logger
 except ImportError:
@@ -66,6 +70,7 @@ except ImportError:
     ]
     CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
     CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
+    CDN_API_001315_CT = 'https://cf.001315.xyz/ct'
     CDN_MONITOR_INTERVAL = 3600
     CDN_TOP_IPS_COUNT = 5
 
@@ -75,8 +80,24 @@ DNS_SERVER = '8.8.8.8'
 
 IPDB_API_URL = CDN_API_IPDB
 
+# 湖南电信最优IP段（从实测数据提炼）
+# 162.159.x.x / 172.64.x.x / 108.162.x.x 段对湖南电信延迟最低(50-53ms)
+# 104.16-21.x.x 段对湖南电信延迟高(130ms+)，需要过滤掉
+HUNAN_CT_OPTIMAL_PREFIXES = ('162.159.', '172.64.', '108.162.', '198.41.', '173.245.')
+
 TCPING_PORT = 443
 TCPING_TIMEOUT = 3
+
+
+def is_hunan_ct_optimal(ip):
+    """判断IP是否属于湖南电信最优IP段
+    
+    从uouin.com实测数据提炼：
+    - 162.159.x.x / 172.64.x.x / 108.162.x.x 段延迟50-53ms
+    - 198.41.x.x / 173.245.x.x 段延迟50-55ms
+    - 104.16-21.x.x 段延迟130ms+，需要过滤
+    """
+    return any(ip.startswith(prefix) for prefix in HUNAN_CT_OPTIMAL_PREFIXES)
 
 
 def init_db():
@@ -145,15 +166,58 @@ def fetch_from_wetest_ct():
     """
     logger.info(f"  查询WeTest.vip电信优选: {CDN_API_WETEST_CT}")
     ips = resolve_dns(CDN_API_WETEST_CT)
-    if ips:
-        logger.info(f"  WeTest电信返回 {len(ips)} 个IP: {ips}")
+    # 筛选湖南电信最优IP段，过滤掉104.16-21段
+    filtered = [ip for ip in ips if is_hunan_ct_optimal(ip)]
+    if filtered:
+        logger.info(f"  WeTest电信返回 {len(ips)} 个IP，筛选后 {len(filtered)} 个: {filtered}")
+    elif ips:
+        logger.info(f"  WeTest电信返回 {len(ips)} 个IP，但无湖南电信最优段，全部保留")
+        filtered = ips
     else:
         logger.warning("  WeTest电信DNS无响应")
-    return ips
+        filtered = []
+    return filtered
+
+
+def fetch_from_001315_ct():
+    """从cf.001315.xyz/ct获取电信优选IP
+
+    cf.001315.xyz提供按运营商分类的Cloudflare优选IP：
+    - /ct — 电信优选
+    - /cm — 移动优选
+    - /cu — 联通优选
+
+    返回格式为 `IP#电信`，每行一个，需解析提取IP部分。
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(CDN_API_001315_CT)
+        req.add_header('User-Agent', 'Mozilla/5.0')
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content = resp.read().decode('utf-8').strip()
+
+        ips = []
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            # 格式为 `IP#电信`，提取#前面的IP
+            ip = line.split('#')[0].strip()
+            if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
+                ips.append(ip)
+        if ips:
+            logger.info(f"  001315电信API返回 {len(ips)} 个IP: {ips[:5]}...")
+        else:
+            logger.warning("  001315电信API返回空列表")
+        return ips
+    except Exception as e:
+        logger.warning(f"  001315电信API获取失败: {e}")
+        return []
 
 
 def fetch_from_ipdb_api():
-    """从IPDB API获取通用优选IP（降级方案2，不按运营商分类）"""
+    """从IPDB API获取通用优选IP（降级方案3，不按运营商分类，需筛选）"""
     try:
         import urllib.request
         req = urllib.request.Request(IPDB_API_URL)
@@ -167,7 +231,16 @@ def fetch_from_ipdb_api():
             ip = line.strip()
             if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
                 ips.append(ip)
-        return ips
+        # 筛选湖南电信最优IP段
+        filtered = [ip for ip in ips if is_hunan_ct_optimal(ip)]
+        if filtered:
+            logger.info(f"  IPDB返回 {len(ips)} 个IP，筛选后 {len(filtered)} 个: {filtered[:5]}...")
+        elif ips:
+            logger.info(f"  IPDB返回 {len(ips)} 个IP，但无湖南电信最优段，全部保留")
+            filtered = ips
+        else:
+            logger.warning("  IPDB API返回空列表")
+        return filtered
     except Exception as e:
         logger.warning(f"  IPDB API获取失败: {e}")
         return []
@@ -178,6 +251,7 @@ def fetch_cdn_ips():
 
     策略（按优先级）：
     1. 本地实测IP池 — 湖南电信实测最优IP，按延迟排序
+    1.5. cf.001315.xyz/ct电信API — 返回 `IP#电信` 格式，补充备选
     2. WeTest.vip电信优选DNS — 按运营商分类，补充备选
     3. IPDB API bestcf — 通用优选IP，补充备选
     
@@ -194,11 +268,28 @@ def fetch_cdn_ips():
     for ip in CDN_PREFERRED_IPS:
         if tcping(ip):
             valid_ips.append(ip)
+            seen.add(ip)
             logger.info(f"  {ip}(实测池): 可达")
         else:
             logger.info(f"  {ip}(实测池): 不可达")
         if len(valid_ips) >= CDN_TOP_IPS_COUNT:
             break
+
+    # 步骤1.5：cf.001315.xyz/ct电信API（补充备选）
+    if len(valid_ips) < CDN_TOP_IPS_COUNT:
+        logger.info(f"\n>>> 步骤1.5：cf.001315.xyz/ct电信API（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        ct_001315_ips = fetch_from_001315_ct()
+        if ct_001315_ips:
+            for ip in ct_001315_ips:
+                if ip not in seen:
+                    seen.add(ip)
+                    if tcping(ip):
+                        valid_ips.append(ip)
+                        logger.info(f"  {ip}(001315电信): 可达")
+                    if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                        break
+        else:
+            logger.warning("  001315电信API无响应")
 
     # 步骤2：WeTest.vip电信优选DNS（补充备选）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:

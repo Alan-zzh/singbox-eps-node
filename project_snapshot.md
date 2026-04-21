@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.54** (subscription_service.py安全加固：Token认证+IP验证+连接泄漏+异常脱敏+ImportError降级)
+**v1.0.60** (新增按月流量统计功能：traffic_stats表+自动归零+首页显示+/api/traffic接口)
 
 ---
 
@@ -29,10 +29,43 @@
 | v1.0.52 | 2026-04-21 | 全面审查修复5个隐藏Bug：证书文件名统一+自动续签cron+防火墙顺序+CDN死循环+住宅重启 |
 | v1.0.53 | 2026-04-21 | **全面优化与验证**：文档版本统一+代码质量审查+安装流程修复+功能模块测试 |
 | v1.0.54 | 2026-04-21 | subscription_service.py安全加固：Token认证+IP验证+连接泄漏+异常脱敏+ImportError降级 |
+| v1.0.60 | 2026-04-22 | 新增按月流量统计：traffic_stats表+每月14号自动归零+首页流量显示+/api/traffic接口 |
 
 ---
 
-## 最新更新内容 (v1.0.54)
+## 最新更新内容 (v1.0.60)
+
+### 按月流量统计功能
+
+**新增功能1: traffic_stats数据库表**
+- 在init_db()中创建traffic_stats表（key-value结构，与cdn_settings一致）
+- 存储key：current_month（当前月份）、current_bytes（当月已用字节数）、last_reset（上次重置日期）
+- 数据持久化到data/singbox.db，重装系统才丢失
+
+**新增功能2: update_traffic(bytes_count)函数**
+- 每次订阅请求返回时自动调用，累加响应数据量
+- 自动检测月份变化，月份变了立即归零
+- 每月14号自动归零（检查当天日期+本月是否已重置过）
+- 数据库连接在finally中关闭，防止泄漏（铁律14）
+
+**新增功能3: get_traffic_stats()函数**
+- 读取当月流量统计，返回月份、字节数、MB、GB、重置日、上次重置日期
+- 月份变化时返回0（无需等待update_traffic触发）
+
+**新增功能4: format_traffic(bytes_count)函数**
+- 格式化流量显示：小于1MB显示KB，小于1GB显示MB，大于1GB显示GB
+
+**新增功能5: /api/traffic路由（GET）**
+- 返回JSON格式流量数据（不加token认证，铁律13）
+- 响应格式：{month, bytes_used, mb_used, gb_used, reset_day, last_reset}
+
+**新增功能6: 首页流量显示**
+- 首页（/路由）新增蓝色流量统计区域
+- 显示当月已用流量（自动格式化）、统计月份、归零日、上次重置日期
+
+**修改: get_subscription()和get_singbox_config()**
+- 返回响应前调用update_traffic()记录本次请求的数据量
+- 不影响原有功能，仅追加流量统计逻辑
 
 ### subscription_service.py 安全加固（8项修复）
 

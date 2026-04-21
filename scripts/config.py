@@ -2,7 +2,7 @@
 """
 统一配置模块
 Author: Alan
-Version: v1.0.59
+Version: v1.0.60
 Date: 2026-04-21
 功能：集中管理所有配置参数
 
@@ -159,6 +159,7 @@ CDN_PREFERRED_IPS = [
 # CDN优选IP外部API（降级方案，本地池不可用时自动切换）
 CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
 CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
+CDN_API_001315_CT = 'https://cf.001315.xyz/ct'
 
 CERT_VALIDITY_DAYS = 365
 
