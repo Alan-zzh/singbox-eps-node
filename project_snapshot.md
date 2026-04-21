@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.65** (BBR+FQ+CAKE三合一加速+CAKE持久化+BBR高丢包参数)
+**v1.0.66** (修复set -e导致CAKE失败脚本退出+函数定义顺序+降级保障)
 
 ---
 
@@ -35,10 +35,30 @@
 | v1.0.63 | 2026-04-22 | 交互式SOCKS5配置+一键重装reset+一键优化optimize+3加速确认+注释修正 |
 | v1.0.64 | 2026-04-22 | 系统更新+3加速全自动先行+无需重启+流程重构 |
 | v1.0.65 | 2026-04-22 | BBR+FQ+CAKE三合一加速+CAKE持久化+BBR高丢包参数 |
+| v1.0.66 | 2026-04-22 | 修复set -e导致CAKE失败脚本退出+函数定义顺序+降级保障 |
 
 ---
 
-## 最新更新内容 (v1.0.65)
+## 最新更新内容 (v1.0.66)
+
+### 重大Bug修复：set -e导致CAKE失败时脚本直接退出
+
+**问题**: 脚本开头启用了 `set -e`，`setup_cake_qdisc` 中 `tc qdisc replace` 失败时脚本立即退出，后续所有步骤（TCP调优、文件描述符、安装singbox等）全部不执行
+**影响**: 用户在服务器上运行一键安装脚本，到CAKE步骤就中断，无法继续
+**根因**: `set -e` 下任何命令返回非零退出码都会终止脚本，而CAKE在部分内核/VPS上可能不支持
+
+**修复措施**：
+1. `tc qdisc replace` 改为 `cmd && CAKE_OK=true || true` 模式，失败不退出
+2. CAKE支持检测改为 `if modprobe sch_cake` + `tc qdisc add` 试探法，避免管道+grep触发set -e
+3. 所有 `grep -q ... && sed || echo` 模式改为独立函数 `set_default_qdisc_cake/fq`，用 `if/else` 替代
+4. 函数定义移到调用之前（bash顺序执行，函数必须先定义后调用）
+5. 删除重复的函数定义
+
+### 新增：set_default_qdisc_cake/fq 辅助函数
+
+- `set_default_qdisc_cake()` — 设置 `default_qdisc=cake`（CAKE集成FQ+PIE）
+- `set_default_qdisc_fq()` — 降级设置 `default_qdisc=fq`（FQ仍可与BBR配合）
+- 两个函数用 `if grep -q; then sed; else echo; fi` 模式，完全兼容 `set -e`
 
 ### 修正：三合一加速方案（BBR+FQ+CAKE）
 

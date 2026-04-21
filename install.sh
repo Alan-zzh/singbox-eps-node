@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.65
+# 版本: v1.0.66
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -107,6 +107,24 @@ uninstall_old_panels() {
     done
 }
 
+# 设置default_qdisc为cake（CAKE集成FQ+PIE）
+set_default_qdisc_cake() {
+    if grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null; then
+        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=cake|' /etc/sysctl.conf
+    else
+        echo "net.core.default_qdisc=cake" >> /etc/sysctl.conf
+    fi
+}
+
+# 降级设置default_qdisc为fq
+set_default_qdisc_fq() {
+    if grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null; then
+        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf
+    else
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+}
+
 # ============================================================
 # 阶段1-步骤3+4：BBR+FQ+CAKE三合一加速 + 系统优化
 #
@@ -138,11 +156,9 @@ optimize_system() {
         log_info "加速1/3：BBR已启用，跳过"
     fi
 
-    # 2. FQ公平队列（BBR必须配合FQ，否则pacing失效）
+    # 2. FQ/CAKE公平队列（BBR必须配合FQ，否则pacing失效）
     log_info "加速2/3：启用FQ公平队列（为每个TCP连接独立缓冲，BBR的pacing依赖FQ）..."
-    grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null && \
-        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=cake|' /etc/sysctl.conf || \
-        echo "net.core.default_qdisc=cake" >> /etc/sysctl.conf
+    set_default_qdisc_cake
 
     # 3. CAKE主动队列管理（集成FQ+PIE，比单独FQ更适应高丢包环境）
     log_info "加速3/3：启用CAKE队列管理（集成FQ+PIE，防止缓冲区膨胀，抗丢包）..."
@@ -197,10 +213,11 @@ EOF
 # CAKE队列管理：配置+持久化
 # CAKE集成FQ+PIE功能，比单独FQ更适应高丢包海外线路
 # 通过tc qdisc即时生效，通过systemd服务确保重启后自动恢复
+# ⚠️ 本函数所有命令必须兼容set -e，失败时降级而非退出
 # ============================================================
 setup_cake_qdisc() {
-    # 自动检测主网卡（优先eth0，降级到默认路由网卡）
-    MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    # 自动检测主网卡（优先默认路由网卡，降级eth0）
+    MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1) || true
     MAIN_IF=${MAIN_IF:-eth0}
 
     # 确保iproute2已安装（提供tc命令）
@@ -209,24 +226,37 @@ setup_cake_qdisc() {
         DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 2>/dev/null || true
     fi
 
-    # 检查内核是否支持CAKE
-    if ! tc qdisc help 2>&1 | grep -q "cake" && ! modprobe sch_cake 2>/dev/null; then
-        log_warn "内核不支持CAKE，降级使用FQ（仍可与BBR配合）"
-        grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null && \
-            sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf || \
-            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    # 仍然没有tc命令，降级
+    if ! command -v tc &>/dev/null; then
+        log_warn "tc命令不可用，降级使用FQ"
+        set_default_qdisc_fq
         return
     fi
 
-    # 应用CAKE队列规则
-    tc qdisc replace dev "$MAIN_IF" root handle 1: cake bandwidth 1000mbit flowmode triple-isolate 2>/dev/null
-    if [ $? -eq 0 ]; then
+    # 检查内核是否支持CAKE（兼容set -e：用if包裹）
+    CAKE_SUPPORTED=false
+    if modprobe sch_cake 2>/dev/null; then
+        CAKE_SUPPORTED=true
+    elif tc qdisc add dev "$MAIN_IF" root handle 1: cake 2>/dev/null; then
+        tc qdisc del dev "$MAIN_IF" root 2>/dev/null || true
+        CAKE_SUPPORTED=true
+    fi
+
+    if [ "$CAKE_SUPPORTED" = false ]; then
+        log_warn "内核不支持CAKE，降级使用FQ（仍可与BBR配合）"
+        set_default_qdisc_fq
+        return
+    fi
+
+    # 应用CAKE队列规则（兼容set -e：用变量捕获结果）
+    CAKE_OK=false
+    tc qdisc replace dev "$MAIN_IF" root handle 1: cake bandwidth 1000mbit flowmode triple-isolate 2>/dev/null && CAKE_OK=true || true
+
+    if [ "$CAKE_OK" = true ]; then
         log_info "CAKE队列已应用到 $MAIN_IF（flowmode=triple-isolate，带宽1000mbit）"
     else
         log_warn "CAKE应用失败，降级使用FQ"
-        grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null && \
-            sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf || \
-            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        set_default_qdisc_fq
         return
     fi
 
@@ -248,7 +278,7 @@ WantedBy=multi-user.target
 EOF
 
     # 创建网卡名模板服务实例
-    mkdir -p /etc/systemd/system/cake-qdisc.service.wants
+    mkdir -p /etc/systemd/system/cake-qdisc.service.wants 2>/dev/null || true
     ln -sf /etc/systemd/system/cake-qdisc.service "/etc/systemd/system/cake-qdisc@${MAIN_IF}.service" 2>/dev/null || true
 
     systemctl daemon-reload 2>/dev/null || true
@@ -752,7 +782,7 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.65${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.66${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -789,7 +819,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.65${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.66${NC}"
             echo "=========================================="
             echo ""
 
