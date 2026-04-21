@@ -164,6 +164,38 @@
   3. 所有 `grep -q ... && sed || echo` 模式改为独立函数，用 `if/else` 替代
 - **预防**: `set -e` 环境下所有可能失败的命令必须用 `|| true` 或 `if` 包裹
 
+### Bug #20: geoip/geosite在sing-box 1.12+已移除，导致singbox FATAL退出
+- **版本**: v1.0.73 → v1.0.74
+- **日期**: 2026-04-22
+- **现象**: 升级sing-box到1.13.9后，`FATAL: geoip database is deprecated in sing-box 1.8.0 and removed in sing-box 1.12.0`，所有代理端口未监听
+- **根因**: config_generator.py和subscription_service.py仍使用`geoip`/`geosite`内联规则格式，sing-box 1.12.0彻底移除了该格式
+- **修复**: 
+  1. config_generator.py：删除`{"geoip":"cn"}`和`{"geosite":"cn"}`（服务端不需要）
+  2. subscription_service.py：改用`rule_set`远程规则集格式（.srs二进制）
+  3. 添加`rule_set`定义引用SagerNet/sing-geosite和sing-geoip
+- **预防**: 升级sing-box大版本时必须检查配置格式兼容性，1.12+禁用geoip/geosite
+
+### Bug #21: CAKE降级方案FQ不如FQ-PIE
+- **版本**: v1.0.73 → v1.0.74
+- **日期**: 2026-04-22
+- **现象**: 内核不支持CAKE时降级为`fq`，但`fq_pie`比`fq`更适应高丢包环境
+- **根因**: 初始实现时选了最基础的FQ作为降级方案，没有考虑FQ-PIE
+- **修复**: `net.core.default_qdisc=fq` → `net.core.default_qdisc=fq_pie`
+- **预防**: 降级方案应选择功能最接近原方案（CAKE=FQ+PIE）的替代品（FQ-PIE）
+
+### Bug #22: CAKE降级方案仅设置sysctl未实际应用到网卡
+- **版本**: v1.0.74 → v1.0.75
+- **日期**: 2026-04-22
+- **现象**: VPS上CAKE队列显示"未启用（降级为FQ）"，降级方案也不生效
+- **根因**: 两个问题叠加：
+  1. 多数VPS精简内核缺少`sch_cake`模块，代码只尝试`modprobe`未主动安装`linux-modules-extra`
+  2. 降级时只设置`default_qdisc=fq_pie`到sysctl.conf，未通过`tc qdisc replace`实际应用到网卡接口
+- **修复**:
+  1. `setup_cake_qdisc()`增加安装`linux-modules-extra-$(uname -r)`步骤
+  2. 新增`setup_fq_pie_qdisc()`函数：`tc qdisc replace dev $MAIN_IF root fq_pie` + systemd持久化
+  3. 所有降级分支从`set_default_qdisc_fq_pie`升级为`setup_fq_pie_qdisc "$MAIN_IF"`
+- **预防**: 降级方案必须实际应用到网卡（tc qdisc replace），不能只设置sysctl参数（sysctl只影响新连接）
+
 ---
 
 ## Bug 修复历史
