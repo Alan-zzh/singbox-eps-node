@@ -133,6 +133,37 @@
    - health_check.sh（健康检查）
    - install.sh（安装脚本）
 
+### Bug #17: CAKE状态显示矛盾（verify显示未启用，summary硬编码已启用）
+- **版本**: v1.0.70 → v1.0.71
+- **日期**: 2026-04-22
+- **现象**: verify_installation检测CAKE未启用（降级为FQ），但print_summary硬编码"CAKE队列: 已启用"
+- **根因**: print_summary没有从实际检测结果读取CAKE状态，而是硬编码了"已启用"
+- **修复**: print_summary从 `tc qdisc show dev $MAIN_IF` 实际检测读取状态
+- **预防**: 状态显示必须从实际检测读取，禁止硬编码
+
+### Bug #18: reinstall命令逻辑错误（声称不需要密码，但无法获取root密码）
+- **版本**: v1.0.71 → v1.0.72
+- **日期**: 2026-04-22
+- **现象**: `bash install.sh reinstall` 声称"不需要输密码（自动从旧.env读取）"，但.env存储的是应用密码（VLESS_UUID/TROJAN_PASSWORD等），不是root密码，操作系统重装需要root密码
+- **根因**: AI混淆了"应用密码"和"root密码"的概念。.env中的密码是代理协议密码，操作系统重装需要的是系统root密码，两者完全不同
+- **修复**: 
+  1. reinstall改为操作系统重装（集成bin456789/reinstall脚本）
+  2. 添加root密码双重确认（连续输入两次，隐藏输入）
+  3. 自动检测当前OS版本，重装为相同版本
+  4. reset命令明确为singbox应用重装（保留配置和数据）
+- **预防**: 区分"应用层密码"和"系统层密码"，操作系统重装必须要求用户输入root密码
+
+### Bug #19: set -e导致CAKE失败时脚本直接退出
+- **版本**: v1.0.65 → v1.0.66
+- **日期**: 2026-04-22
+- **现象**: 一键安装脚本运行到CAKE步骤就中断，后续所有步骤（TCP调优、文件描述符、安装singbox等）全部不执行
+- **根因**: 脚本开头启用了 `set -e`，`tc qdisc replace` 在部分内核/VPS上不支持CAKE时返回非零退出码，导致脚本立即终止
+- **修复**: 
+  1. `tc qdisc replace` 改为 `cmd && CAKE_OK=true || true` 模式
+  2. CAKE支持检测改为 `if modprobe sch_cake` + `tc qdisc add` 试探法
+  3. 所有 `grep -q ... && sed || echo` 模式改为独立函数，用 `if/else` 替代
+- **预防**: `set -e` 环境下所有可能失败的命令必须用 `|| true` 或 `if` 包裹
+
 ---
 
 ## Bug 修复历史

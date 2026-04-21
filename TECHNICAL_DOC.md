@@ -4,7 +4,7 @@
 - **项目名称**: Singbox EPS Node (代理节点订阅系统)
 - **服务器**: 从.env动态读取SERVER_IP（自动检测公网IP）
 - **域名**: 从.env动态读取CF_DOMAIN（用于CDN和SSL证书）
-- **当前版本**: v1.0.62
+- **当前版本**: v1.0.72
 
 ---
 
@@ -115,6 +115,27 @@
   - config_generator.py: 优先fullchain.pem，降级cert.pem
   - health_check.sh: 循环检查fullchain.pem和cert.pem
   - cert_manager.py: check_cert_expiry()循环检查fullchain.pem和cert.pem
+
+### 7. BBR+FQ+CAKE三合一网络加速 ✅
+- **BBR**: Google拥塞控制算法，不依赖丢包信号，主动探测带宽+RTT
+- **FQ**: 公平队列规则，为每个TCP连接独立缓冲，BBR的pacing依赖FQ
+- **CAKE**: 主动队列管理，集成FQ+PIE功能，防止缓冲区膨胀，抗丢包
+- **三层防护协同**: BBR层智能调节 → FQ层公平分配 → CAKE层预防拥塞
+- **CAKE参数**: `bandwidth 1000mbit flowmode triple-isolate`
+- **持久化**: systemd服务 `cake-qdisc@{网卡名}`，重启自动恢复
+- **降级保障**: 内核不支持CAKE时自动降级为FQ（仍可与BBR配合）
+- **即时生效**: sysctl -p + tc qdisc replace，无需重启服务器
+
+### 8. 安装脚本子命令 ✅
+- `bash install.sh` — 全新安装（自动优化系统+交互式配置）
+- `bash install.sh reinstall` — 一键重装操作系统（bin456789/reinstall）
+  - 需输入root密码（两次确认），作为新系统登录密码
+  - 自动检测当前OS版本，重装为相同版本
+  - 重装后需重新运行 `bash install.sh` 部署singbox
+- `bash install.sh reset` — 一键重装singbox应用（保留配置和数据）
+  - 保留.env配置、data/数据库、cert/证书
+  - 客户端无需重新配置
+- `bash install.sh optimize` — 一键优化系统（BBR+FQ+CAKE三合一，即时生效）
 
 ---
 

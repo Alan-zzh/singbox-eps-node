@@ -13,12 +13,27 @@
 - **双格式订阅**：根据客户端User-Agent自动返回Base64或sing-box JSON格式
 - **Telegram管理机器人**：远程查看状态、更新CDN优选IP、配置AI住宅代理
 - **健康检查自动恢复**：每5分钟检测服务状态，异常自动重启
+- **按月流量统计**：每月14号自动归零，首页和API接口可查看用量
+- **BBR+FQ+CAKE三合一加速**：海外代理最优方案，即时生效无需重启
+- **一键重装操作系统**：输入密码两次确认，自动检测OS版本，装完自动重启
 
 ## 快速安装
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 ```
+
+## 安装脚本子命令
+
+```bash
+bash install.sh              # 全新安装（自动优化系统+交互式配置）
+bash install.sh reinstall    # 一键重装操作系统（需输入root密码，装完自动重启）
+bash install.sh reset        # 一键重装singbox应用（保留配置和数据，客户端无需重配）
+bash install.sh optimize     # 一键优化系统（BBR+FQ+CAKE三合一，即时生效无需重启）
+```
+
+- **reinstall**: 重装整个操作系统（清除硬盘所有数据），需输入root密码两次确认，自动检测当前OS版本重装为相同版本，重装后需重新运行 `bash install.sh` 部署singbox
+- **reset**: 只重装singbox应用，保留.env配置、流量统计数据和SSL证书，客户端无需重新配置
 
 安装完成后，编辑 `/root/singbox-eps-node/.env` 填入你的配置：
 
