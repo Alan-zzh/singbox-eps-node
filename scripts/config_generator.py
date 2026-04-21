@@ -204,8 +204,6 @@ config = {
     }] if ai_socks5_server and ai_socks5_port else []),
     "route": {
         "rules": [
-            {"geoip": "cn", "outbound": "direct"},
-            {"geosite": "cn", "outbound": "direct"},
         ] + ([{
             # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
             # 出站标签ai-residential → AI-SOCKS5节点

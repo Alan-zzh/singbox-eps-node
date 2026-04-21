@@ -385,12 +385,26 @@ def generate_singbox_config():
                     "server": "dns_direct"
                 },
                 {
-                    "geosite": "cn",
+                    "rule_set": "geosite-cn",
                     "server": "dns_direct"
                 },
                 {
-                    "geosite": "geolocation-!cn",
+                    "rule_set": "geosite-geolocation-!cn",
                     "server": "dns_proxy"
+                }
+            ],
+            "rule_set": [
+                {
+                    "tag": "geosite-cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+                },
+                {
+                    "tag": "geosite-geolocation-!cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
                 }
             ],
             "final": "dns_proxy",
@@ -588,8 +602,7 @@ def generate_singbox_config():
                     "outbound": "direct"
                 },
                 {
-                    "geosite": "cn",
-                    "geoip": ["cn", "private"],
+                    "rule_set": ["geosite-cn", "geoip-cn"],
                     "outbound": "direct"
                 },
                 # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
@@ -642,6 +655,26 @@ def generate_singbox_config():
                         "grok"
                     ],
                     "outbound": "direct"
+                }
+            ],
+            "rule_set": [
+                {
+                    "tag": "geosite-cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+                },
+                {
+                    "tag": "geoip-cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+                },
+                {
+                    "tag": "geosite-geolocation-!cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
                 }
             ],
             "auto_detect_interface": True,
