@@ -603,13 +603,6 @@ def create_app():
     @app.route('/sub')
     def get_subscription():
         """Base64订阅链接（兼容旧客户端）"""
-        # Token认证：SUB_TOKEN配置时强制校验
-        if SUB_TOKEN:
-            token = request.args.get('token', '')
-            if not token:
-                token = request.headers.get('Authorization', '').replace('Bearer ', '')
-            if token != SUB_TOKEN:
-                return Response('Unauthorized', status=401)
         links = generate_all_links()
         if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
             for sub_url in EXTERNAL_SUBS.split('|'):
@@ -635,13 +628,6 @@ def create_app():
     @app.route('/singbox')
     def get_singbox_config():
         """完整sing-box JSON配置（含自动路由规则）"""
-        # Token认证：SUB_TOKEN配置时强制校验
-        if SUB_TOKEN:
-            token = request.args.get('token', '')
-            if not token:
-                token = request.headers.get('Authorization', '').replace('Bearer ', '')
-            if token != SUB_TOKEN:
-                return Response('Unauthorized', status=401)
         config = generate_singbox_config()
         return Response(
             json.dumps(config, indent=2, ensure_ascii=False),
@@ -651,13 +637,6 @@ def create_app():
 
     @app.route('/api/cdn', methods=['GET', 'POST'])
     def cdn_api():
-        # Token认证：SUB_TOKEN配置时强制校验
-        if SUB_TOKEN:
-            token = request.headers.get('Authorization', '').replace('Bearer ', '')
-            if not token:
-                token = request.args.get('token', '')
-            if token != SUB_TOKEN:
-                return jsonify({'error': 'Unauthorized'}), 401
         if request.method == 'POST':
             data = request.get_json()
             protocol = data.get('protocol', '').strip()
