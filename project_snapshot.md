@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.68** (卸载重装=完全清除所有数据+配置+证书+服务+定时任务+防火墙)
+**v1.0.70** (CF配置自动从旧S-ui读取+证书缺失自动生成+singbox启动诊断)
 
 ---
 
@@ -38,32 +38,33 @@
 | v1.0.66 | 2026-04-22 | 修复set -e导致CAKE失败脚本退出+函数定义顺序+降级保障 |
 | v1.0.67 | 2026-04-22 | Singbox已安装时交互选择卸载重装/保留+版本号更新 |
 | v1.0.68 | 2026-04-22 | 卸载重装=完全清除所有数据+配置+证书+服务+定时任务+防火墙 |
+| v1.0.69 | 2026-04-22 | 国家代码自动检测+CF_API_TOKEN交互式填写+singbox启动诊断+NODE_PREFIX动态生成 |
+| v1.0.70 | 2026-04-22 | CF配置自动从旧S-ui读取+证书缺失自动生成+singbox启动诊断 |
 
 ---
 
-## 最新更新内容 (v1.0.68)
+## 最新更新内容 (v1.0.70)
 
-### 修复：卸载重装清除所有数据（不是只删二进制）
+### 修复：CF_API_TOKEN和CF_DOMAIN自动从旧S-ui读取
 
-**问题**: 选"卸载重装"只删除了 `/usr/local/bin/singbox` 二进制文件，配置、数据、证书、服务、定时任务全部残留
-**修复**: 卸载重装时彻底清除所有关联数据
+**问题**: CF_API_TOKEN需要交互式填写，但用户已有旧S-ui配置
+**修复**: 安装时自动读取顺序：
 
-**卸载重装清除清单**：
+1. 旧S-ui配置 `/usr/local/s-ui/scripts/manager/.env`
+2. 已存在的.env（重装场景）
+3. 交互式询问（全新安装无旧配置时）
 
-| 类别 | 清除内容 |
-|------|----------|
-| 二进制 | `/usr/local/bin/singbox` |
-| 项目目录 | `/root/singbox-eps-node/`（.env、data/、cert/、logs/、venv/、config.json等） |
-| systemd服务 | `singbox.service`、`singbox-sub.service`、`singbox-cdn.service` |
-| cron定时任务 | health_check.sh、cert_manager.py |
-| iptables规则 | HY2端口跳跃UDP+TCP规则（21000:21199） |
+**自动读取时只显示Token前8位**：`CF_API_TOKEN: 73a1fd81...`
 
-**交互提示更新**：
-```
-Singbox 已安装，请选择操作：
-  1) 卸载重装（清除所有数据：配置/证书/流量记录/服务，全新安装）
-  2) 保留当前版本（默认，直接继续）
-```
+### 修复：singbox启动失败的真正原因——证书文件缺失
+
+**问题**: config_generator.py生成config.json时不检查证书文件是否存在，4个入站（VLESS-WS/VLESS-Upgrade/Trojan-WS/Hysteria2）引用了证书路径，证书不存在时singbox启动失败
+**修复**: config_generator.py在生成配置时，如果证书文件不存在，自动调用cert_manager.py生成自签名证书
+
+**singbox启动失败根因分析**：
+- 443端口TCP+UDP不冲突（VLESS-Reality用TCP，Hysteria2用UDP）
+- 真正原因是4个TLS入站引用的证书文件不存在
+- singbox启动时发现证书路径无效，直接退出
 
 ### 重大Bug修复：set -e导致CAKE失败时脚本直接退出
 

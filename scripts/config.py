@@ -101,7 +101,7 @@ LOCKED_PORTS = {
 }
 
 SUB_TOKEN = os.getenv('SUB_TOKEN', '')
-COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'JP')
+COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 
 HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
 
@@ -169,7 +169,7 @@ AI_SOCKS5_PORT = int(os.getenv('AI_SOCKS5_PORT', '0')) if os.getenv('AI_SOCKS5_P
 AI_SOCKS5_USER = os.getenv('AI_SOCKS5_USER', '')
 AI_SOCKS5_PASS = os.getenv('AI_SOCKS5_PASS', '')
 
-NODE_PREFIX = 'ePS-JP'
+NODE_PREFIX = f'ePS-{COUNTRY_CODE}'
 
 
 def _compute_port_checksum():

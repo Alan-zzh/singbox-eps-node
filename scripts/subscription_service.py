@@ -17,11 +17,11 @@ Date: 2026-04-22
   ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
 节点命名规则: {国家代码}-{协议}（共5个用户可见节点）
-- JP-VLESS-Reality (直连节点，苹果域名伪装)
-- JP-VLESS-WS (CDN节点，独立优选IP)
-- JP-VLESS-HTTPUpgrade (CDN节点，独立优选IP)
-- JP-Trojan-WS (CDN节点，独立优选IP)
-- JP-Hysteria2 (直连节点，端口跳跃)
+- {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
+- {COUNTRY_CODE}-VLESS-WS (CDN节点，独立优选IP)
+- {COUNTRY_CODE}-VLESS-HTTPUpgrade (CDN节点，独立优选IP)
+- {COUNTRY_CODE}-Trojan-WS (CDN节点，独立优选IP)
+- {COUNTRY_CODE}-Hysteria2 (直连节点，端口跳跃)
 
 ⚠️ AI-SOCKS5不是用户节点，是幕后路由出站：
 - 仅出现在sing-box JSON的outbounds和route.rules中
@@ -93,7 +93,7 @@ logger = get_logger('subscription_service')
 SERVER_IP = SERVER_IP if SERVER_IP else os.getenv('SERVER_IP', '')
 CF_DOMAIN = CF_DOMAIN if CF_DOMAIN else os.getenv('CF_DOMAIN', '')
 DB_PATH = DB_FILE if 'DB_FILE' in dir() else os.path.join(DATA_DIR, 'singbox.db')
-COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'JP')
+COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 USE_DOMAIN = bool(CF_DOMAIN and CF_DOMAIN.strip() != '')
 
 # 协议密码和UUID：这些值只在.env中，config.py不导出，必须从环境变量读取

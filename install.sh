@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.68
+# 版本: v1.0.70
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -396,6 +396,14 @@ generate_uuids_and_passwords() {
     TROJAN_PASSWORD=$(python3 -c "import secrets; print(secrets.token_hex(16))")
     HYSTERIA2_PASSWORD=$(python3 -c "import secrets; print(secrets.token_hex(16))")
 
+    # 自动检测服务器国家代码（根据IP地理位置）
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
+    if [ -n "$SERVER_IP" ]; then
+        COUNTRY_CODE=$(curl -s --connect-timeout 5 "https://ipinfo.io/${SERVER_IP}/country" 2>/dev/null | tr -d '[:space:]' || echo "")
+    fi
+    COUNTRY_CODE=${COUNTRY_CODE:-US}
+    log_info "服务器IP: ${SERVER_IP}，国家代码: ${COUNTRY_CODE}"
+
     log_info "UUID和密码已生成"
 }
 
@@ -451,16 +459,43 @@ create_env_file() {
         log_info "跳过AI住宅代理配置（后续可手动编辑.env）"
     fi
 
-    # 交互式询问：Cloudflare域名
+    # 自动从旧S-ui配置读取CF_API_TOKEN和CF_DOMAIN（无需手动输入）
     CF_DOMAIN_INPUT=""
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  Cloudflare域名配置（可选）${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  配置后可启用CDN加速和正式SSL证书"
-    echo -e "  如果没有域名，直接回车跳过（使用自签名证书）"
-    echo ""
-    read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+    CF_API_TOKEN_INPUT=""
+
+    # 优先从旧S-ui配置读取
+    OLD_SUI_ENV="/usr/local/s-ui/scripts/manager/.env"
+    if [ -f "$OLD_SUI_ENV" ]; then
+        log_info "检测到旧S-ui配置，自动读取CF_DOMAIN和CF_API_TOKEN..."
+        CF_DOMAIN_INPUT=$(grep "^CF_DOMAIN=" "$OLD_SUI_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
+        CF_API_TOKEN_INPUT=$(grep "^CF_API_TOKEN=" "$OLD_SUI_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
+    fi
+
+    # 如果旧配置没有，尝试从已存在的.env读取（重装场景）
+    if [ -z "$CF_DOMAIN_INPUT" ] && [ -f "$BASE_DIR/.env" ]; then
+        CF_DOMAIN_INPUT=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        CF_API_TOKEN_INPUT=$(grep "^CF_API_TOKEN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+    fi
+
+    # 如果仍然没有，交互式询问
+    if [ -z "$CF_DOMAIN_INPUT" ]; then
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  Cloudflare域名配置（可选）${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  配置后可启用CDN加速和正式SSL证书"
+        echo -e "  如果没有域名，直接回车跳过（使用自签名证书）"
+        echo ""
+        read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+        if [ -n "$CF_DOMAIN_INPUT" ]; then
+            read -p "  Cloudflare API Token（留空使用自签名证书）: " CF_API_TOKEN_INPUT
+        fi
+    else
+        log_info "自动读取CF_DOMAIN: ${CF_DOMAIN_INPUT}"
+        if [ -n "$CF_API_TOKEN_INPUT" ]; then
+            log_info "自动读取CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}..."
+        fi
+    fi
 
     cat > "$BASE_DIR/.env" << EOF
 # Singbox EPS Node 环境变量配置
@@ -479,8 +514,8 @@ REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
 REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
 
 # ============ 可选 ============
-CF_API_TOKEN=
-COUNTRY_CODE=JP
+CF_API_TOKEN=${CF_API_TOKEN_INPUT}
+COUNTRY_CODE=${COUNTRY_CODE}
 SUB_TOKEN=
 AI_SOCKS5_SERVER=${AI_SOCKS5_SERVER}
 AI_SOCKS5_PORT=${AI_SOCKS5_PORT}
@@ -620,9 +655,41 @@ setup_health_check_cron() {
 
 start_services() {
     log_step "启动所有服务..."
-    systemctl enable singbox singbox-sub singbox-cdn
+
+    # 启动前验证config.json是否存在且语法正确
+    if [ ! -f "${BASE_DIR}/config.json" ]; then
+        log_error "config.json 不存在！重新生成..."
+        cd "$BASE_DIR" && source venv/bin/activate && python3 scripts/config_generator.py && deactivate
+    fi
+
+    if ! python3 -c "import json; json.load(open('${BASE_DIR}/config.json'))" 2>/dev/null; then
+        log_error "config.json 语法错误！重新生成..."
+        cd "$BASE_DIR" && source venv/bin/activate && python3 scripts/config_generator.py && deactivate
+    fi
+
+    # 验证证书文件存在
+    CERT_DIR_PATH="${BASE_DIR}/cert"
+    if [ ! -f "${CERT_DIR_PATH}/cert.pem" ] && [ ! -f "${CERT_DIR_PATH}/fullchain.pem" ]; then
+        log_warn "证书文件缺失，重新生成自签名证书..."
+        cd "$BASE_DIR" && source venv/bin/activate && python3 scripts/cert_manager.py && deactivate
+    fi
+
+    systemctl enable singbox singbox-sub singbox-cdn 2>/dev/null || true
     systemctl start singbox
-    sleep 2
+    sleep 3
+
+    # 检查singbox是否启动成功，失败则输出诊断信息
+    if ! systemctl is-active --quiet singbox; then
+        log_error "singbox 启动失败！诊断信息："
+        journalctl -u singbox --no-pager -n 20 2>/dev/null || true
+        echo ""
+        log_warn "尝试检查config.json..."
+        /usr/local/bin/singbox check -c "${BASE_DIR}/config.json" 2>&1 || true
+        echo ""
+        log_warn "singbox启动失败，但订阅服务仍可运行"
+        log_warn "请检查上方错误信息，修复后运行: systemctl restart singbox"
+    fi
+
     systemctl start singbox-sub
     sleep 2
     systemctl start singbox-cdn
@@ -680,6 +747,7 @@ verify_installation() {
 print_summary() {
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "YOUR_SERVER_IP")
     CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+    COUNTRY=$(grep "^COUNTRY_CODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "US")
 
     echo ""
     echo "=========================================="
@@ -691,12 +759,12 @@ print_summary() {
 
     if [ -n "$CF_DOMAIN" ]; then
         echo "🔗 订阅链接:"
-        echo "  Base64:    https://${CF_DOMAIN}:2087/sub/JP"
-        echo "  sing-box:  https://${CF_DOMAIN}:2087/singbox/JP"
+        echo "  Base64:    https://${CF_DOMAIN}:2087/sub/${COUNTRY}"
+        echo "  sing-box:  https://${CF_DOMAIN}:2087/singbox/${COUNTRY}"
     else
-        echo "🔗 订阅链接（请先在.env中配置CF_DOMAIN）:"
-        echo "  Base64:    https://${SERVER_IP}:2087/sub/JP"
-        echo "  sing-box:  https://${SERVER_IP}:2087/singbox/JP"
+        echo "🔗 订阅链接:"
+        echo "  Base64:    https://${SERVER_IP}:2087/sub/${COUNTRY}"
+        echo "  sing-box:  https://${SERVER_IP}:2087/singbox/${COUNTRY}"
         echo ""
         echo "⚠️  建议配置CF_DOMAIN以启用CDN和SSL证书匹配"
     fi
@@ -722,8 +790,8 @@ print_summary() {
     echo "  时区:          Asia/Shanghai"
     echo ""
     echo "📝 下一步:"
-    echo "  1. 编辑配置: nano $BASE_DIR/.env"
-    echo "  2. 如有域名，填写CF_DOMAIN和CF_API_TOKEN"
+    echo "  1. 检查配置: cat /root/singbox-eps-node/.env"
+    echo "  2. 如需修改: nano /root/singbox-eps-node/.env"
     echo "  3. 重启服务: systemctl restart singbox singbox-sub singbox-cdn"
     echo ""
     echo "🔧 服务管理:"
@@ -826,7 +894,7 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.68${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.70${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -863,7 +931,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.68${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.70${NC}"
             echo "=========================================="
             echo ""
 

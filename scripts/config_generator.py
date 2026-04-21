@@ -58,6 +58,15 @@ _cert_key = os.path.join(CERT_DIR, 'key.pem')
 if not os.path.exists(_cert_chain):
     _cert_chain = os.path.join(CERT_DIR, 'cert.pem')
 
+# 如果证书文件不存在，自动生成自签名证书（避免singbox因证书缺失启动失败）
+if not os.path.exists(_cert_chain) or not os.path.exists(_cert_key):
+    import subprocess
+    cert_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cert_manager.py')
+    if os.path.exists(cert_script):
+        subprocess.run([sys.executable, cert_script], capture_output=True, timeout=60)
+    if not os.path.exists(_cert_key):
+        _cert_key = os.path.join(CERT_DIR, 'key.pem')
+
 # ⚠️ SOCKS5入站：仅当用户名和密码均非空时才启用，避免空凭据导致无认证暴露
 socks5_inbound = [{
     "type": "socks",

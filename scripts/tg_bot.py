@@ -144,7 +144,7 @@ def get_sub_link():
     # 域名优先使用config.py的值（从.env读取+自动检测），不重复读环境变量
     addr = CONFIG_CF_DOMAIN if CONFIG_CF_DOMAIN else CONFIG_SERVER_IP or os.getenv('SERVER_IP', '')
     sub_port = CONFIG_SUB_PORT
-    country = os.getenv('COUNTRY_CODE', 'JP')
+    country = os.getenv('COUNTRY_CODE', 'US')
     return f"🔗 订阅链接:\nhttps://{addr}:{sub_port}/sub/{country}"
 
 def set_bot_commands():

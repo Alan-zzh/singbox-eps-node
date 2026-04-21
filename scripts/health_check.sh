@@ -107,16 +107,18 @@ check_ports() {
 # ============================================================
 check_subscription() {
     log "--- 订阅接口检查 ---"
-    
+
+    COUNTRY=$(grep "^COUNTRY_CODE=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "US")
+
     # 本地进程检查（不验证证书，因为localhost域名不匹配）
-    RESPONSE=$(curl -sk --connect-timeout 5 https://localhost:2087/sub/JP 2>&1)
+    RESPONSE=$(curl -sk --connect-timeout 5 "https://localhost:2087/sub/${COUNTRY}" 2>&1)
     if [ -n "$RESPONSE" ] && [ ${#RESPONSE} -gt 50 ]; then
         log "  订阅接口(本地): ✅ 正常 (返回${#RESPONSE}字节)"
     else
         log "  订阅接口(本地): ❌ 异常，尝试重启订阅服务..."
         systemctl restart singbox-sub
         sleep 5
-        RESPONSE2=$(curl -sk --connect-timeout 5 https://localhost:2087/sub/JP 2>&1)
+        RESPONSE2=$(curl -sk --connect-timeout 5 "https://localhost:2087/sub/${COUNTRY}" 2>&1)
         if [ -n "$RESPONSE2" ] && [ ${#RESPONSE2} -gt 50 ]; then
             log "  订阅接口(本地): ✅ 重启后恢复 (返回${#RESPONSE2}字节)"
         else
@@ -127,7 +129,7 @@ check_subscription() {
     # 域名访问检查（验证SSL证书是否匹配，不使用-k，模拟真实客户端）
     CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
     if [ -n "$CF_DOMAIN" ]; then
-        DOMAIN_RESPONSE=$(curl -s --connect-timeout 5 "https://${CF_DOMAIN}:2087/sub/JP" 2>&1)
+        DOMAIN_RESPONSE=$(curl -s --connect-timeout 5 "https://${CF_DOMAIN}:2087/sub/${COUNTRY}" 2>&1)
         CURL_EXIT=$?
         if [ $CURL_EXIT -eq 0 ] && [ -n "$DOMAIN_RESPONSE" ] && [ ${#DOMAIN_RESPONSE} -gt 50 ]; then
             log "  订阅接口(域名${CF_DOMAIN}): ✅ 证书匹配，正常访问"
