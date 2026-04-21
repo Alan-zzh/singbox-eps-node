@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.62** (修复证书路径BUG+sysctl防重复+requirements.txt+文档同步)
+**v1.0.63** (交互式SOCKS5配置+一键重装reset+一键优化optimize+3加速确认)
 
 ---
 
@@ -32,35 +32,63 @@
 | v1.0.60 | 2026-04-22 | 新增按月流量统计：traffic_stats表+每月14号自动归零+首页流量显示+/api/traffic接口 |
 | v1.0.61 | 2026-04-22 | 优化CDN优选IP4级降级机制+完善流量统计功能+详细文档记录 |
 | v1.0.62 | 2026-04-22 | 修复证书路径BUG(cert.crt→cert.pem)+sysctl防重复追加+requirements.txt+文档同步 |
+| v1.0.63 | 2026-04-22 | 交互式SOCKS5配置+一键重装reset+一键优化optimize+3加速确认+注释修正 |
 
 ---
 
-## 最新更新内容 (v1.0.62)
+## 最新更新内容 (v1.0.63)
 
-### Bug修复：证书路径不一致（严重）
+### 新增：交互式SOCKS5 AI代理配置
 
-**问题**: subscription_service.py证书降级路径引用cert.crt/cert.key，但cert_manager.py生成的是cert.pem/key.pem
-**影响**: 无fullchain.pem时，订阅服务无法启动（找不到cert.crt）
-**修复**: 统一降级路径为cert.pem/key.pem
+**问题**: 安装时.env中AI_SOCKS5字段为空，用户需手动编辑.env才能启用AI代理
+**修复**: 安装过程中交互式询问是否配置AI住宅代理，输入地址/端口/账号/密码后自动写入.env
 
-**config_generator.py同步修复**: 
-- 新增证书路径自动检测：优先fullchain.pem，降级cert.pem
-- 所有4处硬编码os.path.join(CERT_DIR, "cert.pem")替换为动态变量_cert_chain/_cert_key
+**交互流程**:
+1. 询问"是否配置AI住宅代理？(y/N)"
+2. 输入y后，依次输入SOCKS5地址/端口/用户名/密码
+3. 自动写入.env，config_generator.py读取后自动生成AI路由规则
+4. 不配置则跳过，后续可手动编辑.env
 
-### Bug修复：install.sh sysctl.conf重复追加
+**同时新增**：安装时也交互式询问Cloudflare域名
 
-**问题**: optimize_system()使用cat >>追加TCP参数，重复运行安装脚本会产生重复行
-**修复**: 改为逐项检查，已存在则sed更新，不存在才追加
+### 新增：一键重装（install.sh reset）
 
-### 新增：requirements.txt
+**问题**: 需要重装时只能手动操作，容易遗漏步骤
+**修复**: `bash install.sh reset` 一键重装，保留.env/data/cert，重新部署代码和服务
 
-**问题**: install.sh硬编码pip install flask python-dotenv，缺少依赖版本锁定
-**修复**: 新增requirements.txt（flask>=2.3.0, python-dotenv>=1.0.0），install.sh优先使用requirements.txt
+**流程**:
+1. 确认提示（防误操作）
+2. 停止所有服务
+3. 备份.env/data/cert到临时目录
+4. 删除旧代码
+5. 重新clone仓库+安装依赖
+6. 恢复.env/data/cert
+7. 重新生成配置+服务+防火墙+端口跳跃
+8. 启动所有服务+验证
 
-### 新增：install.sh目录创建
+### 新增：一键优化系统（install.sh optimize）
 
-**问题**: clone_repo()只clone仓库，不创建运行时必需的目录
-**修复**: clone后自动创建logs/data/cert/backups目录
+**问题**: 系统优化逻辑嵌在完整安装流程中，无法单独运行
+**修复**: `bash install.sh optimize` 独立运行3大网络加速
+
+**3大网络加速**:
+1. **BBR加速** — Google拥塞控制算法，替代默认Cubic，带宽利用率翻倍
+2. **TCP FastOpen** — 减少TCP握手延迟，首次连接即可携带数据（=3表示客户端+服务端均启用）
+3. **TCP调优** — 缓冲区/连接队列/保活参数优化，提升高并发性能
+
+### 修复：subscription_service.py注释与代码不一致
+
+**问题**: 注释写cert.crt/cert.key，但实际代码已改为cert.pem/key.pem
+**修复**: 统一注释为cert.pem/key.pem
+
+### 子命令总览
+
+| 命令 | 功能 |
+|------|------|
+| `bash install.sh` | 全新安装（交互式配置） |
+| `bash install.sh reset` | 一键重装（保留配置和数据） |
+| `bash install.sh optimize` | 一键优化系统（BBR+TCP FastOpen+TCP调优） |
+| `bash install.sh help` | 显示帮助 |
 
 ---
 

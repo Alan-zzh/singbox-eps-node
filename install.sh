@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.62
+# 版本: v1.0.63
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -218,13 +218,57 @@ create_env_file() {
 
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
 
+    # 交互式询问：是否配置AI住宅代理
+    AI_SOCKS5_SERVER=""
+    AI_SOCKS5_PORT=""
+    AI_SOCKS5_USER=""
+    AI_SOCKS5_PASS=""
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  AI住宅代理配置（可选）${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  配置后，AI网站（ChatGPT/Claude/Gemini等）流量自动走SOCKS5代理"
+    echo -e "  X/推特/groK不走代理，直连"
+    echo -e "  如果没有代理节点，直接回车跳过即可"
+    echo ""
+    read -p "  是否配置AI住宅代理？(y/N): " SETUP_AI
+    if [[ "$SETUP_AI" =~ ^[Yy]$ ]]; then
+        read -p "  SOCKS5服务器地址: " AI_SOCKS5_SERVER
+        read -p "  SOCKS5端口: " AI_SOCKS5_PORT
+        read -p "  SOCKS5用户名: " AI_SOCKS5_USER
+        read -p "  SOCKS5密码: " AI_SOCKS5_PASS
+        if [ -n "$AI_SOCKS5_SERVER" ] && [ -n "$AI_SOCKS5_PORT" ]; then
+            log_info "AI住宅代理已配置: ${AI_SOCKS5_SERVER}:${AI_SOCKS5_PORT}"
+        else
+            log_warn "SOCKS5地址或端口为空，跳过AI代理配置"
+            AI_SOCKS5_SERVER=""
+            AI_SOCKS5_PORT=""
+            AI_SOCKS5_USER=""
+            AI_SOCKS5_PASS=""
+        fi
+    else
+        log_info "跳过AI住宅代理配置（后续可手动编辑.env）"
+    fi
+
+    # 交互式询问：Cloudflare域名
+    CF_DOMAIN_INPUT=""
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  Cloudflare域名配置（可选）${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  配置后可启用CDN加速和正式SSL证书"
+    echo -e "  如果没有域名，直接回车跳过（使用自签名证书）"
+    echo ""
+    read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+
     cat > "$BASE_DIR/.env" << EOF
 # Singbox EPS Node 环境变量配置
 # 由安装脚本自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 
 # ============ 必填 ============
 SERVER_IP=${SERVER_IP}
-CF_DOMAIN=
+CF_DOMAIN=${CF_DOMAIN_INPUT}
 
 # ============ 协议密码 ============
 VLESS_UUID=${VLESS_UUID}
@@ -238,10 +282,10 @@ REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
 CF_API_TOKEN=
 COUNTRY_CODE=JP
 SUB_TOKEN=
-AI_SOCKS5_SERVER=
-AI_SOCKS5_PORT=
-AI_SOCKS5_USER=
-AI_SOCKS5_PASS=
+AI_SOCKS5_SERVER=${AI_SOCKS5_SERVER}
+AI_SOCKS5_PORT=${AI_SOCKS5_PORT}
+AI_SOCKS5_USER=${AI_SOCKS5_USER}
+AI_SOCKS5_PASS=${AI_SOCKS5_PASS}
 TG_BOT_TOKEN=
 TG_ADMIN_CHAT_ID=
 EOF
@@ -481,33 +525,154 @@ print_summary() {
     echo ""
 }
 
-main() {
+# ============================================================
+# 子命令：一键重装（保留.env，重新部署所有代码和服务）
+# ============================================================
+cmd_reset() {
     echo ""
-    echo "=========================================="
-    echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.62${NC}"
-    echo "=========================================="
-    echo ""
+    echo -e "${YELLOW}⚠️  一键重装将保留.env配置，重新部署所有代码和服务${NC}"
+    echo -e "${YELLOW}    数据库(data/)和证书(cert/)不会被删除${NC}"
+    read -p "  确认重装？(y/N): " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        log_info "已取消"
+        exit 0
+    fi
 
-    check_root
-    detect_os
-    install_dependencies
-    uninstall_old_panels
-    optimize_system
-    install_singbox
+    log_step "停止所有服务..."
+    systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
+    systemctl disable singbox singbox-sub singbox-cdn 2>/dev/null || true
+
+    # 备份.env和数据
+    BACKUP_DIR="${BASE_DIR}.reset_backup.$(date +%Y%m%d%H%M%S)"
+    mkdir -p "$BACKUP_DIR"
+    [ -f "$BASE_DIR/.env" ] && cp "$BASE_DIR/.env" "$BACKUP_DIR/"
+    [ -d "$BASE_DIR/data" ] && cp -r "$BASE_DIR/data" "$BACKUP_DIR/"
+    [ -d "$BASE_DIR/cert" ] && cp -r "$BASE_DIR/cert" "$BACKUP_DIR/"
+    log_info "配置和数据已备份到 $BACKUP_DIR"
+
+    # 删除旧代码
+    rm -rf "$BASE_DIR"
+    log_info "旧代码已删除"
+
+    # 重新部署
     clone_repo
     setup_python_env
-    generate_uuids_and_passwords
-    generate_reality_keys
-    create_env_file
+
+    # 恢复.env和数据
+    [ -f "$BACKUP_DIR/.env" ] && cp "$BACKUP_DIR/.env" "$BASE_DIR/"
+    [ -d "$BACKUP_DIR/data" ] && cp -r "$BACKUP_DIR/data" "$BASE_DIR/"
+    [ -d "$BACKUP_DIR/cert" ] && cp -r "$BACKUP_DIR/cert" "$BASE_DIR/"
+    log_info "配置和数据已恢复"
+
+    # 重新生成配置和服务
     generate_config
-    setup_certificate
+    create_systemd_services
     setup_firewall
     setup_port_hopping
-    create_systemd_services
     setup_health_check_cron
     start_services
     verify_installation
-    print_summary
+
+    echo ""
+    log_info "🎉 重装完成！配置和数据已保留"
+}
+
+# ============================================================
+# 子命令：一键优化系统（BBR+TCP FastOpen+TCP调优+文件描述符）
+# 3大网络加速：
+#   1. BBR加速 — Google拥塞控制算法，替代默认Cubic，大幅提升带宽利用率
+#   2. TCP FastOpen — 减少TCP握手延迟，首次连接即可携带数据
+#   3. TCP调优 — 缓冲区/连接队列/保活参数优化，提升高并发性能
+# ============================================================
+cmd_optimize() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  一键优化系统（3大网络加速）${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  1. BBR加速     — Google拥塞控制，替代Cubic，带宽利用率翻倍"
+    echo -e "  2. TCP FastOpen — 减少握手延迟，首次连接即可携带数据"
+    echo -e "  3. TCP调优      — 缓冲区/连接队列/保活参数，提升高并发"
+    echo ""
+
+    check_root
+    optimize_system
+
+    echo ""
+    echo -e "${GREEN}✅ 系统优化完成！3大网络加速已启用：${NC}"
+    echo -e "  BBR加速:      $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo '未知')"
+    echo -e "  TCP FastOpen:  $(sysctl net.ipv4.tcp_fastopen 2>/dev/null | awk '{print $3}' || echo '未知')"
+    echo -e "  文件描述符:    65535"
+    echo -e "  时区:          Asia/Shanghai"
+    echo ""
+}
+
+# ============================================================
+# 子命令：显示帮助
+# ============================================================
+cmd_help() {
+    echo ""
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.63${NC}"
+    echo ""
+    echo "用法:"
+    echo "  bash install.sh              全新安装（交互式配置）"
+    echo "  bash install.sh reset        一键重装（保留配置和数据）"
+    echo "  bash install.sh optimize     一键优化系统（BBR+TCP FastOpen+TCP调优）"
+    echo "  bash install.sh help         显示此帮助"
+    echo ""
+    echo "3大网络加速（optimize已包含）:"
+    echo "  1. BBR加速      — Google拥塞控制算法，替代默认Cubic"
+    echo "  2. TCP FastOpen  — 减少TCP握手延迟（=3表示客户端+服务端均启用）"
+    echo "  3. TCP调优       — 缓冲区/连接队列/保活参数优化"
+    echo ""
+}
+
+main() {
+    # 解析子命令
+    case "${1:-}" in
+        reset)
+            cmd_reset
+            ;;
+        optimize)
+            cmd_optimize
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        "")
+            # 无参数：全新安装
+            echo ""
+            echo "=========================================="
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.63${NC}"
+            echo "=========================================="
+            echo ""
+
+            check_root
+            detect_os
+            install_dependencies
+            uninstall_old_panels
+            optimize_system
+            install_singbox
+            clone_repo
+            setup_python_env
+            generate_uuids_and_passwords
+            generate_reality_keys
+            create_env_file
+            generate_config
+            setup_certificate
+            setup_firewall
+            setup_port_hopping
+            create_systemd_services
+            setup_health_check_cron
+            start_services
+            verify_installation
+            print_summary
+            ;;
+        *)
+            log_error "未知命令: $1"
+            cmd_help
+            exit 1
+            ;;
+    esac
 }
 
 main "$@"

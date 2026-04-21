@@ -847,9 +847,9 @@ if __name__ == '__main__':
     logger.info(f"sing-box JSON: https://{sub_domain}:{SUB_PORT}/singbox/{COUNTRY_CODE}")
 
     # ⚠️ SSL证书路径：优先使用fullchain.pem（Let's Encrypt/Cloudflare正式证书）
-    # 如果fullchain.pem不存在，降级使用cert.crt（cert_manager.py自签名证书）
-    # cert_manager.py自签名证书文件名：cert.crt + cert.key
-    # Cloudflare API证书文件名：cert.crt + cert.key（写入CERT_FILE/KEY_FILE）
+    # 如果fullchain.pem不存在，降级使用cert.pem（cert_manager.py自签名证书）
+    # cert_manager.py自签名证书文件名：cert.pem + key.pem
+    # Cloudflare API证书文件名：cert.pem + key.pem（写入CERT_FILE/KEY_FILE）
     # Let's Encrypt证书文件名：fullchain.pem + key.pem（acme.sh生成）
     cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
     cert_key = os.path.join(CERT_DIR, 'key.pem')
