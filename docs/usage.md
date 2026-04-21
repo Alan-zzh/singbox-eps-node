@@ -1,5 +1,7 @@
 # Singbox EPS Node 使用说明
 
+**版本**: v1.0.75 | **更新**: 2026-04-22
+
 ## 快速开始
 
 ### 一键安装
@@ -27,13 +29,14 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 | 命令 | 功能 |
 |------|------|
 | `bash install.sh` | 全新安装 |
-| `bash install.sh reset` | 一键重装（保留配置和数据） |
-| `bash install.sh optimize` | 一键优化系统（BBR+FQ+CAKE三合一） |
+| `bash install.sh reinstall` | 重装操作系统（需root密码，装完自动重启） |
+| `bash install.sh reset` | 重装singbox应用（保留配置和数据，客户端无需重配） |
+| `bash install.sh optimize` | 一键优化系统（BBR+FQ+CAKE三合一，即时生效） |
 | `bash install.sh help` | 显示帮助 |
 
 ### 获取订阅链接
 
-订阅地址格式：`https://{域名或IP}:2087/sub/{国家代码}`
+订阅地址格式：`https://{域名}:2087/sub/{国家代码}`
 
 国家代码根据服务器IP自动检测（US/JP/SG/HK等）
 
@@ -42,11 +45,10 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 | 节点名称 | 协议 | 用途 | 端口 |
 |---------|------|------|------|
 | ePS-{CC}-VLESS-Reality | VLESS + Reality | 直连节点 | 443 |
-| ePS-{CC}-VLESS-WS | VLESS + WebSocket | CDN节点 | 8443 |
-| ePS-{CC}-VLESS-HTTPUpgrade | VLESS + HTTPUpgrade | CDN节点 | 2053 |
-| ePS-{CC}-Trojan-WS | Trojan + WebSocket | CDN节点 | 2083 |
+| ePS-{CC}-VLESS-WS-CDN | VLESS + WebSocket | CDN节点 | 8443 |
+| ePS-{CC}-VLESS-HTTPUpgrade-CDN | VLESS + HTTPUpgrade | CDN节点 | 2053 |
+| ePS-{CC}-Trojan-WS-CDN | Trojan + WebSocket | CDN节点 | 2083 |
 | ePS-{CC}-Hysteria2 | Hysteria2 + 端口跳跃 | 直连节点 | 443 (跳跃: 21000-21200) |
-| AI-SOCKS5 | SOCKS5 | AI流量路由 | 外部端口 |
 
 > {CC} = 国家代码，自动检测（如US、JP、SG）
 
@@ -81,7 +83,7 @@ journalctl -u singbox-cdn -f     # CDN监控日志
 | 环境变量 | `/root/singbox-eps-node/.env` | 所有密码和密钥 |
 | Singbox配置 | `/root/singbox-eps-node/config.json` | Singbox主配置 |
 | 证书 | `/root/singbox-eps-node/cert/` | SSL证书目录 |
-| 数据库 | `/root/singbox-eps-node/data/singbox.db` | CDN IP存储 |
+| 数据库 | `/root/singbox-eps-node/data/singbox.db` | CDN IP存储+流量统计 |
 | 健康检查日志 | `/root/singbox-eps-node/logs/` | 健康检查日志 |
 
 ## BBR+FQ+CAKE三合一加速
@@ -94,7 +96,7 @@ journalctl -u singbox-cdn -f     # CDN监控日志
 | FQ | 公平分配带宽，BBR的pacing依赖FQ |
 | CAKE | 主动队列管理，集成FQ+PIE，防缓冲区膨胀 |
 
-即时生效，无需重启。内核不支持CAKE时自动降级为FQ。
+即时生效，无需重启。内核不支持CAKE时自动降级为FQ-PIE（仍可与BBR配合）。
 
 单独运行：`bash install.sh optimize`
 
@@ -152,6 +154,8 @@ netfilter-persistent save
 systemctl stop singbox singbox-sub singbox-cdn
 systemctl disable singbox singbox-sub singbox-cdn
 rm /etc/systemd/system/singbox*.service
+rm /etc/systemd/system/cake-qdisc*.service
+rm /etc/systemd/system/fq-pie-qdisc*.service
 systemctl daemon-reload
 rm -rf /root/singbox-eps-node
 netfilter-persistent save
