@@ -8,6 +8,15 @@
 **正确做法**: 使用域名访问（走CDN，证书匹配）
 **判断标准**: 
 - 任何HTTPS服务，如果SSL证书是颁发给域名的，访问地址必须用域名
+- 订阅链接必须用域名格式：https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
+
+### 规则12：安装脚本必须严格按依赖顺序执行
+**教训来源**: v1.0.52 安装脚本中setup_firewall在setup_port_hopping之前执行
+**Bug现象**: iptables -F清空刚设置的端口跳跃规则，导致HY2端口跳跃失效
+**正确做法**: 先设置端口跳跃规则，再配置防火墙
+**判断标准**:
+- 端口转发规则必须在防火墙重置之前设置
+- 安装脚本执行顺序：端口跳跃 → 防火墙 → 服务启动
 - 用IP访问HTTPS = 证书域名不匹配 = 客户端拒绝连接
 
 ### 规则2：订阅服务端口必须在Cloudflare CDN支持列表中
@@ -151,6 +160,69 @@
   - 文档更新不彻底（违反规则10）
 - **修复**: 详见project_snapshot.md v1.0.50更新内容
 - **预防**: 规则12
+
+### Bug #12: 证书文件名不一致导致续签和检查形同虚设
+- **版本**: v1.0.51 → v1.0.52
+- **日期**: 2026-04-21
+- **现象**: 证书7月19日到期后不会自动续签；cert_manager.py检查的cert.crt根本不存在
+- **根因**: 
+  - cert_manager.py生成cert.crt+cert.key，但config_generator.py引用cert.pem+key.pem，两套文件名
+  - check_cert_expiry()只检查cert.crt，服务器实际用的是fullchain.pem+key.pem（acme.sh）和cert.pem+key.pem（Cloudflare API）
+  - 没有配置证书续签cron定时任务
+  - health_check.sh只检查fullchain.pem，漏检cert.pem
+- **修复**: 
+  1. cert_manager.py: CERT_FILE从cert.crt改为cert.pem，KEY_FILE从cert.key改为key.pem
+  2. check_cert_expiry(): 循环检查fullchain.pem和cert.pem，找到哪个用哪个
+  3. health_check.sh: 同样兼容fullchain.pem和cert.pem
+  4. install.sh: 添加证书续签cron（每月1号凌晨3点执行cert_manager.py --renew）
+  5. 服务器: 手动添加cert_manager.py续签cron
+- **预防**: 证书文件名必须统一为cert.pem+key.pem（与config_generator.py一致），续签必须有cron保障
+
+### Bug #13: install.sh防火墙全放行清除端口跳跃规则
+- **版本**: v1.0.48 → v1.0.52
+- **日期**: 2026-04-21
+- **现象**: 新VPS安装后HY2端口跳跃不工作
+- **根因**: install.sh中setup_firewall()在setup_port_hopping()之后执行，iptables -F清空了所有规则包括刚设置的端口跳跃规则
+- **修复**: 调整执行顺序，setup_firewall移到setup_port_hopping之前
+- **预防**: 防火墙重置必须在iptables规则设置之前
+
+### Bug #14: tg_bot.py运行CDN更新会死循环
+- **版本**: v1.0.52
+- **日期**: 2026-04-21
+- **现象**: TG机器人/优选命令执行后永远无响应
+- **根因**: update_cdn()用subprocess.run运行cdn_monitor.py，但cdn_monitor.py是while True无限循环，永远不会退出
+- **修复**: 改为直接import cdn_monitor的fetch_cdn_ips和assign_and_save_ips函数，只执行一次
+- **预防**: 调用长期运行脚本时必须区分"单次执行"和"守护进程"模式
+
+### Bug #15: tg_bot.py设置住宅后不重启singbox-cdn
+- **版本**: v1.0.52
+- **日期**: 2026-04-21
+- **现象**: 设置AI住宅IP后CDN监控服务不刷新
+- **根因**: update_env_and_restart()只重启singbox和singbox-sub，漏了singbox-cdn（违反铁律11）
+- **修复**: 添加systemctl restart singbox-cdn
+- **预防**: 服务重启必须覆盖所有相关服务：singbox + singbox-sub + singbox-cdn
+
+### Bug #16: subscription_service.py硬编码覆盖config.py的HYSTERIA2_UDP_PORTS
+- **版本**: v1.0.52
+- **日期**: 2026-04-21
+- **现象**: HY2端口范围定义不统一，违反唯一真相源原则
+- **根因**: subscription_service.py第55行 HYSTERIA2_UDP_PORTS = list(range(21000, 21201)) 覆盖了从config.py导入的同名变量
+- **修复**: 删除该行，直接使用config.py导入的值
+- **预防**: 配置值只在config.py定义，其他文件必须import，禁止各自独立定义（规则4）
+
+### Bug #11: HY2端口跳跃iptables规则端口范围错误+缺少TCP规则
+- **版本**: v1.0.50部署时
+- **日期**: 2026-04-21
+- **现象**: HY2不通，客户端无法连接Hysteria2节点
+- **根因**: 
+  - 服务器iptables规则是旧的22000:22200范围，但config.py和订阅链接生成的是21000-21200
+  - 只有UDP规则没有TCP规则（违反铁律：HY2必须UDP+TCP双规则）
+  - 上传代码时没有同步运行cert_manager.py重新生成iptables规则
+- **修复**: 
+  1. 清空旧iptables PREROUTING规则
+  2. 重新生成21000-21200范围的UDP+TCP双协议DNAT规则（共402条）
+  3. netfilter-persistent save持久化
+- **预防**: 部署代码后必须运行cert_manager.py或手动检查iptables规则是否与config.py一致
 
 ### Bug #8: HY2端口跳跃目标端口错误（4433→443）
 - **版本**: v1.0.44 → v1.0.45

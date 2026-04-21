@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.48
+# 版本: v1.0.54
 # 用途: 新VPS全自动部署
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 # ============================================================
@@ -283,9 +283,10 @@ setup_firewall() {
 }
 
 setup_health_check_cron() {
-    log_step "配置健康检查定时任务..."
-    (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
-    log_info "健康检查已配置（每5分钟执行一次）"
+    log_step "配置定时任务..."
+    (crontab -l 2>/dev/null | grep -v "health_check.sh" | grep -v "cert_manager.py"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
+    (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * cd ${BASE_DIR} && venv/bin/python3 scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
+    log_info "定时任务已配置（健康检查每5分钟 + 证书续签每月1号凌晨3点）"
 }
 
 start_services() {
@@ -391,8 +392,8 @@ main() {
     generate_config
     setup_certificate
     setup_port_hopping
-    create_systemd_services
     setup_firewall
+    create_systemd_services
     setup_health_check_cron
     start_services
     verify_installation

@@ -2,7 +2,7 @@
 """
 统一配置模块
 Author: Alan
-Version: v1.0.4
+Version: v1.0.52
 Date: 2026-04-21
 功能：集中管理所有配置参数
 

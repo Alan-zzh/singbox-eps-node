@@ -2,7 +2,7 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v1.0.19
+Version: v1.0.54
 Date: 2026-04-21
 功能：生成完整的 Singbox 配置
 ⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from config import BASE_DIR, CERT_DIR
 except ImportError:
-    BASE_DIR = '/root/singbox-eps-node'
+    BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CERT_DIR = os.path.join(BASE_DIR, 'cert')
 
 # 读取环境变量
@@ -42,13 +42,27 @@ reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
 reality_short_id = env_vars.get('REALITY_SHORT_ID', 'abcd1234')
 server_ip = env_vars.get('SERVER_IP', '')
 cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
-socks5_user = env_vars.get('SOCKS5_USER', 'socks5')
-socks5_pass = env_vars.get('SOCKS5_PASS', 'socks5pass')
+socks5_user = env_vars.get('SOCKS5_USER', '')
+socks5_pass = env_vars.get('SOCKS5_PASS', '')
 
 ai_socks5_server = env_vars.get('AI_SOCKS5_SERVER', '')
 ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
 ai_socks5_user = env_vars.get('AI_SOCKS5_USER', '')
 ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
+
+# ⚠️ SOCKS5入站：仅当用户名和密码均非空时才启用，避免空凭据导致无认证暴露
+socks5_inbound = [{
+    "type": "socks",
+    "tag": "socks-in",
+    "listen": "0.0.0.0",
+    "listen_port": 1080,
+    "users": [
+        {
+            "username": socks5_user,
+            "password": socks5_pass
+        }
+    ]
+}] if socks5_user and socks5_pass else []
 
 config = {
     "log": {
@@ -57,19 +71,7 @@ config = {
         "output": "/var/log/singbox.log",
         "timestamp": True
     },
-    "inbounds": [
-        {
-            "type": "socks",
-            "tag": "socks-in",
-            "listen": "0.0.0.0",
-            "listen_port": 1080,
-            "users": [
-                {
-                    "username": socks5_user,
-                    "password": socks5_pass
-                }
-            ]
-        },
+    "inbounds": socks5_inbound + [
         {
             "type": "vless",
             "tag": "vless-reality",
@@ -221,4 +223,4 @@ with open(os.path.join(BASE_DIR, "config.json"), 'w') as f:
 
 print("[OK] Singbox配置已保存")
 print(f"  配置文件: {os.path.join(BASE_DIR, 'config.json')}")
-print(f"  入站协议: VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2, SOCKS5")
+print(f"  入站协议: VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2" + (", SOCKS5" if socks5_user and socks5_pass else ""))

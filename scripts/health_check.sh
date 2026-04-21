@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # singbox-eps-node 服务健康检查与自动修复脚本
-# 版本: v1.0.1
+# 版本: v1.0.54
 # 日期: 2026-04-21
 # 用途: 启动前检查、定期健康检查、故障自动恢复
 # 部署: 放置在 /root/singbox-eps-node/scripts/health_check.sh
@@ -160,21 +160,27 @@ check_firewall() {
 # ============================================================
 check_cert() {
     log "--- 证书有效期检查 ---"
-    CERT_FILE="$BASE_DIR/cert/fullchain.pem"
-    if [ -f "$CERT_FILE" ]; then
+    CERT_FILE=""
+    for f in "$BASE_DIR/cert/fullchain.pem" "$BASE_DIR/cert/cert.pem"; do
+        if [ -f "$f" ]; then
+            CERT_FILE="$f"
+            break
+        fi
+    done
+    if [ -n "$CERT_FILE" ]; then
         EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
         EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null)
         NOW_EPOCH=$(date +%s)
         DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
         if [ "$DAYS_LEFT" -gt 30 ]; then
-            log "  证书有效期: ✅ 剩余${DAYS_LEFT}天 (到期: $EXPIRY)"
+            log "  证书有效期: ✅ 剩余${DAYS_LEFT}天 (到期: $EXPIRY, 文件: $(basename $CERT_FILE))"
         elif [ "$DAYS_LEFT" -gt 0 ]; then
             log "  证书有效期: ⚠️ 剩余${DAYS_LEFT}天，即将过期！ (到期: $EXPIRY)"
         else
             log "  证书有效期: ❌ 已过期！需要立即续期"
         fi
     else
-        log "  证书文件: ❌ 不存在"
+        log "  证书文件: ❌ 不存在 (fullchain.pem 和 cert.pem 均未找到)"
     fi
 }
 

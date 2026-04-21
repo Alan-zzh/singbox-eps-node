@@ -10,3 +10,9 @@ __pycache__/
 *.bak
 .port_lock
 config.json
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+venv/
+.venv/

@@ -2,7 +2,7 @@
 """
 Singbox 证书管理服务
 Author: Alan
-Version: v1.0.4
+Version: v1.0.54
 Date: 2026-04-20
 功能：
   - 支持 Cloudflare API 申请长期证书
@@ -31,15 +31,15 @@ except ImportError:
         return logging.getLogger(name)
 
     CERT_DIR = '/root/singbox-eps-node/cert'
-    BASE_DIR = '/root/singbox-eps-node'
+    BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CF_DOMAIN = ''
     CERT_VALIDITY_DAYS = 365
     SERVER_IP = ''
 
 logger = get_logger('cert_manager')
 
-CERT_FILE = os.path.join(CERT_DIR, 'cert.crt')
-KEY_FILE = os.path.join(CERT_DIR, 'cert.key')
+CERT_FILE = os.path.join(CERT_DIR, 'cert.pem')
+KEY_FILE = os.path.join(CERT_DIR, 'key.pem')
 
 # ⚠️ CF_API_TOKEN从.env读取，不直接用os.getenv覆盖config.py的CF_DOMAIN
 # config.py的CF_DOMAIN已经从.env读取过了，这里直接用导入的值
@@ -176,22 +176,26 @@ def obtain_certificate():
     return generate_self_signed_cert()
 
 def check_cert_expiry():
-    """检查证书是否过期"""
-    if not os.path.exists(CERT_FILE):
-        return True
-    try:
-        result = subprocess.run(
-            ['openssl', 'x509', '-in', CERT_FILE, '-noout', '-enddate'],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            end_date_str = result.stdout.split('=')[1].strip()
-            end_date = datetime.strptime(end_date_str, '%b %d %H:%M:%S %Y %Z')
-            days_left = (end_date - datetime.now()).days
-            logger.info(f"[INFO] 证书剩余有效期: {days_left} 天")
-            return days_left < 30
-    except Exception as e:
-        logger.warning(f"[WARN] 检查证书过期失败: {e}")
+    """检查证书是否过期
+    检查顺序：fullchain.pem（Let's Encrypt） > cert.pem（Cloudflare API/自签名）
+    """
+    for cert_name in ['fullchain.pem', 'cert.pem']:
+        cert_path = os.path.join(CERT_DIR, cert_name)
+        if os.path.exists(cert_path):
+            try:
+                result = subprocess.run(
+                    ['openssl', 'x509', '-in', cert_path, '-noout', '-enddate'],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    end_date_str = result.stdout.split('=')[1].strip()
+                    end_date = datetime.strptime(end_date_str, '%b %d %H:%M:%S %Y %Z')
+                    days_left = (end_date - datetime.now()).days
+                    logger.info(f"[INFO] 证书({cert_name})剩余有效期: {days_left} 天")
+                    return days_left < 30
+            except Exception as e:
+                logger.warning(f"[WARN] 检查证书过期失败({cert_name}): {e}")
+    logger.warning("[WARN] 未找到任何证书文件，需要申请")
     return True
 
 def restart_singbox():

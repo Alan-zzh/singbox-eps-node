@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.50** (全面排查隐藏坑+跨文件一致性修复)
+**v1.0.54** (subscription_service.py安全加固：Token认证+IP验证+连接泄漏+异常脱敏+ImportError降级)
 
 ---
 
@@ -25,6 +25,47 @@
 | v1.0.48 | 2026-04-21 | 脱敏处理+一键安装脚本+GitHub仓库公开+临时脚本清理 |
 | v1.0.49 | 2026-04-21 | 修复AI-SOCKS5被错误暴露为用户节点+新增铁律11 |
 | v1.0.50 | 2026-04-21 | 全面排查13个隐藏坑+跨文件一致性修复 |
+| v1.0.51 | 2026-04-21 | 修复HY2端口跳跃iptables规则：端口范围22000→21000+补全TCP双规则 |
+| v1.0.52 | 2026-04-21 | 全面审查修复5个隐藏Bug：证书文件名统一+自动续签cron+防火墙顺序+CDN死循环+住宅重启 |
+| v1.0.53 | 2026-04-21 | **全面优化与验证**：文档版本统一+代码质量审查+安装流程修复+功能模块测试 |
+| v1.0.54 | 2026-04-21 | subscription_service.py安全加固：Token认证+IP验证+连接泄漏+异常脱敏+ImportError降级 |
+
+---
+
+## 最新更新内容 (v1.0.54)
+
+### subscription_service.py 安全加固（8项修复）
+
+**修复1: 添加 urllib.request 导入**
+- 文件头部添加 `import urllib.request`（get_subscription中已使用但未导入）
+
+**修复2: 修复 ImportError 降级逻辑的 NameError 风险**
+- 当 config.py 导入失败时，except 块只定义了 get_logger，导致后续代码引用 SERVER_IP/CF_DOMAIN 等变量时 NameError
+- 在 except 块中添加所有必需变量的降级值定义（从环境变量读取，带默认值）
+- 额外添加 `get_sub_domain()` 降级函数
+
+**修复3: 为 /api/cdn 路由添加 Token 认证**
+- SUB_TOKEN 配置时强制校验 Authorization header 或 token 参数
+- 未配置 SUB_TOKEN 时不影响现有功能
+
+**修复4: 为 /api/cdn POST 添加 IP 格式验证**
+- 正则验证 IP 格式（x.x.x.x）
+- 白名单验证 protocol key（只允许 vless_ws_cdn_ip/vless_upgrade_cdn_ip/trojan_ws_cdn_ip）
+
+**修复5: 为订阅路由添加 Token 认证**
+- /sub 和 /singbox 路由添加 SUB_TOKEN 校验
+- 优先从 URL 参数读取 token，降级从 Authorization header 读取
+
+**修复6: 修复数据库连接泄漏**
+- init_db()、get_cdn_ip_for_protocol()、cdn_api() 的 GET/POST 全部改用 try/finally 确保 conn.close()
+- 即使异常也不会泄漏连接
+
+**修复7: 修复异常信息泄露**
+- cdn_api() 的 500 错误不再返回 str(e)（可能泄露内部路径/SQL语句）
+- 改为 logger.error 记录详细日志，返回通用 'Internal server error'
+
+**修复8: 版本号更新**
+- v1.0.52 -> v1.0.54
 
 ---
 

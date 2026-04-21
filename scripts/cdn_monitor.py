@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.5
+Version: v1.0.54
 Date: 2026-04-21
 功能：
   - 使用指定DNS（222.246.129.80 | 59.51.78.210）解析域名获取CDN优选IP
@@ -80,17 +80,20 @@ MONITOR_INTERVAL = 3600
 def init_db():
     """初始化数据库"""
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(os.path.join(DATA_DIR, 'singbox.db'))
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cdn_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-    return os.path.join(DATA_DIR, 'singbox.db')
+    db_path = os.path.join(DATA_DIR, 'singbox.db')
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cdn_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 def resolve_via_dns(domain, dns_server, timeout=5):
@@ -224,14 +227,16 @@ def assign_and_save_ips(ips):
     logger.info(f"  Trojan-WS IP: {trojan_ws_ip}")
 
     conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_ws_cdn_ip', vless_ws_ip))
-    cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_upgrade_cdn_ip', vless_upgrade_ip))
-    cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('trojan_ws_cdn_ip', trojan_ws_ip))
-    cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('cdn_ips_list', ','.join(ips)))
-    cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('cdn_updated_at', datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_ws_cdn_ip', vless_ws_ip))
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_upgrade_cdn_ip', vless_upgrade_ip))
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('trojan_ws_cdn_ip', trojan_ws_ip))
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('cdn_ips_list', ','.join(ips)))
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('cdn_updated_at', datetime.now().isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
     logger.info(f"\n[OK] CDN优选IP已保存")
 
 

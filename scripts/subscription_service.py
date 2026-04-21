@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v1.0.39
-Date: 2026-04-20
+Version: v1.0.54
+Date: 2026-04-21
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -34,12 +34,14 @@ import os
 import sys
 import base64
 import urllib.parse
+import urllib.request
 import sqlite3
 import random
 import json
 from datetime import datetime
 import ssl
 
+# ⚠️ 必须先加载.env，再导入config.py（config.py会读取环境变量）
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
@@ -59,6 +61,29 @@ except ImportError:
         import logging
         logging.basicConfig(level=logging.INFO)
         return logging.getLogger(name)
+    SERVER_IP = os.getenv('SERVER_IP', '')
+    CF_DOMAIN = os.getenv('CF_DOMAIN', '')
+    DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+    CERT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cert')
+    DB_FILE = os.path.join(DATA_DIR, 'singbox.db')
+    SUB_PORT = int(os.getenv('SUB_PORT', '2087'))
+    VLESS_WS_PORT = int(os.getenv('VLESS_WS_PORT', '8443'))
+    VLESS_UPGRADE_PORT = int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
+    TROJAN_WS_PORT = int(os.getenv('TROJAN_WS_PORT', '2083'))
+    HYSTERIA2_PORT = int(os.getenv('HYSTERIA2_PORT', '443'))
+    SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '1080'))
+    HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
+    REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID', 'abcd1234')
+    REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
+    REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
+    AI_SOCKS5_SERVER = os.getenv('AI_SOCKS5_SERVER', '')
+    AI_SOCKS5_PORT = os.getenv('AI_SOCKS5_PORT', '')
+    AI_SOCKS5_USER = os.getenv('AI_SOCKS5_USER', '')
+    AI_SOCKS5_PASS = os.getenv('AI_SOCKS5_PASS', '')
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    def get_sub_domain():
+        """降级：config.py导入失败时，用CF_DOMAIN或SERVER_IP作为订阅地址"""
+        return CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
 logger = get_logger('subscription_service')
 
@@ -84,34 +109,40 @@ REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID', 'abcd1234')
 REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
 REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
 EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
-
-HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
+SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cdn_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cdn_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def get_cdn_ip_for_protocol(protocol_key):
     """获取指定协议的CDN优选IP"""
+    conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT value FROM cdn_settings WHERE key=?", (protocol_key,))
         row = cursor.fetchone()
-        conn.close()
         if row and row[0] and row[0] != SERVER_IP:
             return row[0]
     except Exception:
         pass
+    finally:
+        if conn:
+            conn.close()
     if CF_DOMAIN and CF_DOMAIN.strip():
         return CF_DOMAIN
     return SERVER_IP
@@ -572,6 +603,13 @@ def create_app():
     @app.route('/sub')
     def get_subscription():
         """Base64订阅链接（兼容旧客户端）"""
+        # Token认证：SUB_TOKEN配置时强制校验
+        if SUB_TOKEN:
+            token = request.args.get('token', '')
+            if not token:
+                token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            if token != SUB_TOKEN:
+                return Response('Unauthorized', status=401)
         links = generate_all_links()
         if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
             for sub_url in EXTERNAL_SUBS.split('|'):
@@ -597,6 +635,13 @@ def create_app():
     @app.route('/singbox')
     def get_singbox_config():
         """完整sing-box JSON配置（含自动路由规则）"""
+        # Token认证：SUB_TOKEN配置时强制校验
+        if SUB_TOKEN:
+            token = request.args.get('token', '')
+            if not token:
+                token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            if token != SUB_TOKEN:
+                return Response('Unauthorized', status=401)
         config = generate_singbox_config()
         return Response(
             json.dumps(config, indent=2, ensure_ascii=False),
@@ -606,32 +651,55 @@ def create_app():
 
     @app.route('/api/cdn', methods=['GET', 'POST'])
     def cdn_api():
+        # Token认证：SUB_TOKEN配置时强制校验
+        if SUB_TOKEN:
+            token = request.headers.get('Authorization', '').replace('Bearer ', '')
+            if not token:
+                token = request.args.get('token', '')
+            if token != SUB_TOKEN:
+                return jsonify({'error': 'Unauthorized'}), 401
         if request.method == 'POST':
             data = request.get_json()
             protocol = data.get('protocol', '').strip()
             new_ip = data.get('ip', '').strip()
             if not protocol or not new_ip:
                 return jsonify({'error': 'protocol and ip required'}), 400
+            # IP格式验证
+            import re
+            IP_REGEX = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+            if not IP_REGEX.match(new_ip):
+                return jsonify({'error': 'Invalid IP format'}), 400
+            valid_keys = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
+            if protocol not in valid_keys:
+                return jsonify({'error': 'Invalid protocol key'}), 400
+            conn = None
             try:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", (protocol, new_ip))
                 conn.commit()
-                conn.close()
                 return jsonify({'message': 'OK', 'protocol': protocol, 'ip': new_ip})
             except Exception as e:
-                return jsonify({'error': str(e)}), 500
+                logger.error(f"CDN API错误: {e}")
+                return jsonify({'error': 'Internal server error'}), 500
+            finally:
+                if conn:
+                    conn.close()
         else:
+            conn = None
             try:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
                 cursor.execute("SELECT key, value FROM cdn_settings")
                 rows = cursor.fetchall()
-                conn.close()
                 result = {row[0]: row[1] for row in rows}
                 return jsonify(result)
             except Exception as e:
-                return jsonify({'error': str(e)}), 500
+                logger.error(f"CDN API错误: {e}")
+                return jsonify({'error': 'Internal server error'}), 500
+            finally:
+                if conn:
+                    conn.close()
 
     return app
 

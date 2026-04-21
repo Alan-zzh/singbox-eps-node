@@ -2,7 +2,7 @@
 """
 TG机器人总控脚本
 Author: Alan
-Version: v1.0.0
+Version: v1.0.54
 Date: 2026-04-20
 功能：
   - /status 查看服务器状态
@@ -22,12 +22,11 @@ from datetime import datetime
 
 BOT_TOKEN = os.getenv('TG_BOT_TOKEN', '')
 ADMIN_CHAT_ID = os.getenv('TG_ADMIN_CHAT_ID', '')
-BASE_DIR = '/root/singbox-eps-node'
-ENV_FILE = os.path.join(BASE_DIR, '.env')
 
 def load_env():
-    if os.path.exists(ENV_FILE):
-        with open(ENV_FILE, 'r') as f:
+    env_path = os.path.join(os.getenv('BASE_DIR', '/root/singbox-eps-node'), '.env')
+    if os.path.exists(env_path):
+        with open(env_path, 'r') as f:
             for line in f:
                 if '=' in line and not line.startswith('#'):
                     k, v = line.strip().split('=', 1)
@@ -35,15 +34,18 @@ def load_env():
 
 load_env()
 
-# ⚠️ 从config.py读取端口，禁止硬编码（历史教训：v1.0.42前默认6969导致服务不可达）
+# ⚠️ 从config.py读取端口和BASE_DIR，禁止硬编码（历史教训：v1.0.42前默认6969导致服务不可达）
 # SUB_PORT=2087硬编码在config.py中，不在.env中，必须从config.py导入
-sys.path.insert(0, os.path.join(BASE_DIR, 'scripts'))
+sys.path.insert(0, os.path.join(os.getenv('BASE_DIR', '/root/singbox-eps-node'), 'scripts'))
 try:
-    from config import SUB_PORT as CONFIG_SUB_PORT, CF_DOMAIN as CONFIG_CF_DOMAIN, SERVER_IP as CONFIG_SERVER_IP
+    from config import BASE_DIR, SUB_PORT as CONFIG_SUB_PORT, CF_DOMAIN as CONFIG_CF_DOMAIN, SERVER_IP as CONFIG_SERVER_IP
 except ImportError:
+    BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CONFIG_SUB_PORT = 2087
     CONFIG_CF_DOMAIN = ''
     CONFIG_SERVER_IP = ''
+
+ENV_FILE = os.path.join(BASE_DIR, '.env')
 
 if not BOT_TOKEN:
     print("[ERROR] 未配置 TG_BOT_TOKEN，请在 .env 中添加")
@@ -70,26 +72,26 @@ def get_server_status():
     try:
         result = subprocess.run(['systemctl', 'is-active', 'singbox'], capture_output=True, text=True)
         status.append(f"🟢 Singbox: {'运行中' if result.stdout.strip() == 'active' else '❌ 已停止'}")
-    except:
+    except Exception:
         status.append("🔴 Singbox: 未知")
 
     try:
         result = subprocess.run(['systemctl', 'is-active', 'singbox-sub'], capture_output=True, text=True)
         status.append(f"🟢 订阅服务: {'运行中' if result.stdout.strip() == 'active' else '❌ 已停止'}")
-    except:
+    except Exception:
         status.append("🔴 订阅服务: 未知")
 
     try:
         result = subprocess.run(['systemctl', 'is-active', 'singbox-cdn'], capture_output=True, text=True)
         status.append(f"🟢 CDN监控: {'运行中' if result.stdout.strip() == 'active' else '❌ 已停止'}")
-    except:
+    except Exception:
         status.append("🔴 CDN监控: 未知")
 
     try:
         with open('/proc/loadavg', 'r') as f:
             load = f.read().split()
         status.append(f"📈 负载: {load[0]} {load[1]} {load[2]}")
-    except:
+    except Exception:
         pass
 
     try:
@@ -99,7 +101,7 @@ def get_server_status():
         avail = int(lines[2].split()[1])
         used_pct = int((total - avail) / total * 100)
         status.append(f"💾 内存: {used_pct}%")
-    except:
+    except Exception:
         pass
 
     return '\n'.join(status)
@@ -125,11 +127,15 @@ def restart_singbox():
 def update_cdn():
     try:
         os.chdir(BASE_DIR)
-        result = subprocess.run(['python3', 'scripts/cdn_monitor.py'], capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            return "✅ CDN IP 已更新"
+        sys.path.insert(0, os.path.join(BASE_DIR, 'scripts'))
+        from cdn_monitor import fetch_cdn_ips, assign_and_save_ips, init_db
+        init_db()
+        ips = fetch_cdn_ips()
+        if ips:
+            assign_and_save_ips(ips)
+            return f"✅ CDN IP 已更新 ({len(ips)}个IP)"
         else:
-            return f"❌ CDN 更新失败:\n{result.stderr[:500]}"
+            return "❌ CDN IP 更新失败：未获取到任何IP"
     except Exception as e:
         return f"❌ 异常: {e}"
 
@@ -188,6 +194,7 @@ def update_env_and_restart(key, value):
     subprocess.run(['python3', os.path.join(BASE_DIR, 'scripts/config_generator.py')], capture_output=True)
     subprocess.run(['systemctl', 'restart', 'singbox'], capture_output=True)
     subprocess.run(['systemctl', 'restart', 'singbox-sub'], capture_output=True)
+    subprocess.run(['systemctl', 'restart', 'singbox-cdn'], capture_output=True)
 
 def handle_ai_socks5(action, params=None):
     """处理AI SOCKS5设置"""
