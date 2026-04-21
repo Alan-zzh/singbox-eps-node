@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.66
+# 版本: v1.0.67
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -289,8 +289,25 @@ EOF
 install_singbox() {
     log_step "安装 Singbox 内核..."
     if command -v singbox &>/dev/null; then
-        log_info "Singbox 已安装: $(singbox version 2>/dev/null | head -1 || echo '未知版本')"
-        return
+        CURRENT_VER=$(singbox version 2>/dev/null | head -1 || echo '未知版本')
+        log_info "检测到 Singbox 已安装: $CURRENT_VER"
+        echo ""
+        echo -e "  ${YELLOW}Singbox 已安装，请选择操作：${NC}"
+        echo -e "  1) 卸载重装（删除当前版本，重新下载安装）"
+        echo -e "  2) 保留当前版本（默认，直接继续）"
+        echo ""
+        read -p "  请输入选择 [1/2]（默认2）: " SINGBOX_CHOICE
+        SINGBOX_CHOICE=${SINGBOX_CHOICE:-2}
+
+        if [ "$SINGBOX_CHOICE" = "1" ]; then
+            log_info "卸载当前 Singbox..."
+            systemctl stop singbox 2>/dev/null || true
+            rm -f /usr/local/bin/singbox
+            log_info "已卸载，开始重新安装..."
+        else
+            log_info "保留当前 Singbox: $CURRENT_VER"
+            return
+        fi
     fi
 
     ARCH=$(uname -m)
@@ -782,7 +799,7 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.66${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.67${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -819,7 +836,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.66${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.67${NC}"
             echo "=========================================="
             echo ""
 
