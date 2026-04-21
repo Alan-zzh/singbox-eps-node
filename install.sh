@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.72
+# 版本: v1.0.73
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -366,7 +366,7 @@ install_singbox() {
         *)       log_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
 
-    SINGBOX_VER="1.11.3"
+    SINGBOX_VER="1.13.9"
     SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}.tar.gz"
 
     log_info "下载 Singbox v${SINGBOX_VER} (${SINGBOX_ARCH})..."
@@ -1026,7 +1026,7 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.72${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.73${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -1076,7 +1076,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.72${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.73${NC}"
             echo "=========================================="
             echo ""
 
