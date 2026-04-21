@@ -2,35 +2,29 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.55
+Version: v1.0.56
 Date: 2026-04-21
 功能：
-  - 从优选IP池中TCPing测速，选出可达的IP
-  - 每小时自动测速更新，确保始终使用可达IP
+  - 从IPDB API获取实时Cloudflare优选IP（每30分钟更新）
+  - TCPing验证可达性
+  - 每小时自动更新，确保始终使用最优IP
   - 自动分配每个协议独立IP
 
-⚠️ CDN优选IP核心原理：
-  Cloudflare使用Anycast网络，任何Cloudflare IP都能访问到源站。
-  但不同IP段对中国用户的路由质量不同：
-  - 域名DNS解析返回的IP（如172.67.x.x、104.21.x.x）对中国延迟高
-  - 实测优选IP（如104.16.x.x、162.159.x.x）对中国延迟低
-  - 客户端连接优选IP时，SNI和Host仍指向域名，源站正确响应
-
-⚠️ 为什么不从服务器端测速选"最快"IP：
-  服务器在日本，TCPing测的是日本→Cloudflare的延迟，不是中国→Cloudflare的延迟。
-  从日本测最快的IP，对中国用户可能很慢。所以只验证可达性，不按延迟排序。
-  优选IP池中的IP顺序已经按中国用户实测延迟从低到高排列。
-
-获取策略：
-  1. 中国DoH解析（腾讯doh.pub / 阿里dns.alidns.com）— 获取域名IP作为备选
-  2. 优选IP池（已按中国用户延迟排序）— TCPing验证可达性
-  3. 合并去重，优先使用优选IP池中排在前面的可达IP
+⚠️ CDN优选IP获取策略（按优先级）：
+  1. IPDB API（https://ipdb.api.030101.xyz/?type=bestcf）
+     - 实时从中国客户端测速数据中获取最优IP
+     - 每30分钟更新一次，数据来源可靠
+     - API返回的IP已按中国用户延迟排序
+  2. 本地优选IP池（作为API不可用时的降级方案）
+     - 池中IP按中国电信用户实测延迟排列
+  3. 中国DoH解析（腾讯doh.pub）— 获取域名IP作为最后备选
 
 历史教训：
   - v1.0.36用日本服务器DNS实时解析，返回的IP对中国延迟150-200ms
   - v1.0.37恢复固定IP池，但IP可能过期失效
   - v1.0.45改用指定DNS解析+固定IP池降级，但指定DNS从日本不可达
   - v1.0.55改用中国DoH解析+优选IP池TCPing验证可达性
+  - v1.0.56改用IPDB API获取实时优选IP，数据更准确及时
 """
 
 import os
@@ -57,12 +51,20 @@ except ImportError:
 
 logger = get_logger('cdn_monitor')
 
+IPDB_API_URL = 'https://ipdb.api.030101.xyz/?type=bestcf'
+
 CHINA_DOH_SERVERS = [
     ('https://doh.pub/dns-query', '腾讯DoH', {'accept': 'application/dns-json'}),
-    ('https://dns.alidns.com/resolve', '阿里DoH', None),
 ]
 
-PREFERRED_IPS = [
+FALLBACK_IPS = [
+    '162.159.38.180',
+    '108.162.198.116',
+    '172.64.53.134',
+    '162.159.39.89',
+    '162.159.45.244',
+    '162.159.44.128',
+    '172.64.52.173',
     '104.16.123.96',
     '104.16.124.96',
     '104.17.136.90',
@@ -108,11 +110,7 @@ def init_db():
 
 
 def tcping(ip, port=TCPING_PORT, timeout=TCPING_TIMEOUT):
-    """TCPing测试：验证IP端口可达性，返回是否可达
-    
-    注意：不使用延迟排序，因为服务器在日本，测的延迟不代表中国用户体验。
-    优选IP池的顺序已按中国用户实测延迟排列，只需验证可达性即可。
-    """
+    """TCPing测试：验证IP端口可达性"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
@@ -123,8 +121,34 @@ def tcping(ip, port=TCPING_PORT, timeout=TCPING_TIMEOUT):
         return False
 
 
+def fetch_from_ipdb_api():
+    """从IPDB API获取实时优选IP列表
+    
+    IPDB API返回的IP已按中国用户延迟排序，直接取前N个即可。
+    API每30分钟更新一次数据，时效性好。
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(IPDB_API_URL)
+        req.add_header('User-Agent', 'Mozilla/5.0')
+        
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content = resp.read().decode('utf-8').strip()
+        
+        ips = []
+        for line in content.split('\n'):
+            ip = line.strip()
+            if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
+                ips.append(ip)
+        
+        return ips
+    except Exception as e:
+        logger.warning(f"  IPDB API获取失败: {e}")
+        return []
+
+
 def resolve_via_doh(domain, doh_url, doh_name, headers=None, timeout=10):
-    """通过DoH（DNS over HTTPS）解析域名，返回IP列表"""
+    """通过DoH解析域名，返回IP列表"""
     try:
         import urllib.request
         
@@ -151,57 +175,67 @@ def resolve_via_doh(domain, doh_url, doh_name, headers=None, timeout=10):
 
 
 def fetch_cdn_ips():
-    """获取优选IP（验证可达性，按池中顺序选择）
+    """获取优选IP
 
-    策略：
-    1. 从优选IP池中按顺序TCPing验证可达性
-       - 池中IP已按中国用户实测延迟排列，排在前面的优先使用
-       - 只验证可达性，不按服务器端延迟排序
-    2. 中国DoH解析获取域名IP作为备选
-    3. 合并去重
+    策略（按优先级）：
+    1. IPDB API获取实时优选IP — TCPing验证可达性
+    2. 本地降级IP池 — TCPing验证可达性
+    3. 中国DoH解析 — 获取域名IP作为最后备选
     """
     domain = CF_DOMAIN
     valid_ips = []
     seen = set()
 
-    # 步骤1：从优选IP池中验证可达性（按顺序，排在前面的优先）
-    logger.info(f">>> 步骤1：优选IP池验证可达性（{len(PREFERRED_IPS)}个候选，按中国延迟排序）")
-    for ip in PREFERRED_IPS:
-        if tcping(ip):
+    # 步骤1：从IPDB API获取实时优选IP
+    logger.info(f">>> 步骤1：从IPDB API获取实时优选IP")
+    api_ips = fetch_from_ipdb_api()
+    if api_ips:
+        logger.info(f"  IPDB API返回 {len(api_ips)} 个IP: {api_ips[:5]}...")
+        for ip in api_ips:
             if ip not in seen:
                 seen.add(ip)
-                valid_ips.append(ip)
-                logger.info(f"  {ip}: 可达")
-            if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                break
-        else:
-            logger.info(f"  {ip}: 不可达")
+                if tcping(ip):
+                    valid_ips.append(ip)
+                    logger.info(f"  {ip}(API): 可达")
+                else:
+                    logger.info(f"  {ip}(API): 不可达")
+                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                    break
+    else:
+        logger.warning("  IPDB API无响应，使用降级IP池")
 
-    # 步骤2：中国DoH解析获取域名IP（作为补充）
-    if domain and domain.strip():
-        logger.info(f"\n>>> 步骤2：中国DoH解析 {domain}（补充备选）")
-        doh_ips = []
+    # 步骤2：如果API获取不足，从降级IP池补充
+    if len(valid_ips) < CDN_TOP_IPS_COUNT:
+        logger.info(f"\n>>> 步骤2：从降级IP池补充（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        for ip in FALLBACK_IPS:
+            if ip not in seen:
+                seen.add(ip)
+                if tcping(ip):
+                    valid_ips.append(ip)
+                    logger.info(f"  {ip}(降级池): 可达")
+                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                    break
+
+    # 步骤3：中国DoH解析获取域名IP（作为最后备选）
+    if len(valid_ips) < CDN_TOP_IPS_COUNT and domain and domain.strip():
+        logger.info(f"\n>>> 步骤3：中国DoH解析 {domain}（最后备选）")
         for doh_url, doh_name, headers in CHINA_DOH_SERVERS:
-            logger.info(f"  查询 {doh_name}...")
             ips = resolve_via_doh(domain, doh_url, doh_name, headers)
             for ip in ips:
                 if ip not in seen:
                     seen.add(ip)
-                    doh_ips.append(ip)
-            logger.info(f"  {doh_name} 返回: {ips}")
-
-        # DoH返回的IP如果可达，追加到末尾
-        for ip in doh_ips:
-            if tcping(ip):
-                valid_ips.append(ip)
-                logger.info(f"  {ip}(DoH): 可达，追加")
+                    if tcping(ip):
+                        valid_ips.append(ip)
+                        logger.info(f"  {ip}(DoH): 可达")
+            if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                break
 
     if valid_ips:
         logger.info(f"\n[OK] 验证通过 {len(valid_ips)} 个IP: {valid_ips[:CDN_TOP_IPS_COUNT]}")
         return valid_ips[:CDN_TOP_IPS_COUNT]
     else:
-        logger.warning("[WARN] 所有IP均不可达，使用优选IP池前5个")
-        return PREFERRED_IPS[:CDN_TOP_IPS_COUNT]
+        logger.warning("[WARN] 所有IP均不可达，使用降级IP池前5个")
+        return FALLBACK_IPS[:CDN_TOP_IPS_COUNT]
 
 
 def assign_and_save_ips(ips):
