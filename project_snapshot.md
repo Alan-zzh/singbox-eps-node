@@ -418,18 +418,18 @@ bash /root/singbox-eps-node/scripts/health_check.sh
 - **健康检查**: 每5分钟自动执行
 
 ## 订阅链接
-- **域名（推荐，走CDN）**: https://{CF_DOMAIN}:2087/sub/JP
-- **sing-box JSON**: https://{CF_DOMAIN}:2087/singbox/JP
+- **域名（推荐，走CDN）**: https://{CF_DOMAIN}:2087/sub/{COUNTRY_CODE}
+- **sing-box JSON**: https://{CF_DOMAIN}:2087/singbox/{COUNTRY_CODE}
 - **证书**: Let's Encrypt正式证书（通配符域名），域名访问自动匹配
 - ⚠️ **禁止用IP访问**: IP访问会导致SSL证书域名不匹配
 - ⚠️ **CF_DOMAIN从.env动态读取**: 不再硬编码域名
 
 ## 节点列表（5个用户可见节点）
-1. ePS-JP-VLESS-Reality: {SERVER_IP}:443 (直连)
-2. ePS-JP-VLESS-WS-CDN: 优选IP:8443 (CDN，每小时DNS解析更新)
-3. ePS-JP-VLESS-HTTPUpgrade-CDN: 优选IP:2053 (CDN，每小时DNS解析更新)
-4. ePS-JP-Trojan-WS-CDN: 优选IP:2083 (CDN，每小时DNS解析更新)
-5. ePS-JP-Hysteria2: {SERVER_IP}:443 (直连，端口跳跃21000-21200→443，UDP+TCP)
+1. ePS-{CC}-VLESS-Reality: {SERVER_IP}:443 (直连)
+2. ePS-{CC}-VLESS-WS-CDN: 优选IP:8443 (CDN，每小时DNS解析更新)
+3. ePS-{CC}-VLESS-HTTPUpgrade-CDN: 优选IP:2053 (CDN，每小时DNS解析更新)
+4. ePS-{CC}-Trojan-WS-CDN: 优选IP:2083 (CDN，每小时DNS解析更新)
+5. ePS-{CC}-Hysteria2: {SERVER_IP}:443 (直连，端口跳跃21000-21200→443，UDP+TCP)
 
 ⚠️ AI-SOCKS5不是用户可见节点，是幕后路由出站（仅出现在sing-box JSON的outbounds和route.rules中）
 
@@ -485,7 +485,7 @@ AI_SOCKS5_SERVER=   # AI SOCKS5服务器（可选）
 AI_SOCKS5_PORT=     # AI SOCKS5端口（可选）
 AI_SOCKS5_USER=     # AI SOCKS5用户名（可选）
 AI_SOCKS5_PASS=     # AI SOCKS5密码（可选）
-COUNTRY_CODE=JP     # 国家代码
+COUNTRY_CODE=     # 国家代码（安装时自动检测）
 SUB_TOKEN=          # 订阅Token（可选）
 ```
 

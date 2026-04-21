@@ -103,7 +103,7 @@ cp .env.example .env
 | 变量 | 说明 |
 |------|------|
 | `CF_API_TOKEN` | Cloudflare API Token，用于申请15年SSL证书 |
-| `COUNTRY_CODE` | 国家代码，默认JP |
+| `COUNTRY_CODE` | 国家代码，安装时自动检测（US/JP/SG等） |
 | `SUB_TOKEN` | 订阅Token，留空则无需Token验证 |
 | `AI_SOCKS5_SERVER` | AI住宅IP SOCKS5服务器地址 |
 | `AI_SOCKS5_PORT` | AI住宅IP SOCKS5端口 |

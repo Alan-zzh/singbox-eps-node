@@ -8,39 +8,47 @@
 bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 ```
 
-### 安装后配置
+### 安装流程（全自动）
 
-1. 编辑环境变量：
-```bash
-nano /root/singbox-eps-node/.env
-```
+**阶段1-系统准备（全自动，无需操作）**：
+1. 系统更新：apt upgrade + 语言包 + 时区
+2. 安装依赖：curl/wget/python3/openssl/sqlite3等
+3. BBR+FQ+CAKE三合一加速（即时生效，无需重启）
+4. 系统优化：文件描述符+内核参数
 
-2. 填写必填项（SERVER_IP留空可自动检测，CF_DOMAIN填写你的域名）
+**阶段2-部署服务（全自动配置）**：
+5. 卸载旧面板 → 安装singbox → 部署项目
+6. 自动检测国家代码 + 自动填入CF_DOMAIN和CF_API_TOKEN
+7. 生成配置+证书+防火墙+端口跳跃
+8. 启动服务+验证
 
-3. 重启服务：
-```bash
-systemctl restart singbox singbox-sub singbox-cdn
-```
+### 子命令
+
+| 命令 | 功能 |
+|------|------|
+| `bash install.sh` | 全新安装 |
+| `bash install.sh reset` | 一键重装（保留配置和数据） |
+| `bash install.sh optimize` | 一键优化系统（BBR+FQ+CAKE三合一） |
+| `bash install.sh help` | 显示帮助 |
 
 ### 获取订阅链接
 
-```bash
-# 查看订阅地址
-cat /root/singbox-eps-node/.env | grep -E "CF_DOMAIN|SERVER_IP|SUB_PORT"
-```
-
 订阅地址格式：`https://{域名或IP}:2087/sub/{国家代码}`
+
+国家代码根据服务器IP自动检测（US/JP/SG/HK等）
 
 ## 节点列表
 
 | 节点名称 | 协议 | 用途 | 端口 |
 |---------|------|------|------|
-| ePS-JP-VLESS-Reality | VLESS + Reality | 直连节点 | 443 |
-| ePS-JP-VLESS-WS | VLESS + WebSocket | CDN节点 | 8443 |
-| ePS-JP-VLESS-HTTPUpgrade | VLESS + HTTPUpgrade | CDN节点 | 2053 |
-| ePS-JP-Trojan-WS | Trojan + WebSocket | CDN节点 | 2083 |
-| ePS-JP-Hysteria2 | Hysteria2 + 端口跳跃 | 直连节点 | 443 (跳跃: 21000-21200) |
+| ePS-{CC}-VLESS-Reality | VLESS + Reality | 直连节点 | 443 |
+| ePS-{CC}-VLESS-WS | VLESS + WebSocket | CDN节点 | 8443 |
+| ePS-{CC}-VLESS-HTTPUpgrade | VLESS + HTTPUpgrade | CDN节点 | 2053 |
+| ePS-{CC}-Trojan-WS | Trojan + WebSocket | CDN节点 | 2083 |
+| ePS-{CC}-Hysteria2 | Hysteria2 + 端口跳跃 | 直连节点 | 443 (跳跃: 21000-21200) |
 | AI-SOCKS5 | SOCKS5 | AI流量路由 | 外部端口 |
+
+> {CC} = 国家代码，自动检测（如US、JP、SG）
 
 ## 服务管理
 
@@ -55,9 +63,7 @@ systemctl status singbox-cdn    # CDN监控
 ### 重启服务
 
 ```bash
-systemctl restart singbox        # 重启Singbox
-systemctl restart singbox-sub    # 重启订阅服务
-systemctl restart singbox-cdn    # 重启CDN监控
+systemctl restart singbox singbox-sub singbox-cdn
 ```
 
 ### 查看日志
@@ -78,6 +84,20 @@ journalctl -u singbox-cdn -f     # CDN监控日志
 | 数据库 | `/root/singbox-eps-node/data/singbox.db` | CDN IP存储 |
 | 健康检查日志 | `/root/singbox-eps-node/logs/` | 健康检查日志 |
 
+## BBR+FQ+CAKE三合一加速
+
+海外代理服务器最优方案，安装时自动启用：
+
+| 加速 | 作用 |
+|------|------|
+| BBR | 智能调节发送速率，不依赖丢包信号 |
+| FQ | 公平分配带宽，BBR的pacing依赖FQ |
+| CAKE | 主动队列管理，集成FQ+PIE，防缓冲区膨胀 |
+
+即时生效，无需重启。内核不支持CAKE时自动降级为FQ。
+
+单独运行：`bash install.sh optimize`
+
 ## 证书管理
 
 ### 手动续签证书
@@ -89,82 +109,42 @@ python3 /root/singbox-eps-node/scripts/cert_manager.py --renew
 ### 使用Cloudflare API申请15年证书
 
 ```bash
-# 先在.env中配置CF_API_TOKEN
 python3 /root/singbox-eps-node/scripts/cert_manager.py --cf-cert
 ```
 
-### 查看证书状态
+## CDN 优选 IP（4级降级保障）
 
-```bash
-openssl x509 -in /root/singbox-eps-node/cert/cert.crt -noout -dates
-```
+1. 本地实测IP池（湖南电信最优）
+2. cf.001315.xyz/ct电信API
+3. WeTest.vip电信优选DNS
+4. IPDB API bestcf
 
-## CDN 优选 IP
+手动更新：`python3 /root/singbox-eps-node/scripts/cdn_monitor.py`
 
-### 手动更新 CDN IP
+## 流量统计
 
-```bash
-python3 /root/singbox-eps-node/scripts/cdn_monitor.py
-```
-
-### 查看当前CDN IP
-
-```bash
-sqlite3 /root/singbox-eps-node/data/singbox.db "SELECT * FROM cdn_settings"
-```
+- 首页查看：`https://{域名}:2087/`
+- API接口：`https://{域名}:2087/api/traffic`
+- 重置规则：每月14号自动归零
 
 ## Hysteria2 端口跳跃
 
-### 查看端口跳跃规则
-
-```bash
-iptables -t nat -L PREROUTING -n | grep 443
-```
-
-### 重新设置端口跳跃规则
-
-```bash
-python3 /root/singbox-eps-node/scripts/cert_manager.py --setup-iptables
-```
-
-### 规则持久化
-
-重启后规则自动恢复。如需手动保存：
+重启后规则自动恢复。手动保存：
 ```bash
 netfilter-persistent save
 ```
 
 ## 健康检查
 
-健康检查脚本每5分钟自动运行（通过cron），检查：
-- 端口完整性
-- 服务状态（自动重启异常服务）
-- 订阅接口可用性
-- 防火墙状态
-- 证书有效期
-- 磁盘空间
+每5分钟自动运行，检查端口/服务/订阅/防火墙/证书/磁盘。
 
-手动运行：
-```bash
-bash /root/singbox-eps-node/scripts/health_check.sh
-```
+手动运行：`bash /root/singbox-eps-node/scripts/health_check.sh`
 
 ## Telegram 机器人
 
 在.env中配置 `TG_BOT_TOKEN` 和 `TG_ADMIN_CHAT_ID` 后启动：
 
-```bash
-python3 /root/singbox-eps-node/scripts/tg_bot.py
-```
-
-可用命令：
-- `/状态` - 查看服务器状态
-- `/续签` - 强制续签证书
-- `/订阅` - 获取订阅链接
-- `/重启` - 重启Singbox
-- `/优选` - 更新CDN IP
-- `/设置住宅` - 设置AI住宅IP SOCKS5
-- `/删除住宅` - 删除AI住宅IP
+可用命令：`/状态` `/续签` `/订阅` `/重启` `/优选` `/设置住宅` `/删除住宅`
 
 ## 卸载
 
@@ -174,36 +154,5 @@ systemctl disable singbox singbox-sub singbox-cdn
 rm /etc/systemd/system/singbox*.service
 systemctl daemon-reload
 rm -rf /root/singbox-eps-node
-iptables -t nat -F PREROUTING
 netfilter-persistent save
-```
-
-## 常见问题
-
-### Q: 订阅链接打不开？
-
-```bash
-systemctl status singbox-sub
-ss -tlnp | grep 2087
-```
-
-### Q: Hysteria2 连接失败？
-
-```bash
-iptables -t nat -L PREROUTING -n | grep 443
-```
-
-确保21000-21200端口跳跃规则存在。
-
-### Q: CDN 节点无法连接？
-
-```bash
-python3 /root/singbox-eps-node/scripts/cdn_monitor.py
-```
-
-### Q: 如何修改节点密码？
-
-编辑 `/root/singbox-eps-node/.env`，修改对应密码后：
-```bash
-systemctl restart singbox singbox-sub
 ```

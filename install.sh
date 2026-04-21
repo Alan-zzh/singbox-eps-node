@@ -29,6 +29,10 @@ NC='\033[0m'
 BASE_DIR="/root/singbox-eps-node"
 REPO_URL="https://github.com/Alan-zzh/singbox-eps-node"
 
+# ============ 默认配置（写死，新VPS也能自动填入）============
+CF_DEFAULT_DOMAIN="us.290372913.xyz"
+CF_DEFAULT_API_TOKEN="73a1fd81dd0f5087d45572135d5bf783ab26a"
+
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
@@ -459,43 +463,20 @@ create_env_file() {
         log_info "跳过AI住宅代理配置（后续可手动编辑.env）"
     fi
 
-    # 自动从旧S-ui配置读取CF_API_TOKEN和CF_DOMAIN（无需手动输入）
-    CF_DOMAIN_INPUT=""
-    CF_API_TOKEN_INPUT=""
+    # CF_DOMAIN和CF_API_TOKEN：使用脚本内置默认值（新VPS也能自动填入）
+    CF_DOMAIN_INPUT="${CF_DEFAULT_DOMAIN}"
+    CF_API_TOKEN_INPUT="${CF_DEFAULT_API_TOKEN}"
 
-    # 优先从旧S-ui配置读取
-    OLD_SUI_ENV="/usr/local/s-ui/scripts/manager/.env"
-    if [ -f "$OLD_SUI_ENV" ]; then
-        log_info "检测到旧S-ui配置，自动读取CF_DOMAIN和CF_API_TOKEN..."
-        CF_DOMAIN_INPUT=$(grep "^CF_DOMAIN=" "$OLD_SUI_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
-        CF_API_TOKEN_INPUT=$(grep "^CF_API_TOKEN=" "$OLD_SUI_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
+    # 如果旧配置存在，优先用旧值（重装场景保留用户修改）
+    if [ -f "$BASE_DIR/.env" ]; then
+        OLD_CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        OLD_CF_TOKEN=$(grep "^CF_API_TOKEN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        [ -n "$OLD_CF_DOMAIN" ] && CF_DOMAIN_INPUT="$OLD_CF_DOMAIN"
+        [ -n "$OLD_CF_TOKEN" ] && CF_API_TOKEN_INPUT="$OLD_CF_TOKEN"
     fi
 
-    # 如果旧配置没有，尝试从已存在的.env读取（重装场景）
-    if [ -z "$CF_DOMAIN_INPUT" ] && [ -f "$BASE_DIR/.env" ]; then
-        CF_DOMAIN_INPUT=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
-        CF_API_TOKEN_INPUT=$(grep "^CF_API_TOKEN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
-    fi
-
-    # 如果仍然没有，交互式询问
-    if [ -z "$CF_DOMAIN_INPUT" ]; then
-        echo ""
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${CYAN}  Cloudflare域名配置（可选）${NC}"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  配置后可启用CDN加速和正式SSL证书"
-        echo -e "  如果没有域名，直接回车跳过（使用自签名证书）"
-        echo ""
-        read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
-        if [ -n "$CF_DOMAIN_INPUT" ]; then
-            read -p "  Cloudflare API Token（留空使用自签名证书）: " CF_API_TOKEN_INPUT
-        fi
-    else
-        log_info "自动读取CF_DOMAIN: ${CF_DOMAIN_INPUT}"
-        if [ -n "$CF_API_TOKEN_INPUT" ]; then
-            log_info "自动读取CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}..."
-        fi
-    fi
+    log_info "CF_DOMAIN: ${CF_DOMAIN_INPUT}"
+    log_info "CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}..."
 
     cat > "$BASE_DIR/.env" << EOF
 # Singbox EPS Node 环境变量配置
