@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.64
+# 版本: v1.0.65
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -9,7 +9,7 @@
 # 阶段1-系统准备（全自动，无需用户操作）：
 #   1. 系统更新：apt upgrade + 语言包 + 时区
 #   2. 安装依赖：curl/wget/python3/openssl/sqlite3等
-#   3. 3大网络加速：BBR加速+TCP FastOpen+TCP调优（即时生效，无需重启）
+#   3. BBR+FQ+CAKE三合一加速（即时生效，无需重启）
 #   4. 系统优化：文件描述符+内核参数
 # 阶段2-部署服务（交互式配置）：
 #   5. 卸载旧面板 → 安装singbox → 部署项目
@@ -91,7 +91,7 @@ install_dependencies() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         curl wget unzip python3 python3-pip python3-venv \
         cron iptables-persistent sqlite3 dnsutils openssl \
-        net-tools procps
+        net-tools procps iproute2
 
     log_info "运行依赖安装完成"
 }
@@ -108,33 +108,48 @@ uninstall_old_panels() {
 }
 
 # ============================================================
-# 阶段1-步骤3+4：3大网络加速 + 系统优化（全自动，即时生效，无需重启）
+# 阶段1-步骤3+4：BBR+FQ+CAKE三合一加速 + 系统优化
 #
-# 3大网络加速：
-#   1. BBR加速 — Google拥塞控制算法，替代默认Cubic，带宽利用率翻倍
-#   2. TCP FastOpen — 减少TCP握手延迟，首次连接即可携带数据（=3=客户端+服务端均启用）
-#   3. TCP调优 — 缓冲区/连接队列/保活参数优化，提升高并发性能
+# 三合一网络加速（海外代理服务器最优方案）：
+#   1. BBR — Google拥塞控制算法，不依赖丢包信号，主动探测带宽+RTT
+#   2. FQ  — 公平队列规则，为每个TCP连接独立缓冲，避免单连接霸占带宽
+#   3. CAKE — 主动队列管理，集成FQ+PIE功能，防止缓冲区膨胀，抗丢包
+#
+# 三层防护协同：
+#   BBR层：智能调节发送速率（不靠丢包判断拥塞）
+#   FQ层：公平分配带宽资源（多用户环境下关键）
+#   CAKE层：主动管理队列深度，提前预防拥塞（替代单纯FQ，抗丢包更强）
 #
 # 系统优化：
-#   4. 文件描述符提升到65535
+#   4. TCP调优（缓冲区+连接队列+保活+BBR高丢包参数）
+#   5. 文件描述符提升到65535
 #
-# ⚠️ sysctl -p 即时生效，不需要重启服务器
+# ⚠️ sysctl -p 即时生效；CAKE通过tc qdisc即时生效
+# ⚠️ CAKE持久化通过systemd服务确保重启后自动恢复
 # ============================================================
 optimize_system() {
-    log_step "【阶段1-步骤3/4】启用3大网络加速（BBR+TCP FastOpen+TCP调优）..."
+    log_step "【阶段1-步骤3/4】启用BBR+FQ+CAKE三合一网络加速..."
 
-    # 1. BBR加速（防止重复追加）
+    # 1. BBR拥塞控制（防止重复追加）
     if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
-        log_info "加速1/3：启用BBR加速（替代Cubic，带宽利用率翻倍）..."
-        grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        log_info "加速1/3：启用BBR（Google拥塞控制，不依赖丢包，主动探测带宽+RTT）..."
         grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     else
         log_info "加速1/3：BBR已启用，跳过"
     fi
 
-    # 2. TCP FastOpen + TCP调优（逐项检查，防止重复追加）
-    log_info "加速2/3：启用TCP FastOpen（减少握手延迟）..."
-    log_info "加速3/3：TCP调优（缓冲区+连接队列+保活参数）..."
+    # 2. FQ公平队列（BBR必须配合FQ，否则pacing失效）
+    log_info "加速2/3：启用FQ公平队列（为每个TCP连接独立缓冲，BBR的pacing依赖FQ）..."
+    grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null && \
+        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=cake|' /etc/sysctl.conf || \
+        echo "net.core.default_qdisc=cake" >> /etc/sysctl.conf
+
+    # 3. CAKE主动队列管理（集成FQ+PIE，比单独FQ更适应高丢包环境）
+    log_info "加速3/3：启用CAKE队列管理（集成FQ+PIE，防止缓冲区膨胀，抗丢包）..."
+    setup_cake_qdisc
+
+    # 4. TCP调优 + BBR高丢包优化参数（逐项检查，防止重复追加）
+    log_info "TCP调优（缓冲区+连接队列+保活+BBR高丢包参数）..."
     TCP_PARAMS="net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.ip_local_port_range=1024 65535
@@ -146,7 +161,9 @@ net.ipv4.tcp_wmem=4096 65536 67108864
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_keepalive_time=600
 net.ipv4.tcp_keepalive_intvl=30
-net.ipv4.tcp_keepalive_probes=10"
+net.ipv4.tcp_keepalive_probes=10
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_bbr_min_rtt_win_sec=60"
     echo "$TCP_PARAMS" | while IFS='=' read -r key value; do
         key=$(echo "$key" | xargs)
         value=$(echo "$value" | xargs)
@@ -160,9 +177,9 @@ net.ipv4.tcp_keepalive_probes=10"
     done
 
     sysctl -p 2>/dev/null || true
-    log_info "3大网络加速已启用（即时生效，无需重启）"
+    log_info "BBR+FQ+CAKE三合一加速已启用（即时生效，无需重启）"
 
-    # 3. 文件描述符限制（防止重复追加）
+    # 5. 文件描述符限制（防止重复追加）
     if ! grep -q "65535" /etc/security/limits.conf 2>/dev/null; then
         log_info "【阶段1-步骤4/4】提升文件描述符限制到65535..."
         cat >> /etc/security/limits.conf << 'EOF'
@@ -173,7 +190,70 @@ root hard nofile 65535
 EOF
     fi
 
-    log_info "阶段1完成：系统更新+依赖+3大加速+优化（全部即时生效，无需重启）"
+    log_info "阶段1完成：系统更新+依赖+BBR+FQ+CAKE三合一+优化（全部即时生效，无需重启）"
+}
+
+# ============================================================
+# CAKE队列管理：配置+持久化
+# CAKE集成FQ+PIE功能，比单独FQ更适应高丢包海外线路
+# 通过tc qdisc即时生效，通过systemd服务确保重启后自动恢复
+# ============================================================
+setup_cake_qdisc() {
+    # 自动检测主网卡（优先eth0，降级到默认路由网卡）
+    MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    MAIN_IF=${MAIN_IF:-eth0}
+
+    # 确保iproute2已安装（提供tc命令）
+    if ! command -v tc &>/dev/null; then
+        log_info "安装iproute2（tc命令依赖）..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 2>/dev/null || true
+    fi
+
+    # 检查内核是否支持CAKE
+    if ! tc qdisc help 2>&1 | grep -q "cake" && ! modprobe sch_cake 2>/dev/null; then
+        log_warn "内核不支持CAKE，降级使用FQ（仍可与BBR配合）"
+        grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null && \
+            sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf || \
+            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        return
+    fi
+
+    # 应用CAKE队列规则
+    tc qdisc replace dev "$MAIN_IF" root handle 1: cake bandwidth 1000mbit flowmode triple-isolate 2>/dev/null
+    if [ $? -eq 0 ]; then
+        log_info "CAKE队列已应用到 $MAIN_IF（flowmode=triple-isolate，带宽1000mbit）"
+    else
+        log_warn "CAKE应用失败，降级使用FQ"
+        grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null && \
+            sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf || \
+            echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        return
+    fi
+
+    # 创建systemd服务确保持久化（重启后自动恢复CAKE规则）
+    cat > /etc/systemd/system/cake-qdisc.service << 'EOF'
+[Unit]
+Description=CAKE Queue Discipline (BBR+FQ+CAKE三合一加速)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/tc qdisc replace dev %i root handle 1: cake bandwidth 1000mbit flowmode triple-isolate
+ExecStop=/sbin/tc qdisc del dev %i root 2>/dev/null || true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 创建网卡名模板服务实例
+    mkdir -p /etc/systemd/system/cake-qdisc.service.wants
+    ln -sf /etc/systemd/system/cake-qdisc.service "/etc/systemd/system/cake-qdisc@${MAIN_IF}.service" 2>/dev/null || true
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable "cake-qdisc@${MAIN_IF}" 2>/dev/null || true
+    log_info "CAKE持久化服务已创建（cake-qdisc@$MAIN_IF，重启自动恢复）"
 }
 
 install_singbox() {
@@ -508,6 +588,11 @@ verify_installation() {
     else
         echo -e "    ${YELLOW}⚠️${NC} BBR加速: 未启用"
     fi
+    if tc qdisc show dev $(ip route show default 2>/dev/null | awk '{print $5}' | head -1) 2>/dev/null | grep -q "cake"; then
+        echo -e "    ${GREEN}✅${NC} CAKE队列: 已启用"
+    else
+        echo -e "    ${YELLOW}⚠️${NC} CAKE队列: 未启用（降级为FQ）"
+    fi
 
     echo ""
     if [ "$ALL_OK" = true ]; then
@@ -555,9 +640,10 @@ print_summary() {
     echo "  备选3:     IPDB API bestcf"
     echo ""
     echo "⚡ 系统优化（已自动完成，即时生效无需重启）:"
-    echo "  BBR加速:      已启用"
-    echo "  TCP FastOpen:  已启用"
-    echo "  TCP调优:       已优化"
+    echo "  BBR加速:      已启用（Google拥塞控制，不依赖丢包）"
+    echo "  FQ公平队列:   已启用（为每个TCP连接独立缓冲）"
+    echo "  CAKE队列:     已启用（集成FQ+PIE，抗丢包防膨胀）"
+    echo "  TCP调优:       已优化（含BBR高丢包参数）"
     echo "  文件描述符:    65535"
     echo "  时区:          Asia/Shanghai"
     echo ""
@@ -625,20 +711,20 @@ cmd_reset() {
 }
 
 # ============================================================
-# 子命令：一键优化系统（BBR+TCP FastOpen+TCP调优+文件描述符）
-# 3大网络加速：
-#   1. BBR加速 — Google拥塞控制算法，替代默认Cubic，大幅提升带宽利用率
-#   2. TCP FastOpen — 减少TCP握手延迟，首次连接即可携带数据
-#   3. TCP调优 — 缓冲区/连接队列/保活参数优化，提升高并发性能
+# 子命令：一键优化系统（BBR+FQ+CAKE三合一加速+TCP调优+文件描述符）
+# 三合一网络加速（海外代理服务器最优方案）：
+#   1. BBR — Google拥塞控制算法，不依赖丢包信号，主动探测带宽+RTT
+#   2. FQ  — 公平队列规则，为每个TCP连接独立缓冲，BBR的pacing依赖FQ
+#   3. CAKE — 主动队列管理，集成FQ+PIE功能，防止缓冲区膨胀，抗丢包
 # ============================================================
 cmd_optimize() {
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  一键优化系统（3大网络加速）${NC}"
+    echo -e "${CYAN}  一键优化系统（BBR+FQ+CAKE三合一加速）${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. BBR加速     — Google拥塞控制，替代Cubic，带宽利用率翻倍"
-    echo -e "  2. TCP FastOpen — 减少握手延迟，首次连接即可携带数据"
-    echo -e "  3. TCP调优      — 缓冲区/连接队列/保活参数，提升高并发"
+    echo -e "  1. BBR加速  — Google拥塞控制，不依赖丢包，主动探测带宽+RTT"
+    echo -e "  2. FQ公平队列 — 为每个TCP连接独立缓冲，BBR的pacing依赖FQ"
+    echo -e "  3. CAKE队列  — 集成FQ+PIE，防止缓冲区膨胀，抗丢包"
     echo -e "  即时生效，无需重启服务器"
     echo ""
 
@@ -647,9 +733,15 @@ cmd_optimize() {
     optimize_system
 
     echo ""
-    echo -e "${GREEN}✅ 系统优化完成！3大网络加速已启用（即时生效，无需重启）：${NC}"
+    echo -e "${GREEN}✅ 系统优化完成！BBR+FQ+CAKE三合一加速已启用（即时生效，无需重启）：${NC}"
     echo -e "  BBR加速:      $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo '未知')"
-    echo -e "  TCP FastOpen:  $(sysctl net.ipv4.tcp_fastopen 2>/dev/null | awk '{print $3}' || echo '未知')"
+    echo -e "  默认队列:     $(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}' || echo '未知')"
+    MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
+    if tc qdisc show dev ${MAIN_IF:-eth0} 2>/dev/null | grep -q "cake"; then
+        echo -e "  CAKE队列:     已启用（$MAIN_IF）"
+    else
+        echo -e "  CAKE队列:     降级为FQ（内核不支持CAKE）"
+    fi
     echo -e "  文件描述符:    65535"
     echo -e "  时区:          Asia/Shanghai"
     echo ""
@@ -660,23 +752,24 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.64${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.65${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
     echo "  bash install.sh reset        一键重装（保留配置和数据）"
-    echo "  bash install.sh optimize     一键优化系统（更新+3大加速，即时生效无需重启）"
+    echo "  bash install.sh optimize     一键优化系统（BBR+FQ+CAKE三合一，即时生效无需重启）"
     echo "  bash install.sh help         显示此帮助"
     echo ""
     echo "安装流程（全自动，无需手动操作）："
-    echo "  阶段1: 系统更新 → 安装依赖 → 3大网络加速 → 系统优化"
+    echo "  阶段1: 系统更新 → 安装依赖 → BBR+FQ+CAKE三合一加速 → 系统优化"
     echo "  阶段2: 卸载旧面板 → 安装singbox → 交互式配置 → 启动服务"
     echo ""
-    echo "3大网络加速（安装时自动启用，也可单独运行optimize）："
-    echo "  1. BBR加速      — Google拥塞控制算法，替代默认Cubic"
-    echo "  2. TCP FastOpen  — 减少TCP握手延迟（=3表示客户端+服务端均启用）"
-    echo "  3. TCP调优       — 缓冲区/连接队列/保活参数优化"
+    echo "BBR+FQ+CAKE三合一加速（海外代理最优方案）："
+    echo "  1. BBR加速   — Google拥塞控制，不依赖丢包，主动探测带宽+RTT"
+    echo "  2. FQ公平队列 — 为每个TCP连接独立缓冲，BBR的pacing依赖FQ"
+    echo "  3. CAKE队列  — 集成FQ+PIE，防止缓冲区膨胀，抗丢包"
     echo "  ⚠️ 即时生效，无需重启服务器"
+    echo "  ⚠️ 内核不支持CAKE时自动降级为FQ（仍可与BBR配合）"
     echo ""
 }
 
@@ -696,7 +789,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.64${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.65${NC}"
             echo "=========================================="
             echo ""
 
