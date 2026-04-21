@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.67
+# 版本: v1.0.68
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -293,17 +293,44 @@ install_singbox() {
         log_info "检测到 Singbox 已安装: $CURRENT_VER"
         echo ""
         echo -e "  ${YELLOW}Singbox 已安装，请选择操作：${NC}"
-        echo -e "  1) 卸载重装（删除当前版本，重新下载安装）"
+        echo -e "  1) 卸载重装（清除所有数据：配置/证书/流量记录/服务，全新安装）"
         echo -e "  2) 保留当前版本（默认，直接继续）"
         echo ""
         read -p "  请输入选择 [1/2]（默认2）: " SINGBOX_CHOICE
         SINGBOX_CHOICE=${SINGBOX_CHOICE:-2}
 
         if [ "$SINGBOX_CHOICE" = "1" ]; then
-            log_info "卸载当前 Singbox..."
-            systemctl stop singbox 2>/dev/null || true
+            log_info "卸载当前 Singbox 及所有关联数据..."
+
+            # 停止所有服务
+            systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
+            systemctl disable singbox singbox-sub singbox-cdn 2>/dev/null || true
+
+            # 删除systemd服务文件
+            rm -f /etc/systemd/system/singbox.service
+            rm -f /etc/systemd/system/singbox-sub.service
+            rm -f /etc/systemd/system/singbox-cdn.service
+            systemctl daemon-reload 2>/dev/null || true
+
+            # 删除singbox二进制
             rm -f /usr/local/bin/singbox
-            log_info "已卸载，开始重新安装..."
+
+            # 删除项目目录（含.env、data/、cert/、logs/、venv/、config.json等全部数据）
+            if [ -d "$BASE_DIR" ]; then
+                log_info "删除项目目录 $BASE_DIR（配置/证书/流量记录/日志全部清除）..."
+                rm -rf "$BASE_DIR"
+            fi
+
+            # 清除cron定时任务
+            crontab -l 2>/dev/null | grep -v "health_check.sh" | grep -v "cert_manager.py" | crontab - 2>/dev/null || true
+
+            # 清除HY2端口跳跃iptables规则
+            iptables -D INPUT -p udp --dport 21000:21199 -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p tcp --dport 21000:21199 -j ACCEPT 2>/dev/null || true
+            netfilter-persistent save 2>/dev/null || true
+
+            log_info "已完全卸载（二进制+配置+数据+证书+服务+定时任务+防火墙规则全部清除）"
+            log_info "开始全新安装..."
         else
             log_info "保留当前 Singbox: $CURRENT_VER"
             return
@@ -799,7 +826,7 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.67${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.68${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -836,7 +863,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.67${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.68${NC}"
             echo "=========================================="
             echo ""
 
