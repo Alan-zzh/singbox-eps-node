@@ -602,7 +602,11 @@ def create_app():
     @app.route(f'/sub/{COUNTRY_CODE}')
     @app.route('/sub')
     def get_subscription():
-        """Base64订阅链接（兼容旧客户端）"""
+        """Base64订阅链接（兼容旧客户端）
+        ⚠️ 禁止加token认证！订阅链接必须直接访问，不需要任何验证参数。
+        历史教训：v1.0.54擅自加了SUB_TOKEN认证导致订阅不可用，已回退。
+        铁律13：订阅链接不加token认证，保持原有规则直接访问。
+        """
         links = generate_all_links()
         if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
             for sub_url in EXTERNAL_SUBS.split('|'):
@@ -627,7 +631,9 @@ def create_app():
     @app.route(f'/singbox/{COUNTRY_CODE}')
     @app.route('/singbox')
     def get_singbox_config():
-        """完整sing-box JSON配置（含自动路由规则）"""
+        """完整sing-box JSON配置（含自动路由规则）
+        ⚠️ 禁止加token认证！同/sub路由，直接访问。
+        """
         config = generate_singbox_config()
         return Response(
             json.dumps(config, indent=2, ensure_ascii=False),
