@@ -1,17 +1,21 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.63
+# 版本: v1.0.64
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
 # 【自动化功能清单】
-# 1. 系统优化：BBR加速+TCP调优+文件描述符+内核参数
-# 2. CDN优选IP：4级降级保障（本地池→001315→WeTest→IPDB）
-# 3. 流量统计：按月统计+每月14号自动归零+首页显示
-# 4. 健康检查：每5分钟自动检测+异常自动重启
-# 5. 证书续签：每月1号自动检查+到期自动续签
-# 6. HY2端口跳跃：UDP+TCP双协议保障+iptables持久化
+# 阶段1-系统准备（全自动，无需用户操作）：
+#   1. 系统更新：apt upgrade + 语言包 + 时区
+#   2. 安装依赖：curl/wget/python3/openssl/sqlite3等
+#   3. 3大网络加速：BBR加速+TCP FastOpen+TCP调优（即时生效，无需重启）
+#   4. 系统优化：文件描述符+内核参数
+# 阶段2-部署服务（交互式配置）：
+#   5. 卸载旧面板 → 安装singbox → 部署项目
+#   6. 交互式配置：AI代理+域名
+#   7. 生成配置+证书+防火墙+端口跳跃
+#   8. 启动服务+验证
 # ============================================================
 
 set -e
@@ -50,10 +54,46 @@ detect_os() {
     fi
 }
 
-install_dependencies() {
-    log_step "安装系统依赖..."
+# ============================================================
+# 阶段1-步骤1：系统更新（全自动）
+# 包含：apt升级系统、安装语言包、设置时区
+# ============================================================
+update_system() {
+    log_step "【阶段1-步骤1/4】更新系统+安装语言包..."
+
+    log_info "更新软件源..."
     apt-get update -y
-    apt-get install -y curl wget unzip python3 python3-pip python3-venv cron iptables-persistent sqlite3 dnsutils openssl
+
+    log_info "升级系统已安装的包..."
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+
+    log_info "安装语言包和基础工具..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        locales language-pack-en-base language-pack-zh-hans \
+        sudo gnupg2 ca-certificates lsb-release
+
+    # 设置UTF-8编码
+    locale-gen en_US.UTF-8 2>/dev/null || true
+    update-locale LANG=en_US.UTF-8 2>/dev/null || true
+
+    # 设置时区
+    timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
+
+    log_info "系统更新完成（apt upgrade + 语言包 + 时区）"
+}
+
+# ============================================================
+# 阶段1-步骤2：安装依赖（全自动）
+# ============================================================
+install_dependencies() {
+    log_step "【阶段1-步骤2/4】安装运行依赖..."
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        curl wget unzip python3 python3-pip python3-venv \
+        cron iptables-persistent sqlite3 dnsutils openssl \
+        net-tools procps
+
+    log_info "运行依赖安装完成"
 }
 
 uninstall_old_panels() {
@@ -68,23 +108,33 @@ uninstall_old_panels() {
 }
 
 # ============================================================
-# 系统优化（全自动，无需用户手动操作）
-# 包含：BBR加速、TCP调优、文件描述符、内核参数
+# 阶段1-步骤3+4：3大网络加速 + 系统优化（全自动，即时生效，无需重启）
+#
+# 3大网络加速：
+#   1. BBR加速 — Google拥塞控制算法，替代默认Cubic，带宽利用率翻倍
+#   2. TCP FastOpen — 减少TCP握手延迟，首次连接即可携带数据（=3=客户端+服务端均启用）
+#   3. TCP调优 — 缓冲区/连接队列/保活参数优化，提升高并发性能
+#
+# 系统优化：
+#   4. 文件描述符提升到65535
+#
+# ⚠️ sysctl -p 即时生效，不需要重启服务器
 # ============================================================
 optimize_system() {
-    log_step "优化系统参数（BBR+TCP+文件描述符）..."
+    log_step "【阶段1-步骤3/4】启用3大网络加速（BBR+TCP FastOpen+TCP调优）..."
 
-    # 1. 启用BBR加速（防止重复追加）
+    # 1. BBR加速（防止重复追加）
     if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
-        log_info "启用BBR加速..."
+        log_info "加速1/3：启用BBR加速（替代Cubic，带宽利用率翻倍）..."
         grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
         grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     else
-        log_info "BBR已启用，跳过"
+        log_info "加速1/3：BBR已启用，跳过"
     fi
 
-    # 2. TCP调优（逐项检查，防止重复追加）
-    log_info "优化TCP参数..."
+    # 2. TCP FastOpen + TCP调优（逐项检查，防止重复追加）
+    log_info "加速2/3：启用TCP FastOpen（减少握手延迟）..."
+    log_info "加速3/3：TCP调优（缓冲区+连接队列+保活参数）..."
     TCP_PARAMS="net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.ip_local_port_range=1024 65535
@@ -110,11 +160,11 @@ net.ipv4.tcp_keepalive_probes=10"
     done
 
     sysctl -p 2>/dev/null || true
-    log_info "内核参数已优化"
+    log_info "3大网络加速已启用（即时生效，无需重启）"
 
     # 3. 文件描述符限制（防止重复追加）
     if ! grep -q "65535" /etc/security/limits.conf 2>/dev/null; then
-        log_info "提升文件描述符限制..."
+        log_info "【阶段1-步骤4/4】提升文件描述符限制到65535..."
         cat >> /etc/security/limits.conf << 'EOF'
 * soft nofile 65535
 * hard nofile 65535
@@ -123,11 +173,7 @@ root hard nofile 65535
 EOF
     fi
 
-    # 4. 时区设置
-    timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
-    log_info "时区已设置为Asia/Shanghai"
-
-    log_info "系统优化完成（BBR+TCP+文件描述符+时区）"
+    log_info "阶段1完成：系统更新+依赖+3大加速+优化（全部即时生效，无需重启）"
 }
 
 install_singbox() {
@@ -508,11 +554,12 @@ print_summary() {
     echo "  备选2:     WeTest.vip电信优选DNS"
     echo "  备选3:     IPDB API bestcf"
     echo ""
-    echo "⚡ 系统优化（已自动完成）:"
-    echo "  BBR加速:   已启用"
-    echo "  TCP调优:   已优化"
-    echo "  文件描述符: 65535"
-    echo "  时区:      Asia/Shanghai"
+    echo "⚡ 系统优化（已自动完成，即时生效无需重启）:"
+    echo "  BBR加速:      已启用"
+    echo "  TCP FastOpen:  已启用"
+    echo "  TCP调优:       已优化"
+    echo "  文件描述符:    65535"
+    echo "  时区:          Asia/Shanghai"
     echo ""
     echo "📝 下一步:"
     echo "  1. 编辑配置: nano $BASE_DIR/.env"
@@ -592,13 +639,15 @@ cmd_optimize() {
     echo -e "  1. BBR加速     — Google拥塞控制，替代Cubic，带宽利用率翻倍"
     echo -e "  2. TCP FastOpen — 减少握手延迟，首次连接即可携带数据"
     echo -e "  3. TCP调优      — 缓冲区/连接队列/保活参数，提升高并发"
+    echo -e "  即时生效，无需重启服务器"
     echo ""
 
     check_root
+    update_system
     optimize_system
 
     echo ""
-    echo -e "${GREEN}✅ 系统优化完成！3大网络加速已启用：${NC}"
+    echo -e "${GREEN}✅ 系统优化完成！3大网络加速已启用（即时生效，无需重启）：${NC}"
     echo -e "  BBR加速:      $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo '未知')"
     echo -e "  TCP FastOpen:  $(sysctl net.ipv4.tcp_fastopen 2>/dev/null | awk '{print $3}' || echo '未知')"
     echo -e "  文件描述符:    65535"
@@ -611,18 +660,23 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.63${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.64${NC}"
     echo ""
     echo "用法:"
-    echo "  bash install.sh              全新安装（交互式配置）"
+    echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
     echo "  bash install.sh reset        一键重装（保留配置和数据）"
-    echo "  bash install.sh optimize     一键优化系统（BBR+TCP FastOpen+TCP调优）"
+    echo "  bash install.sh optimize     一键优化系统（更新+3大加速，即时生效无需重启）"
     echo "  bash install.sh help         显示此帮助"
     echo ""
-    echo "3大网络加速（optimize已包含）:"
+    echo "安装流程（全自动，无需手动操作）："
+    echo "  阶段1: 系统更新 → 安装依赖 → 3大网络加速 → 系统优化"
+    echo "  阶段2: 卸载旧面板 → 安装singbox → 交互式配置 → 启动服务"
+    echo ""
+    echo "3大网络加速（安装时自动启用，也可单独运行optimize）："
     echo "  1. BBR加速      — Google拥塞控制算法，替代默认Cubic"
     echo "  2. TCP FastOpen  — 减少TCP握手延迟（=3表示客户端+服务端均启用）"
     echo "  3. TCP调优       — 缓冲区/连接队列/保活参数优化"
+    echo "  ⚠️ 即时生效，无需重启服务器"
     echo ""
 }
 
@@ -642,15 +696,19 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.63${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.64${NC}"
             echo "=========================================="
             echo ""
 
+            # ===== 阶段1：系统准备（全自动，无需用户操作）=====
             check_root
             detect_os
+            update_system
             install_dependencies
-            uninstall_old_panels
             optimize_system
+
+            # ===== 阶段2：部署服务（交互式配置）=====
+            uninstall_old_panels
             install_singbox
             clone_repo
             setup_python_env

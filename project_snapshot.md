@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.63** (交互式SOCKS5配置+一键重装reset+一键优化optimize+3加速确认)
+**v1.0.64** (系统更新+3加速全自动先行+无需重启+流程重构)
 
 ---
 
@@ -33,62 +33,42 @@
 | v1.0.61 | 2026-04-22 | 优化CDN优选IP4级降级机制+完善流量统计功能+详细文档记录 |
 | v1.0.62 | 2026-04-22 | 修复证书路径BUG(cert.crt→cert.pem)+sysctl防重复追加+requirements.txt+文档同步 |
 | v1.0.63 | 2026-04-22 | 交互式SOCKS5配置+一键重装reset+一键优化optimize+3加速确认+注释修正 |
+| v1.0.64 | 2026-04-22 | 系统更新+3加速全自动先行+无需重启+流程重构 |
 
 ---
 
-## 最新更新内容 (v1.0.63)
+## 最新更新内容 (v1.0.64)
 
-### 新增：交互式SOCKS5 AI代理配置
+### 重构：安装流程两阶段
 
-**问题**: 安装时.env中AI_SOCKS5字段为空，用户需手动编辑.env才能启用AI代理
-**修复**: 安装过程中交互式询问是否配置AI住宅代理，输入地址/端口/账号/密码后自动写入.env
+**问题**: 系统优化是安装中间才执行，且缺少系统更新步骤
+**修复**: 重构为两阶段流程，系统准备全自动先行
 
-**交互流程**:
-1. 询问"是否配置AI住宅代理？(y/N)"
-2. 输入y后，依次输入SOCKS5地址/端口/用户名/密码
-3. 自动写入.env，config_generator.py读取后自动生成AI路由规则
-4. 不配置则跳过，后续可手动编辑.env
+**阶段1-系统准备（全自动，无需用户操作）**：
+1. 系统更新：apt update + apt upgrade + 语言包 + 时区
+2. 安装依赖：curl/wget/python3/openssl/sqlite3等
+3. 3大网络加速：BBR + TCP FastOpen + TCP调优（即时生效，无需重启）
+4. 系统优化：文件描述符65535
 
-**同时新增**：安装时也交互式询问Cloudflare域名
+**阶段2-部署服务（交互式配置）**：
+5. 卸载旧面板 → 安装singbox → 部署项目
+6. 交互式配置：AI代理 + 域名
+7. 生成配置 + 证书 + 防火墙 + 端口跳跃
+8. 启动服务 + 验证
 
-### 新增：一键重装（install.sh reset）
+### 新增：update_system() 函数
 
-**问题**: 需要重装时只能手动操作，容易遗漏步骤
-**修复**: `bash install.sh reset` 一键重装，保留.env/data/cert，重新部署代码和服务
+- apt-get update + apt-get upgrade（自动升级系统已安装的包）
+- 安装语言包（en_US.UTF-8 + zh_CN）
+- 设置时区 Asia/Shanghai
+- 使用 DEBIAN_FRONTEND=noninteractive 避免交互弹窗
 
-**流程**:
-1. 确认提示（防误操作）
-2. 停止所有服务
-3. 备份.env/data/cert到临时目录
-4. 删除旧代码
-5. 重新clone仓库+安装依赖
-6. 恢复.env/data/cert
-7. 重新生成配置+服务+防火墙+端口跳跃
-8. 启动所有服务+验证
+### 确认：3大网络加速无需重启
 
-### 新增：一键优化系统（install.sh optimize）
-
-**问题**: 系统优化逻辑嵌在完整安装流程中，无法单独运行
-**修复**: `bash install.sh optimize` 独立运行3大网络加速
-
-**3大网络加速**:
-1. **BBR加速** — Google拥塞控制算法，替代默认Cubic，带宽利用率翻倍
-2. **TCP FastOpen** — 减少TCP握手延迟，首次连接即可携带数据（=3表示客户端+服务端均启用）
-3. **TCP调优** — 缓冲区/连接队列/保活参数优化，提升高并发性能
-
-### 修复：subscription_service.py注释与代码不一致
-
-**问题**: 注释写cert.crt/cert.key，但实际代码已改为cert.pem/key.pem
-**修复**: 统一注释为cert.pem/key.pem
-
-### 子命令总览
-
-| 命令 | 功能 |
-|------|------|
-| `bash install.sh` | 全新安装（交互式配置） |
-| `bash install.sh reset` | 一键重装（保留配置和数据） |
-| `bash install.sh optimize` | 一键优化系统（BBR+TCP FastOpen+TCP调优） |
-| `bash install.sh help` | 显示帮助 |
+- BBR加速：sysctl -p 即时生效
+- TCP FastOpen：sysctl -p 即时生效（tcp_fastopen=3）
+- TCP调优：sysctl -p 即时生效（12项参数）
+- 文件描述符：新会话生效（服务启动时自动使用新限制）
 
 ---
 
