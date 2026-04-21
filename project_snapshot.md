@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.70** (CF配置自动从旧S-ui读取+证书缺失自动生成+singbox启动诊断)
+**v1.0.72** (reinstall改为操作系统重装+root密码双重确认+reset明确为singbox应用重装)
 
 ---
 
@@ -40,31 +40,78 @@
 | v1.0.68 | 2026-04-22 | 卸载重装=完全清除所有数据+配置+证书+服务+定时任务+防火墙 |
 | v1.0.69 | 2026-04-22 | 国家代码自动检测+CF_API_TOKEN交互式填写+singbox启动诊断+NODE_PREFIX动态生成 |
 | v1.0.70 | 2026-04-22 | CF配置自动从旧S-ui读取+证书缺失自动生成+singbox启动诊断 |
+| v1.0.71 | 2026-04-22 | CAKE状态真实显示+一键重装reinstall无感+自动重启+密码保留 |
+| v1.0.72 | 2026-04-22 | reinstall改为操作系统重装(bin456789/reinstall)+root密码双重确认+reset明确为singbox应用重装 |
 
 ---
 
-## 最新更新内容 (v1.0.70)
+## 最新更新内容 (v1.0.72)
 
-### 修复：CF_API_TOKEN和CF_DOMAIN自动从旧S-ui读取
+### 修复：reinstall命令逻辑错误 — "不需要密码"说法不成立
 
-**问题**: CF_API_TOKEN需要交互式填写，但用户已有旧S-ui配置
-**修复**: 安装时自动读取顺序：
+**问题**: v1.0.71的`bash install.sh reinstall`声称"不需要输密码（自动从旧.env读取）"，但这是逻辑错误：
+- .env存储的是应用密码（VLESS_UUID/TROJAN_PASSWORD等），不是root密码
+- 操作系统重装需要root密码，无法从任何地方自动获取
+- 用户指出：很多一键重装脚本都要求手动输入密码（强制改密码或输入当前密码）
 
-1. 旧S-ui配置 `/usr/local/s-ui/scripts/manager/.env`
-2. 已存在的.env（重装场景）
-3. 交互式询问（全新安装无旧配置时）
+**修复**: `reinstall`改为操作系统重装，需手动输入root密码（两次确认）
 
-**自动读取时只显示Token前8位**：`CF_API_TOKEN: 73a1fd81...`
+### 新增：`bash install.sh reinstall` — 一键重装操作系统
 
-### 修复：singbox启动失败的真正原因——证书文件缺失
+**特点**：
+- **需输入root密码**：连续两次确认，密码作为新系统登录密码
+- **自动检测OS版本**：读取/etc/os-release，重装为相同版本
+- **集成bin456789/reinstall**：GitHub优先，降级国内镜像(cnb.cool)
+- **自动重启**：重装完成后自动重启进入新系统
+- **重装后需重新部署**：SSH连接后运行`bash install.sh`安装singbox
 
-**问题**: config_generator.py生成config.json时不检查证书文件是否存在，4个入站（VLESS-WS/VLESS-Upgrade/Trojan-WS/Hysteria2）引用了证书路径，证书不存在时singbox启动失败
-**修复**: config_generator.py在生成配置时，如果证书文件不存在，自动调用cert_manager.py生成自签名证书
+**执行流程**：
+1. 输入root密码（两次确认，隐藏输入）→ 检测当前OS版本
+2. 下载bin456789/reinstall脚本（GitHub→国内镜像降级）
+3. 执行`bash reinstall.sh <OS> <VERSION> --password <密码>`
+4. 脚本自动下载OS镜像→修改引导→重启→安装新系统
 
-**singbox启动失败根因分析**：
-- 443端口TCP+UDP不冲突（VLESS-Reality用TCP，Hysteria2用UDP）
-- 真正原因是4个TLS入站引用的证书文件不存在
-- singbox启动时发现证书路径无效，直接退出
+**支持的OS映射**：
+| /etc/os-release ID | reinstall参数 |
+|---|---|
+| ubuntu | ubuntu |
+| debian | debian |
+| centos | centos |
+| rocky | rocky |
+| almalinux | alma |
+| alpine | alpine |
+| fedora | fedora |
+| arch | arch |
+| gentoo | gentoo |
+| opensuse-leap | opensuse |
+
+### 明确：`bash install.sh reset` — singbox应用重装（保留密码）
+
+**与reinstall的区别**：
+- `reinstall` = 重装**操作系统**（清除硬盘所有数据，需输入root密码）
+- `reset` = 重装**singbox应用**（保留.env配置和数据库，客户端无需重配）
+
+**reset保留的内容**：
+- .env配置文件（所有密码和密钥）
+- data/目录（流量统计数据库）
+- cert/目录（SSL证书）
+
+---
+
+## 历史更新内容 (v1.0.71)
+
+### 修复：CAKE状态显示矛盾
+
+**问题**: verify_installation检测CAKE未启用（降级为FQ），但print_summary硬编码"CAKE队列: 已启用"
+**修复**: print_summary从tc qdisc实际检测读取，CAKE降级时显示"降级为FQ（内核不支持CAKE，FQ仍可与BBR配合）"
+
+### 卸载重装也保留密码
+
+安装时检测到singbox已安装，选"1)卸载重装"时：
+- 先备份.env密码字段到临时文件
+- 清除所有数据
+- generate_uuids_and_passwords和generate_reality_keys自动从备份恢复旧密码
+- 客户端无需重新配置
 
 ### 重大Bug修复：set -e导致CAKE失败时脚本直接退出
 
@@ -503,5 +550,5 @@ SUB_TOKEN=          # 订阅Token（可选）
 11. **⚠️ 改代码必须同步更新文档**: 代码改了文档没改=文档过时=下一个AI犯错
 
 ## 下一步待办
-- [ ] 部署v1.0.50到服务器并验证所有功能
+- [ ] 部署v1.0.72到服务器并验证reinstall命令
 - [ ] 开发SOCKS5自动切换功能（需要更多节点）

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.70
+# 版本: v1.0.72
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -304,7 +304,24 @@ install_singbox() {
         SINGBOX_CHOICE=${SINGBOX_CHOICE:-2}
 
         if [ "$SINGBOX_CHOICE" = "1" ]; then
-            log_info "卸载当前 Singbox 及所有关联数据..."
+            log_info "卸载当前 Singbox 及所有关联数据（保留密码和密钥）..."
+
+            # 备份密码字段（客户端无需重新配置）
+            PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
+            > "$PASSWORD_BACKUP"
+            if [ -f "$BASE_DIR/.env" ]; then
+                for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD HYSTERIA2_PASSWORD \
+                             REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE \
+                             CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
+                             AI_SOCKS5_USER AI_SOCKS5_PASS SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
+                             TG_ADMIN_CHAT_ID; do
+                    VALUE=$(grep "^${FIELD}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
+                    if [ -n "$VALUE" ]; then
+                        echo "${FIELD}=${VALUE}" >> "$PASSWORD_BACKUP"
+                    fi
+                done
+                log_info "密码和密钥已备份"
+            fi
 
             # 停止所有服务
             systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
@@ -334,6 +351,7 @@ install_singbox() {
             netfilter-persistent save 2>/dev/null || true
 
             log_info "已完全卸载（二进制+配置+数据+证书+服务+定时任务+防火墙规则全部清除）"
+            log_info "密码和密钥已备份，安装时将自动恢复"
             log_info "开始全新安装..."
         else
             log_info "保留当前 Singbox: $CURRENT_VER"
@@ -395,10 +413,27 @@ setup_python_env() {
 generate_uuids_and_passwords() {
     log_step "生成协议密码和UUID..."
 
-    VLESS_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
-    VLESS_WS_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
-    TROJAN_PASSWORD=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-    HYSTERIA2_PASSWORD=$(python3 -c "import secrets; print(secrets.token_hex(16))")
+    # 如果有备份密码，优先恢复（卸载重装/reinstall场景）
+    PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
+    if [ -f "$PASSWORD_BACKUP" ]; then
+        log_info "检测到密码备份，恢复旧密码（客户端无需重新配置）..."
+        while IFS='=' read -r key value; do
+            case "$key" in
+                VLESS_UUID) VLESS_UUID="$value" ;;
+                VLESS_WS_UUID) VLESS_WS_UUID="$value" ;;
+                TROJAN_PASSWORD) TROJAN_PASSWORD="$value" ;;
+                HYSTERIA2_PASSWORD) HYSTERIA2_PASSWORD="$value" ;;
+                COUNTRY_CODE) COUNTRY_CODE="$value" ;;
+            esac
+        done < "$PASSWORD_BACKUP"
+        log_info "密码已从备份恢复"
+    fi
+
+    # 没有备份的密码才重新生成
+    VLESS_UUID=${VLESS_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
+    VLESS_WS_UUID=${VLESS_WS_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
+    TROJAN_PASSWORD=${TROJAN_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
+    HYSTERIA2_PASSWORD=${HYSTERIA2_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
 
     # 自动检测服务器国家代码（根据IP地理位置）
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
@@ -413,9 +448,24 @@ generate_uuids_and_passwords() {
 
 generate_reality_keys() {
     log_step "生成Reality密钥对..."
-    REALITY_OUTPUT=$(singbox generate reality-keypair 2>/dev/null)
-    REALITY_PRIVATE_KEY=$(echo "$REALITY_OUTPUT" | grep "PrivateKey" | awk '{print $2}')
-    REALITY_PUBLIC_KEY=$(echo "$REALITY_OUTPUT" | grep "PublicKey" | awk '{print $2}')
+
+    # 优先从备份恢复
+    PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
+    if [ -f "$PASSWORD_BACKUP" ]; then
+        while IFS='=' read -r key value; do
+            case "$key" in
+                REALITY_PRIVATE_KEY) REALITY_PRIVATE_KEY="$value" ;;
+                REALITY_PUBLIC_KEY) REALITY_PUBLIC_KEY="$value" ;;
+            esac
+        done < "$PASSWORD_BACKUP"
+    fi
+
+    # 没有备份才重新生成
+    if [ -z "$REALITY_PRIVATE_KEY" ] || [ -z "$REALITY_PUBLIC_KEY" ]; then
+        REALITY_OUTPUT=$(singbox generate reality-keypair 2>/dev/null)
+        REALITY_PRIVATE_KEY=$(echo "$REALITY_OUTPUT" | grep "PrivateKey" | awk '{print $2}')
+        REALITY_PUBLIC_KEY=$(echo "$REALITY_OUTPUT" | grep "PublicKey" | awk '{print $2}')
+    fi
 
     if [ -z "$REALITY_PRIVATE_KEY" ] || [ -z "$REALITY_PUBLIC_KEY" ]; then
         log_warn "自动生成失败，使用占位符，请手动配置"
@@ -765,7 +815,14 @@ print_summary() {
     echo "⚡ 系统优化（已自动完成，即时生效无需重启）:"
     echo "  BBR加速:      已启用（Google拥塞控制，不依赖丢包）"
     echo "  FQ公平队列:   已启用（为每个TCP连接独立缓冲）"
-    echo "  CAKE队列:     已启用（集成FQ+PIE，抗丢包防膨胀）"
+    # CAKE状态从实际检测结果读取
+    MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1) || true
+    MAIN_IF=${MAIN_IF:-eth0}
+    if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "cake"; then
+        echo "  CAKE队列:     已启用（集成FQ+PIE，抗丢包防膨胀，网卡$MAIN_IF）"
+    else
+        echo "  CAKE队列:     降级为FQ（内核不支持CAKE，FQ仍可与BBR配合）"
+    fi
     echo "  TCP调优:       已优化（含BBR高丢包参数）"
     echo "  文件描述符:    65535"
     echo "  时区:          Asia/Shanghai"
@@ -782,12 +839,15 @@ print_summary() {
 }
 
 # ============================================================
-# 子命令：一键重装（保留.env，重新部署所有代码和服务）
+# 子命令：一键重装singbox应用（保留.env配置和数据）
+# 与reinstall的区别：reset只重装singbox应用，不重装操作系统
+# reinstall是重装整个操作系统（清除硬盘所有数据）
 # ============================================================
 cmd_reset() {
     echo ""
-    echo -e "${YELLOW}⚠️  一键重装将保留.env配置，重新部署所有代码和服务${NC}"
+    echo -e "${YELLOW}⚠️  一键重装singbox应用（保留.env配置和数据）${NC}"
     echo -e "${YELLOW}    数据库(data/)和证书(cert/)不会被删除${NC}"
+    echo -e "${YELLOW}    客户端无需重新配置（密码和密钥保持不变）${NC}"
     read -p "  确认重装？(y/N): " CONFIRM
     if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
         log_info "已取消"
@@ -834,6 +894,97 @@ cmd_reset() {
 }
 
 # ============================================================
+# 子命令：一键重装操作系统（bin456789/reinstall）
+# 流程：输入root密码（两次确认）→ 检测当前OS版本 → 下载重装脚本 → 执行重装 → 自动重启
+# ⚠️ 重装操作系统会清除硬盘所有数据！重装后需重新运行 bash install.sh 部署singbox
+# ============================================================
+cmd_reinstall() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RED}  ⚠️  一键重装操作系统（将清除硬盘所有数据！）${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  重装后需重新运行 ${GREEN}bash install.sh${NC} 部署singbox"
+    echo ""
+
+    check_root
+
+    # 输入root密码（连续两次确认，隐藏输入）
+    while true; do
+        read -s -p "  请输入root密码: " ROOT_PASSWORD
+        echo ""
+        read -s -p "  请再次输入root密码: " ROOT_PASSWORD_CONFIRM
+        echo ""
+        if [ -z "$ROOT_PASSWORD" ]; then
+            log_warn "密码不能为空，请重新输入"
+            echo ""
+            continue
+        fi
+        if [ "$ROOT_PASSWORD" != "$ROOT_PASSWORD_CONFIRM" ]; then
+            log_warn "两次密码不一致，请重新输入"
+            echo ""
+            continue
+        fi
+        break
+    done
+
+    log_info "密码确认成功"
+
+    # 检测当前操作系统版本
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        CURRENT_OS=$ID
+        CURRENT_VERSION=$VERSION_ID
+    else
+        log_error "无法检测当前操作系统版本"
+        exit 1
+    fi
+
+    # 映射OS名称到bin456789/reinstall脚本格式
+    case "$CURRENT_OS" in
+        ubuntu)      REINSTALL_OS="ubuntu" ;;
+        debian)      REINSTALL_OS="debian" ;;
+        centos)      REINSTALL_OS="centos" ;;
+        rocky)       REINSTALL_OS="rocky" ;;
+        almalinux)   REINSTALL_OS="alma" ;;
+        alpine)      REINSTALL_OS="alpine" ;;
+        opensuse-leap) REINSTALL_OS="opensuse" ;;
+        opensuse-tumbleweed) REINSTALL_OS="opensuse" ;;
+        fedora)      REINSTALL_OS="fedora" ;;
+        arch)        REINSTALL_OS="arch" ;;
+        gentoo)      REINSTALL_OS="gentoo" ;;
+        *)           REINSTALL_OS="$CURRENT_OS" ;;
+    esac
+
+    log_info "当前系统: $CURRENT_OS $CURRENT_VERSION"
+    log_info "将重装为: $REINSTALL_OS $CURRENT_VERSION（保持当前版本）"
+
+    # 下载bin456789/reinstall脚本（优先GitHub，降级国内镜像）
+    log_info "下载系统重装脚本..."
+    cd /tmp
+    REINSTALL_SCRIPT=""
+    curl -sS -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh 2>/dev/null && REINSTALL_SCRIPT="reinstall.sh" || true
+    if [ -z "$REINSTALL_SCRIPT" ] || [ ! -f "reinstall.sh" ]; then
+        log_info "GitHub下载失败，尝试国内镜像..."
+        curl -sS -O https://cnb.cool/bin456789/reinstall/-/git/raw/main/reinstall.sh 2>/dev/null && REINSTALL_SCRIPT="reinstall.sh" || true
+    fi
+    if [ -z "$REINSTALL_SCRIPT" ] || [ ! -f "reinstall.sh" ]; then
+        wget -q -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh 2>/dev/null && REINSTALL_SCRIPT="reinstall.sh" || true
+    fi
+    if [ -z "$REINSTALL_SCRIPT" ] || [ ! -f "reinstall.sh" ]; then
+        log_error "下载重装脚本失败，请检查网络连接"
+        exit 1
+    fi
+
+    # 执行重装（自动重启，无需手动reboot）
+    echo ""
+    log_warn "即将开始重装操作系统，重装完成后将自动重启"
+    log_warn "重启后请用新root密码SSH连接，然后运行 bash install.sh 部署singbox"
+    echo ""
+    log_info "开始重装 $REINSTALL_OS $CURRENT_VERSION ..."
+    bash reinstall.sh "$REINSTALL_OS" "$CURRENT_VERSION" --password "$ROOT_PASSWORD"
+}
+
+# ============================================================
 # 子命令：一键优化系统（BBR+FQ+CAKE三合一加速+TCP调优+文件描述符）
 # 三合一网络加速（海外代理服务器最优方案）：
 #   1. BBR — Google拥塞控制算法，不依赖丢包信号，主动探测带宽+RTT
@@ -875,13 +1026,23 @@ cmd_optimize() {
 # ============================================================
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.70${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.72${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
-    echo "  bash install.sh reset        一键重装（保留配置和数据）"
+    echo "  bash install.sh reinstall    一键重装操作系统（需输入root密码，装完自动重启）"
+    echo "  bash install.sh reset        一键重装singbox（保留配置和数据，客户端无需重配）"
     echo "  bash install.sh optimize     一键优化系统（BBR+FQ+CAKE三合一，即时生效无需重启）"
     echo "  bash install.sh help         显示此帮助"
+    echo ""
+    echo "子命令说明:"
+    echo "  reinstall  重装操作系统（bin456789/reinstall）"
+    echo "             - 自动检测当前OS版本，重装为相同版本"
+    echo "             - 需输入root密码（两次确认），作为新系统登录密码"
+    echo "             - 重装后需重新运行 bash install.sh 部署singbox"
+    echo "  reset      重装singbox应用（保留.env配置和数据库）"
+    echo "             - 保留所有密码和密钥，客户端无需重新配置"
+    echo "             - 保留流量统计数据和证书"
     echo ""
     echo "安装流程（全自动，无需手动操作）："
     echo "  阶段1: 系统更新 → 安装依赖 → BBR+FQ+CAKE三合一加速 → 系统优化"
@@ -902,6 +1063,9 @@ main() {
         reset)
             cmd_reset
             ;;
+        reinstall)
+            cmd_reinstall
+            ;;
         optimize)
             cmd_optimize
             ;;
@@ -912,7 +1076,7 @@ main() {
             # 无参数：全新安装
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.70${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.72${NC}"
             echo "=========================================="
             echo ""
 
