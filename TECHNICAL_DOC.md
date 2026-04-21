@@ -4,7 +4,7 @@
 - **项目名称**: Singbox EPS Node (代理节点订阅系统)
 - **服务器**: 从.env动态读取SERVER_IP（自动检测公网IP）
 - **域名**: 从.env动态读取CF_DOMAIN（用于CDN和SSL证书）
-- **当前版本**: v1.0.72
+- **当前版本**: v1.0.75
 
 ---
 
@@ -123,7 +123,13 @@
 - **三层防护协同**: BBR层智能调节 → FQ层公平分配 → CAKE层预防拥塞
 - **CAKE参数**: `bandwidth 1000mbit flowmode triple-isolate`
 - **持久化**: systemd服务 `cake-qdisc@{网卡名}`，重启自动恢复
-- **降级保障**: 内核不支持CAKE时自动降级为FQ（仍可与BBR配合）
+- **降级保障**: 内核不支持CAKE时自动降级为FQ-PIE（比FQ更适应高丢包环境）
+  - FQ：只做公平调度，不管理队列深度
+  - FQ-PIE：在FQ基础上加入PIE主动队列管理，动态调整丢包概率，防止缓冲区膨胀
+- **CAKE模块主动安装**: `modprobe sch_cake`失败时自动安装`linux-modules-extra-$(uname -r)`，安装后重试
+- **FQ-PIE降级实际应用**: 通过`tc qdisc replace dev $MAIN_IF root fq_pie`实际应用到网卡（非仅设置sysctl）
+- **FQ-PIE持久化**: systemd服务 `fq-pie-qdisc@{网卡名}`，重启自动恢复
+- **精确诊断**: verify_installation区分CAKE已启用/FQ-PIE降级已生效/tc应用失败/内核缺模块四种状态
 - **即时生效**: sysctl -p + tc qdisc replace，无需重启服务器
 
 ### 8. 安装脚本子命令 ✅
@@ -136,6 +142,15 @@
   - 保留.env配置、data/数据库、cert/证书
   - 客户端无需重新配置
 - `bash install.sh optimize` — 一键优化系统（BBR+FQ+CAKE三合一，即时生效）
+
+### 9. sing-box rule_set规则集（1.12+新格式）✅
+- sing-box 1.12.0移除了`geoip`/`geosite`内联规则，改用`rule_set`远程规则集
+- 客户端配置使用SagerNet官方.srs二进制格式规则集：
+  - `geosite-cn.srs` → 中国域名规则
+  - `geoip-cn.srs` → 中国IP规则
+  - `geosite-geolocation-!cn.srs` → 非中国域名规则
+- 服务端配置不需要geoip/geosite规则（catch-all已处理direct出站）
+- ⚠️ 1.14.0将移除旧格式兼容，必须使用rule_set
 
 ---
 
