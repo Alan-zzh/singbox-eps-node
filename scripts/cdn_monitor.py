@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.58
+Version: v1.0.59
 Date: 2026-04-21
 功能：
   - 从WeTest.vip电信优选DNS获取实时Cloudflare优选IP
@@ -46,6 +46,7 @@ try:
     from config import (
         SERVER_IP, DATA_DIR, CF_DOMAIN,
         CDN_MONITOR_INTERVAL, CDN_TOP_IPS_COUNT,
+        CDN_PREFERRED_IPS, CDN_API_WETEST_CT, CDN_API_IPDB,
     )
     from logger import get_logger
 except ImportError:
@@ -53,47 +54,27 @@ except ImportError:
         import logging
         logging.basicConfig(level=logging.INFO)
         return logging.getLogger(name)
+    CDN_PREFERRED_IPS = [
+        '162.159.45.66', '162.159.39.48', '172.64.53.253',
+        '162.159.44.192', '172.64.52.244', '162.159.38.190',
+        '108.162.198.29', '162.159.15.207', '162.159.19.243',
+        '162.159.58.128', '162.159.38.180', '108.162.198.116',
+        '172.64.53.134', '162.159.39.89', '162.159.45.244',
+        '162.159.44.128', '172.64.52.173', '172.64.33.166',
+        '172.64.53.179', '172.64.52.205', '108.162.198.145',
+        '104.16.123.96', '104.16.124.96', '104.17.136.90',
+    ]
+    CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
+    CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
+    CDN_MONITOR_INTERVAL = 3600
+    CDN_TOP_IPS_COUNT = 5
 
 logger = get_logger('cdn_monitor')
 
-WETEST_CT_DNS = 'ct.cloudflare.182682.xyz'
-WETEST_CM_DNS = 'cm.cloudflare.182682.xyz'
-WETEST_CU_DNS = 'cu.cloudflare.182682.xyz'
 DNS_SERVER = '8.8.8.8'
 
-CF_001315_CT_URL = 'https://cf.001315.xyz/ct'
+IPDB_API_URL = CDN_API_IPDB
 
-IPDB_API_URL = 'https://ipdb.api.030101.xyz/?type=bestcf'
-
-FALLBACK_IPS = [
-    '162.159.45.66',
-    '162.159.39.48',
-    '172.64.53.253',
-    '162.159.44.192',
-    '172.64.52.244',
-    '162.159.38.190',
-    '108.162.198.29',
-    '162.159.15.207',
-    '162.159.19.243',
-    '162.159.58.128',
-    '162.159.38.180',
-    '108.162.198.116',
-    '172.64.53.134',
-    '162.159.39.89',
-    '162.159.45.244',
-    '162.159.44.128',
-    '172.64.52.173',
-    '172.64.33.166',
-    '172.64.53.179',
-    '172.64.52.205',
-    '108.162.198.145',
-    '104.16.123.96',
-    '104.16.124.96',
-    '104.17.136.90',
-]
-
-CDN_TOP_IPS_COUNT = 5
-MONITOR_INTERVAL = 3600
 TCPING_PORT = 443
 TCPING_TIMEOUT = 3
 
@@ -162,35 +143,13 @@ def fetch_from_wetest_ct():
     每15分钟更新，从Google DNS(8.8.8.8)解析即可获取。
     返回的IP已按电信用户延迟排序。
     """
-    logger.info(f"  查询WeTest.vip电信优选: {WETEST_CT_DNS}")
-    ips = resolve_dns(WETEST_CT_DNS)
+    logger.info(f"  查询WeTest.vip电信优选: {CDN_API_WETEST_CT}")
+    ips = resolve_dns(CDN_API_WETEST_CT)
     if ips:
         logger.info(f"  WeTest电信返回 {len(ips)} 个IP: {ips}")
     else:
         logger.warning("  WeTest电信DNS无响应")
     return ips
-
-
-def fetch_from_001315_ct():
-    """从cf.001315.xyz电信API获取IP（降级方案1）"""
-    try:
-        import urllib.request
-        req = urllib.request.Request(CF_001315_CT_URL)
-        req.add_header('User-Agent', 'Mozilla/5.0')
-        
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            content = resp.read().decode('utf-8').strip()
-        
-        ips = []
-        for line in content.split('\n'):
-            parts = line.strip().split('#')
-            ip = parts[0].strip()
-            if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
-                ips.append(ip)
-        return ips
-    except Exception as e:
-        logger.warning(f"  cf.001315.xyz电信API失败: {e}")
-        return []
 
 
 def fetch_from_ipdb_api():
@@ -231,8 +190,8 @@ def fetch_cdn_ips():
     seen = set()
 
     # 步骤1：本地实测IP池（湖南电信实测最优，按延迟排序）
-    logger.info(f">>> 步骤1：本地实测IP池（湖南电信最优，{len(FALLBACK_IPS)}个候选）")
-    for ip in FALLBACK_IPS:
+    logger.info(f">>> 步骤1：本地实测IP池（湖南电信最优，{len(CDN_PREFERRED_IPS)}个候选）")
+    for ip in CDN_PREFERRED_IPS:
         if tcping(ip):
             valid_ips.append(ip)
             logger.info(f"  {ip}(实测池): 可达")
@@ -277,7 +236,7 @@ def fetch_cdn_ips():
         return valid_ips[:CDN_TOP_IPS_COUNT]
     else:
         logger.warning("[WARN] 所有IP均不可达，使用降级IP池前5个")
-        return FALLBACK_IPS[:CDN_TOP_IPS_COUNT]
+        return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT]
 
 
 def assign_and_save_ips(ips):
@@ -324,7 +283,7 @@ def run_once():
     else:
         logger.error("[ERROR] 未获取到任何IP，跳过本次更新")
 
-    logger.info(f"\n>>> 等待 {MONITOR_INTERVAL}秒后下次检测...")
+    logger.info(f"\n>>> 等待 {CDN_MONITOR_INTERVAL}秒后下次检测...")
 
 
 if __name__ == '__main__':
@@ -332,7 +291,7 @@ if __name__ == '__main__':
     while True:
         try:
             run_once()
-            time.sleep(MONITOR_INTERVAL)
+            time.sleep(CDN_MONITOR_INTERVAL)
         except KeyboardInterrupt:
             logger.info("CDN监控已停止")
             break
