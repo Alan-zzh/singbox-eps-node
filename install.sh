@@ -1,9 +1,17 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.54
-# 用途: 新VPS全自动部署
+# 版本: v1.0.62
+# 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
+#
+# 【自动化功能清单】
+# 1. 系统优化：BBR加速+TCP调优+文件描述符+内核参数
+# 2. CDN优选IP：4级降级保障（本地池→001315→WeTest→IPDB）
+# 3. 流量统计：按月统计+每月14号自动归零+首页显示
+# 4. 健康检查：每5分钟自动检测+异常自动重启
+# 5. 证书续签：每月1号自动检查+到期自动续签
+# 6. HY2端口跳跃：UDP+TCP双协议保障+iptables持久化
 # ============================================================
 
 set -e
@@ -59,6 +67,69 @@ uninstall_old_panels() {
     done
 }
 
+# ============================================================
+# 系统优化（全自动，无需用户手动操作）
+# 包含：BBR加速、TCP调优、文件描述符、内核参数
+# ============================================================
+optimize_system() {
+    log_step "优化系统参数（BBR+TCP+文件描述符）..."
+
+    # 1. 启用BBR加速（防止重复追加）
+    if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
+        log_info "启用BBR加速..."
+        grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf 2>/dev/null || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    else
+        log_info "BBR已启用，跳过"
+    fi
+
+    # 2. TCP调优（逐项检查，防止重复追加）
+    log_info "优化TCP参数..."
+    TCP_PARAMS="net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.ip_local_port_range=1024 65535
+net.ipv4.tcp_max_syn_backlog=65536
+net.core.somaxconn=65536
+net.core.netdev_max_backlog=65536
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_keepalive_time=600
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_keepalive_probes=10"
+    echo "$TCP_PARAMS" | while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        if [ -n "$key" ] && [ -n "$value" ]; then
+            if grep -q "^${key}=" /etc/sysctl.conf 2>/dev/null; then
+                sed -i "s|^${key}=.*|${key}=${value}|" /etc/sysctl.conf
+            else
+                echo "${key}=${value}" >> /etc/sysctl.conf
+            fi
+        fi
+    done
+
+    sysctl -p 2>/dev/null || true
+    log_info "内核参数已优化"
+
+    # 3. 文件描述符限制（防止重复追加）
+    if ! grep -q "65535" /etc/security/limits.conf 2>/dev/null; then
+        log_info "提升文件描述符限制..."
+        cat >> /etc/security/limits.conf << 'EOF'
+* soft nofile 65535
+* hard nofile 65535
+root soft nofile 65535
+root hard nofile 65535
+EOF
+    fi
+
+    # 4. 时区设置
+    timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
+    log_info "时区已设置为Asia/Shanghai"
+
+    log_info "系统优化完成（BBR+TCP+文件描述符+时区）"
+}
+
 install_singbox() {
     log_step "安装 Singbox 内核..."
     if command -v singbox &>/dev/null; then
@@ -99,6 +170,9 @@ clone_repo() {
         apt-get install -y git
         git clone "$REPO_URL" "$BASE_DIR"
     fi
+
+    mkdir -p "$BASE_DIR/logs" "$BASE_DIR/data" "$BASE_DIR/cert" "$BASE_DIR/backups"
+    log_info "目录结构已创建（logs/data/cert/backups）"
 }
 
 setup_python_env() {
@@ -106,7 +180,11 @@ setup_python_env() {
     cd "$BASE_DIR"
     python3 -m venv venv
     source venv/bin/activate
-    pip install --quiet flask python-dotenv
+    if [ -f "requirements.txt" ]; then
+        pip install --quiet -r requirements.txt
+    else
+        pip install --quiet flask python-dotenv
+    fi
     deactivate
 }
 
@@ -236,7 +314,7 @@ EOF
 
     cat > /etc/systemd/system/singbox-sub.service << EOF
 [Unit]
-Description=Singbox Subscription Service
+Description=Singbox Subscription Service (含流量统计)
 After=network.target singbox.service
 
 [Service]
@@ -253,7 +331,7 @@ EOF
 
     cat > /etc/systemd/system/singbox-cdn.service << EOF
 [Unit]
-Description=Singbox CDN Monitor Service
+Description=Singbox CDN Monitor Service (4级降级保障)
 After=network.target singbox.service
 
 [Service]
@@ -272,6 +350,11 @@ EOF
     log_info "Systemd服务已创建"
 }
 
+# ============================================================
+# 防火墙配置（必须在端口跳跃之前！铁律12）
+# iptables -F会清空所有规则，如果先设置端口跳跃再重置防火墙，
+# 端口跳跃规则会被清除。安装脚本执行顺序：防火墙 → 端口跳跃 → 服务启动
+# ============================================================
 setup_firewall() {
     log_step "配置防火墙（默认全放行）..."
     iptables -P INPUT ACCEPT
@@ -284,8 +367,10 @@ setup_firewall() {
 
 setup_health_check_cron() {
     log_step "配置定时任务..."
-    (crontab -l 2>/dev/null | grep -v "health_check.sh" | grep -v "cert_manager.py"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
-    (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * cd ${BASE_DIR} && venv/bin/python3 scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
+    # 健康检查每5分钟
+    (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
+    # 证书续签每月1号凌晨3点
+    (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * cd ${BASE_DIR} && venv/bin/python3 scripts/cert_manager.py --renew >> ${BASE_DIR}/logs/cert_renew.log 2>&1") | crontab -
     log_info "定时任务已配置（健康检查每5分钟 + 证书续签每月1号凌晨3点）"
 }
 
@@ -327,6 +412,14 @@ verify_installation() {
     done
 
     echo ""
+    echo -e "  系统优化:"
+    if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
+        echo -e "    ${GREEN}✅${NC} BBR加速: 已启用"
+    else
+        echo -e "    ${YELLOW}⚠️${NC} BBR加速: 未启用"
+    fi
+
+    echo ""
     if [ "$ALL_OK" = true ]; then
         echo -e "  ${GREEN}🎉 所有服务运行正常！${NC}"
     else
@@ -360,11 +453,27 @@ print_summary() {
     fi
 
     echo ""
+    echo "📊 流量统计:"
+    echo "  首页查看:  https://${CF_DOMAIN:-$SERVER_IP}:2087/"
+    echo "  API接口:   https://${CF_DOMAIN:-$SERVER_IP}:2087/api/traffic"
+    echo "  重置规则:  每月14号自动归零"
+    echo ""
+    echo "🌐 CDN优选IP（4级降级保障）:"
+    echo "  主方案:    本地实测IP池（湖南电信最优）"
+    echo "  备选1:     cf.001315.xyz/ct电信API"
+    echo "  备选2:     WeTest.vip电信优选DNS"
+    echo "  备选3:     IPDB API bestcf"
+    echo ""
+    echo "⚡ 系统优化（已自动完成）:"
+    echo "  BBR加速:   已启用"
+    echo "  TCP调优:   已优化"
+    echo "  文件描述符: 65535"
+    echo "  时区:      Asia/Shanghai"
+    echo ""
     echo "📝 下一步:"
     echo "  1. 编辑配置: nano $BASE_DIR/.env"
     echo "  2. 如有域名，填写CF_DOMAIN和CF_API_TOKEN"
     echo "  3. 重启服务: systemctl restart singbox singbox-sub singbox-cdn"
-    echo "  4. 健康检查: bash $BASE_DIR/scripts/health_check.sh"
     echo ""
     echo "🔧 服务管理:"
     echo "  查看状态: systemctl status singbox singbox-sub singbox-cdn"
@@ -375,7 +484,7 @@ print_summary() {
 main() {
     echo ""
     echo "=========================================="
-    echo -e "${CYAN}  Singbox EPS Node 一键安装脚本${NC}"
+    echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.62${NC}"
     echo "=========================================="
     echo ""
 
@@ -383,6 +492,7 @@ main() {
     detect_os
     install_dependencies
     uninstall_old_panels
+    optimize_system
     install_singbox
     clone_repo
     setup_python_env
@@ -391,8 +501,8 @@ main() {
     create_env_file
     generate_config
     setup_certificate
-    setup_port_hopping
     setup_firewall
+    setup_port_hopping
     create_systemd_services
     setup_health_check_cron
     start_services

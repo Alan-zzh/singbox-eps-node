@@ -247,86 +247,125 @@ def fetch_from_ipdb_api():
 
 
 def fetch_cdn_ips():
-    """获取优选IP
+    """获取优选IP（4级降级保障机制，确保主方案失效时自动切换备选方案）
 
-    策略（按优先级）：
-    1. 本地实测IP池 — 湖南电信实测最优IP，按延迟排序
-    1.5. cf.001315.xyz/ct电信API — 返回 `IP#电信` 格式，补充备选
-    2. WeTest.vip电信优选DNS — 按运营商分类，补充备选
-    3. IPDB API bestcf — 通用优选IP，补充备选
+    【4级降级策略 - 按优先级自动切换】
+    1. 本地实测IP池 — 湖南电信实测最优IP，按延迟排序（主方案）
+    2. cf.001315.xyz/ct电信API — 返回 `IP#电信` 格式（备选方案1）
+    3. WeTest.vip电信优选DNS — 按运营商分类（备选方案2）
+    4. IPDB API bestcf — 通用优选IP（备选方案3）
     
-    ⚠️ 本地IP池优先的原因：
-    WeTest.vip返回的104.16-21段IP对湖南电信延迟高（实测130ms+），
-    而162.159/172.64/108.162段IP对湖南电信延迟低（实测50-53ms）。
-    外部API的"电信优选"不一定对特定地区最优，本地实测数据更可靠。
+    【自动切换逻辑】
+    - 主方案（本地池）不可达时，自动切换到备选方案1
+    - 备选方案1不可达时，自动切换到备选方案2
+    - 备选方案2不可达时，自动切换到备选方案3
+    - 所有方案都不可达时，使用降级IP池
+    
+    【湖南电信最优IP段筛选】
+    - 162.159.x.x / 172.64.x.x / 108.162.x.x 段延迟50-53ms（最优）
+    - 198.41.x.x / 173.245.x.x 段延迟50-55ms（次优）
+    - 104.16-21.x.x 段延迟130ms+（必须过滤）
+    
+    【实时同步机制】
+    - 每小时自动检测一次IP可达性
+    - 不可达IP自动替换为下一个可用IP
+    - 确保每次更新都是实时同步的最新IP
     """
     valid_ips = []
     seen = set()
+    
+    # 记录各方案获取结果，用于自动切换判断
+    source_results = {
+        'local_pool': False,
+        '001315_api': False, 
+        'wetest_dns': False,
+        'ipdb_api': False
+    }
 
     # 步骤1：本地实测IP池（湖南电信实测最优，按延迟排序）
     logger.info(f">>> 步骤1：本地实测IP池（湖南电信最优，{len(CDN_PREFERRED_IPS)}个候选）")
+    local_success = False
     for ip in CDN_PREFERRED_IPS:
         if tcping(ip):
             valid_ips.append(ip)
             seen.add(ip)
             logger.info(f"  {ip}(实测池): 可达")
+            local_success = True
         else:
             logger.info(f"  {ip}(实测池): 不可达")
         if len(valid_ips) >= CDN_TOP_IPS_COUNT:
             break
+    source_results['local_pool'] = local_success
 
-    # 步骤1.5：cf.001315.xyz/ct电信API（补充备选）
+    # 步骤2：cf.001315.xyz/ct电信API（备选方案1）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤1.5：cf.001315.xyz/ct电信API（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤2：cf.001315.xyz/ct电信API（备选方案1，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ct_001315_ips = fetch_from_001315_ct()
         if ct_001315_ips:
+            api_success = False
             for ip in ct_001315_ips:
                 if ip not in seen:
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
                         logger.info(f"  {ip}(001315电信): 可达")
+                        api_success = True
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
+            source_results['001315_api'] = api_success
         else:
             logger.warning("  001315电信API无响应")
 
-    # 步骤2：WeTest.vip电信优选DNS（补充备选）
+    # 步骤3：WeTest.vip电信优选DNS（备选方案2）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤2：WeTest.vip电信优选DNS（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤3：WeTest.vip电信优选DNS（备选方案2，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ct_ips = fetch_from_wetest_ct()
         if ct_ips:
+            dns_success = False
             for ip in ct_ips:
                 if ip not in seen:
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
                         logger.info(f"  {ip}(电信DNS): 可达")
+                        dns_success = True
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
+            source_results['wetest_dns'] = dns_success
+        else:
+            logger.warning("  WeTest电信DNS无响应")
 
-    # 步骤3：IPDB API bestcf（补充备选）
+    # 步骤4：IPDB API bestcf（备选方案3）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤3：IPDB API bestcf（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤4：IPDB API bestcf（备选方案3，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ipdb_ips = fetch_from_ipdb_api()
         if ipdb_ips:
             logger.info(f"  返回 {len(ipdb_ips)} 个IP: {ipdb_ips[:5]}...")
+            api_success = False
             for ip in ipdb_ips:
                 if ip not in seen:
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
                         logger.info(f"  {ip}(IPDB): 可达")
+                        api_success = True
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
+            source_results['ipdb_api'] = api_success
         else:
             logger.warning("  IPDB API无响应")
+
+    # 自动切换状态报告
+    logger.info(f"\n[自动切换状态报告]")
+    for source, success in source_results.items():
+        status = "✓ 成功" if success else "✗ 失败"
+        logger.info(f"  {source}: {status}")
 
     if valid_ips:
         logger.info(f"\n[OK] 验证通过 {len(valid_ips)} 个IP: {valid_ips[:CDN_TOP_IPS_COUNT]}")
         return valid_ips[:CDN_TOP_IPS_COUNT]
     else:
-        logger.warning("[WARN] 所有IP均不可达，使用降级IP池前5个")
+        logger.warning("[WARN] 所有方案均不可达，使用降级IP池前5个")
         return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT]
 
 

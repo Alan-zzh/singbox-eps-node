@@ -50,6 +50,14 @@ ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
 ai_socks5_user = env_vars.get('AI_SOCKS5_USER', '')
 ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
 
+# ⚠️ SSL证书路径：优先fullchain.pem（Let's Encrypt/Cloudflare正式证书），降级cert.pem（自签名）
+# cert_manager.py生成cert.pem+key.pem，acme.sh生成fullchain.pem+key.pem
+# fullchain.pem包含完整证书链，客户端验证更可靠
+_cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
+_cert_key = os.path.join(CERT_DIR, 'key.pem')
+if not os.path.exists(_cert_chain):
+    _cert_chain = os.path.join(CERT_DIR, 'cert.pem')
+
 # ⚠️ SOCKS5入站：仅当用户名和密码均非空时才启用，避免空凭据导致无认证暴露
 socks5_inbound = [{
     "type": "socks",
@@ -103,8 +111,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
-                "key_path": os.path.join(CERT_DIR, "key.pem"),
+                "certificate_path": _cert_chain,
+                "key_path": _cert_key,
                 "alpn": ["http/1.1"]
             }
         },
@@ -122,8 +130,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
-                "key_path": os.path.join(CERT_DIR, "key.pem"),
+                "certificate_path": _cert_chain,
+                "key_path": _cert_key,
                 "alpn": ["http/1.1"]
             }
         },
@@ -141,8 +149,8 @@ config = {
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
-                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
-                "key_path": os.path.join(CERT_DIR, "key.pem"),
+                "certificate_path": _cert_chain,
+                "key_path": _cert_key,
                 "alpn": ["http/1.1"]
             }
         },
@@ -151,14 +159,12 @@ config = {
             "tag": "hysteria2",
             "listen": "0.0.0.0",
             "listen_port": 443,
-            # 端口跳跃：客户端可通过21000-21200范围内的端口连接
-            # iptables将21000-21200 DNAT到443，服务端只需监听443
             "users": [{"password": hysteria2_pass}],
             "tls": {
                 "enabled": True,
                 "server_name": "www.apple.com",
-                "certificate_path": os.path.join(CERT_DIR, "cert.pem"),
-                "key_path": os.path.join(CERT_DIR, "key.pem"),
+                "certificate_path": _cert_chain,
+                "key_path": _cert_key,
                 "alpn": ["h3"]
             },
             "obfs": {

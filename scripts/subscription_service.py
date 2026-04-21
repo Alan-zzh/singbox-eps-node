@@ -854,9 +854,9 @@ if __name__ == '__main__':
     cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
     cert_key = os.path.join(CERT_DIR, 'key.pem')
     if not os.path.exists(cert_chain):
-        cert_chain = os.path.join(CERT_DIR, 'cert.crt')
+        cert_chain = os.path.join(CERT_DIR, 'cert.pem')
     if not os.path.exists(cert_key):
-        cert_key = os.path.join(CERT_DIR, 'cert.key')
+        cert_key = os.path.join(CERT_DIR, 'key.pem')
 
     if not os.path.exists(cert_chain) or not os.path.exists(cert_key):
         logger.error(f"SSL证书文件不存在: {cert_chain} 或 {cert_key}")

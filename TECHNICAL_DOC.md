@@ -4,7 +4,7 @@
 - **项目名称**: Singbox EPS Node (代理节点订阅系统)
 - **服务器**: 从.env动态读取SERVER_IP（自动检测公网IP）
 - **域名**: 从.env动态读取CF_DOMAIN（用于CDN和SSL证书）
-- **当前版本**: v1.0.54
+- **当前版本**: v1.0.62
 
 ---
 
@@ -59,11 +59,20 @@
   - alpn=["h3"]：HY2使用QUIC协议
 
 ### 3. CDN优选IP ✅
-- **机制**: 使用指定DNS（222.246.129.80 | 59.51.78.210）解析域名获取IP
-- **降级方案**: 114DNS → 固定优选IP池
+- **机制**: 4级降级保障，确保主方案失效时自动切换备选方案
+- **4级降级策略（按优先级自动切换）**:
+  1. 本地实测IP池（CDN_PREFERRED_IPS）— 湖南电信实测最优IP，按延迟排序
+  2. cf.001315.xyz/ct电信API — 返回 `IP#电信` 格式，按运营商分类
+  3. WeTest.vip电信优选DNS（ct.cloudflare.182682.xyz）— 按运营商分类，每15分钟更新
+  4. IPDB API bestcf — 通用优选IP，不按运营商分类
+- **湖南电信最优IP段筛选**:
+  - 162.159.x.x / 172.64.x.x / 108.162.x.x 段延迟50-53ms（最优）
+  - 198.41.x.x / 173.245.x.x 段延迟50-55ms（次优）
+  - 104.16-21.x.x 段延迟130ms+（必须过滤）
+- **自动切换逻辑**: 主方案不可达→备选1→备选2→备选3→降级IP池
 - **存储**: SQLite数据库（data/singbox.db）
 - **分配**: 每个CDN协议独立优选IP
-- **更新频率**: 每小时自动查询
+- **更新频率**: 每小时自动查询+TCPing验证
 
 ### 4. SOCKS5 AI路由规则 ✅
 - **实现方式**: sing-box路由规则自动分流
@@ -87,6 +96,25 @@
   - 禁止将AI-SOCKS5加入Base64订阅链接
   - 禁止将AI-SOCKS5加入ePS-Auto selector的可选列表
   - 用户在客户端节点列表中不应看到AI-SOCKS5
+
+### 5. 按月流量统计 ✅
+- **数据库表**: traffic_stats（key-value结构，与cdn_settings一致）
+- **统计方式**: 每次订阅请求返回时自动累加响应数据量
+- **自动归零**: 每月14号自动归零（检查当天日期+本月是否已重置过）
+- **持久化**: 数据存储在data/singbox.db，重装系统才丢失
+- **API接口**: `/api/traffic` 返回JSON格式流量数据（不加token认证，铁律13）
+- **首页显示**: 首页蓝色流量统计区域，显示当月已用流量+统计月份+归零日
+
+### 6. SSL证书路径统一 ✅
+- **证书文件名统一规则**:
+  - cert_manager.py生成: cert.pem + key.pem（自签名/Cloudflare API）
+  - acme.sh生成: fullchain.pem + key.pem（Let's Encrypt）
+- **优先级**: fullchain.pem > cert.pem（fullchain.pem包含完整证书链）
+- **所有引用点统一**:
+  - subscription_service.py: 优先fullchain.pem，降级cert.pem
+  - config_generator.py: 优先fullchain.pem，降级cert.pem
+  - health_check.sh: 循环检查fullchain.pem和cert.pem
+  - cert_manager.py: check_cert_expiry()循环检查fullchain.pem和cert.pem
 
 ---
 
@@ -152,18 +180,7 @@ AI_SOCKS5_PASS=     # AI SOCKS5密码（可选）
 
 ## 待解决问题
 
-### 问题1: SOCKS5自动切换 ❌
-**现状**: 
-- 当前SOCKS5节点从环境变量读取，只有一个节点
-- 未实现多节点池和自动切换
-
-**需求**:
-- 实现SOCKS5节点自动切换功能
-- 当当前节点不可用时，自动切换到备用节点
-- 需要维护一个SOCKS5节点池
-
-### 问题2: acme.sh自动续期验证 ⚠️
-**现状**: 证书有效期至2026-07-19，需确认cron自动续期任务是否配置
+（当前无待解决问题）
 
 ---
 

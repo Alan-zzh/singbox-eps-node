@@ -28,11 +28,12 @@ import json
 import hashlib
 import subprocess
 
-BASE_DIR = '/root/singbox-eps-node'
+# 自动检测当前脚本所在目录作为BASE_DIR
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CERT_DIR = os.path.join(BASE_DIR, 'cert')
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 GEO_DIR = os.path.join(BASE_DIR, 'geo')
-LOG_DIR = '/var/log'
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
 ENV_FILE = os.path.join(BASE_DIR, '.env')
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 DB_FILE = os.path.join(DATA_DIR, 'singbox.db')

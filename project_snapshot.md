@@ -1,7 +1,7 @@
 # 项目状态快照 (Project Snapshot)
 
 ## 当前版本
-**v1.0.60** (新增按月流量统计功能：traffic_stats表+自动归零+首页显示+/api/traffic接口)
+**v1.0.62** (修复证书路径BUG+sysctl防重复+requirements.txt+文档同步)
 
 ---
 
@@ -30,10 +30,72 @@
 | v1.0.53 | 2026-04-21 | **全面优化与验证**：文档版本统一+代码质量审查+安装流程修复+功能模块测试 |
 | v1.0.54 | 2026-04-21 | subscription_service.py安全加固：Token认证+IP验证+连接泄漏+异常脱敏+ImportError降级 |
 | v1.0.60 | 2026-04-22 | 新增按月流量统计：traffic_stats表+每月14号自动归零+首页流量显示+/api/traffic接口 |
+| v1.0.61 | 2026-04-22 | 优化CDN优选IP4级降级机制+完善流量统计功能+详细文档记录 |
+| v1.0.62 | 2026-04-22 | 修复证书路径BUG(cert.crt→cert.pem)+sysctl防重复追加+requirements.txt+文档同步 |
 
 ---
 
-## 最新更新内容 (v1.0.60)
+## 最新更新内容 (v1.0.62)
+
+### Bug修复：证书路径不一致（严重）
+
+**问题**: subscription_service.py证书降级路径引用cert.crt/cert.key，但cert_manager.py生成的是cert.pem/key.pem
+**影响**: 无fullchain.pem时，订阅服务无法启动（找不到cert.crt）
+**修复**: 统一降级路径为cert.pem/key.pem
+
+**config_generator.py同步修复**: 
+- 新增证书路径自动检测：优先fullchain.pem，降级cert.pem
+- 所有4处硬编码os.path.join(CERT_DIR, "cert.pem")替换为动态变量_cert_chain/_cert_key
+
+### Bug修复：install.sh sysctl.conf重复追加
+
+**问题**: optimize_system()使用cat >>追加TCP参数，重复运行安装脚本会产生重复行
+**修复**: 改为逐项检查，已存在则sed更新，不存在才追加
+
+### 新增：requirements.txt
+
+**问题**: install.sh硬编码pip install flask python-dotenv，缺少依赖版本锁定
+**修复**: 新增requirements.txt（flask>=2.3.0, python-dotenv>=1.0.0），install.sh优先使用requirements.txt
+
+### 新增：install.sh目录创建
+
+**问题**: clone_repo()只clone仓库，不创建运行时必需的目录
+**修复**: clone后自动创建logs/data/cert/backups目录
+
+---
+
+## 历史更新内容 (v1.0.61)
+
+### CDN优选IP 4级降级机制优化
+
+**优化目标：确保主方案失效时自动切换备选方案，实现实时同步IP更换**
+
+**4级降级策略（按优先级自动切换）：**
+1. **主方案：本地实测IP池** - 湖南电信实测最优IP，按延迟排序
+2. **备选方案1：cf.001315.xyz/ct电信API** - 返回 `IP#电信` 格式
+3. **备选方案2：WeTest.vip电信优选DNS** - 按运营商分类
+4. **备选方案3：IPDB API bestcf** - 通用优选IP
+
+**自动切换逻辑：**
+- 主方案不可达时，自动切换到备选方案1
+- 备选方案1不可达时，自动切换到备选方案2
+- 备选方案2不可达时，自动切换到备选方案3
+- 所有方案都不可达时，使用降级IP池
+
+**湖南电信最优IP段筛选：**
+- 162.159.x.x / 172.64.x.x / 108.162.x.x 段延迟50-53ms（最优）
+- 198.41.x.x / 173.245.x.x 段延迟50-55ms（次优）
+- 104.16-21.x.x 段延迟130ms+（必须过滤）
+
+**实时同步机制：**
+- 每小时自动检测一次IP可达性
+- 不可达IP自动替换为下一个可用IP
+- 确保每次更新都是实时同步的最新IP
+
+**成功方式记录：**
+- 每次执行都会记录各方案获取结果
+- 自动切换状态报告显示各方案成功/失败状态
+- 日志详细记录IP获取和验证过程
 
 ### 按月流量统计功能
 

@@ -13,7 +13,9 @@ import sys
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
-LOG_DIR = '/var/log'
+# 日志配置 - 自动检测当前脚本所在目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'singbox.log')
 MAX_LOG_SIZE = 50 * 1024 * 1024  # 50MB
 BACKUP_COUNT = 2  # 保留2个备份
