@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.57
+Version: v1.0.58
 Date: 2026-04-21
 功能：
   - 从WeTest.vip电信优选DNS获取实时Cloudflare优选IP
@@ -66,6 +66,16 @@ CF_001315_CT_URL = 'https://cf.001315.xyz/ct'
 IPDB_API_URL = 'https://ipdb.api.030101.xyz/?type=bestcf'
 
 FALLBACK_IPS = [
+    '162.159.45.66',
+    '162.159.39.48',
+    '172.64.53.253',
+    '162.159.44.192',
+    '172.64.52.244',
+    '162.159.38.190',
+    '108.162.198.29',
+    '162.159.15.207',
+    '162.159.19.243',
+    '162.159.58.128',
     '162.159.38.180',
     '108.162.198.116',
     '172.64.53.134',
@@ -73,23 +83,13 @@ FALLBACK_IPS = [
     '162.159.45.244',
     '162.159.44.128',
     '172.64.52.173',
-    '104.16.123.96',
-    '104.16.124.96',
-    '104.17.136.90',
-    '104.17.137.90',
-    '104.18.37.65',
-    '104.18.38.65',
-    '162.159.39.190',
-    '162.159.38.26',
-    '162.159.7.250',
-    '162.159.45.15',
-    '162.159.44.103',
     '172.64.33.166',
     '172.64.53.179',
     '172.64.52.205',
     '108.162.198.145',
-    '172.67.178.214',
-    '104.21.35.190',
+    '104.16.123.96',
+    '104.16.124.96',
+    '104.17.136.90',
 ]
 
 CDN_TOP_IPS_COUNT = 5
@@ -218,47 +218,44 @@ def fetch_cdn_ips():
     """获取优选IP
 
     策略（按优先级）：
-    1. WeTest.vip电信优选DNS — 按运营商分类，电信线路最优
-    2. cf.001315.xyz电信API — 电信专用IP
-    3. IPDB API bestcf — 通用优选IP
-    4. 本地降级IP池 — 最后降级
+    1. 本地实测IP池 — 湖南电信实测最优IP，按延迟排序
+    2. WeTest.vip电信优选DNS — 按运营商分类，补充备选
+    3. IPDB API bestcf — 通用优选IP，补充备选
+    
+    ⚠️ 本地IP池优先的原因：
+    WeTest.vip返回的104.16-21段IP对湖南电信延迟高（实测130ms+），
+    而162.159/172.64/108.162段IP对湖南电信延迟低（实测50-53ms）。
+    外部API的"电信优选"不一定对特定地区最优，本地实测数据更可靠。
     """
     valid_ips = []
     seen = set()
 
-    # 步骤1：WeTest.vip电信优选DNS
-    logger.info(f">>> 步骤1：WeTest.vip电信优选DNS")
-    ct_ips = fetch_from_wetest_ct()
-    if ct_ips:
-        for ip in ct_ips:
-            if ip not in seen:
-                seen.add(ip)
-                if tcping(ip):
-                    valid_ips.append(ip)
-                    logger.info(f"  {ip}(电信DNS): 可达")
-                else:
-                    logger.info(f"  {ip}(电信DNS): 不可达")
-                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                    break
+    # 步骤1：本地实测IP池（湖南电信实测最优，按延迟排序）
+    logger.info(f">>> 步骤1：本地实测IP池（湖南电信最优，{len(FALLBACK_IPS)}个候选）")
+    for ip in FALLBACK_IPS:
+        if tcping(ip):
+            valid_ips.append(ip)
+            logger.info(f"  {ip}(实测池): 可达")
+        else:
+            logger.info(f"  {ip}(实测池): 不可达")
+        if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+            break
 
-    # 步骤2：cf.001315.xyz电信API
+    # 步骤2：WeTest.vip电信优选DNS（补充备选）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤2：cf.001315.xyz电信API（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
-        api_ips = fetch_from_001315_ct()
-        if api_ips:
-            logger.info(f"  返回 {len(api_ips)} 个电信IP: {api_ips[:5]}...")
-            for ip in api_ips:
+        logger.info(f"\n>>> 步骤2：WeTest.vip电信优选DNS（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        ct_ips = fetch_from_wetest_ct()
+        if ct_ips:
+            for ip in ct_ips:
                 if ip not in seen:
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
-                        logger.info(f"  {ip}(001315): 可达")
+                        logger.info(f"  {ip}(电信DNS): 可达")
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
-        else:
-            logger.warning("  cf.001315.xyz无响应")
 
-    # 步骤3：IPDB API bestcf
+    # 步骤3：IPDB API bestcf（补充备选）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
         logger.info(f"\n>>> 步骤3：IPDB API bestcf（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ipdb_ips = fetch_from_ipdb_api()
@@ -274,18 +271,6 @@ def fetch_cdn_ips():
                         break
         else:
             logger.warning("  IPDB API无响应")
-
-    # 步骤4：本地降级IP池
-    if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤4：本地降级IP池（还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
-        for ip in FALLBACK_IPS:
-            if ip not in seen:
-                seen.add(ip)
-                if tcping(ip):
-                    valid_ips.append(ip)
-                    logger.info(f"  {ip}(降级池): 可达")
-                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                    break
 
     if valid_ips:
         logger.info(f"\n[OK] 验证通过 {len(valid_ips)} 个IP: {valid_ips[:CDN_TOP_IPS_COUNT]}")
