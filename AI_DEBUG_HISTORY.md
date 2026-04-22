@@ -237,12 +237,37 @@
   - DNS查询走代理会增加额外延迟，导致所有域名解析都变慢
 
 ### Bug #28: AI规则包含google.com导致延迟测试走SOCKS5（360ms）
-- **版本**: v1.0.80 → v1.0.81
-- **日期**: 2026-04-22
+- **版本**: v1.0.80 → v1.0.82
+- **日期**: 2026-04-23
 - **现象**: v2rayN延迟测试显示170-193ms，但本地ping只有63ms；用户反馈"加了SOCKS5后延迟莫名其妙变高"
 - **根因**: AI规则的domain_suffix包含了google.com/googleapis.com/gstatic.com。v2rayN延迟测试用www.google.com/generate_204，被AI规则匹配走了SOCKS5。延迟测到的是SOCKS5延迟（360ms）而非正常代理延迟（63ms+TLS开销）
 - **修复**: 从AI规则中移除google.com/googleapis.com/gstatic.com。只保留AI专用子域名（gemini.google.com/bard.google.com/aistudio.google.com/ai.google）
-- **预防**: AI规则中禁止包含通用域名（google.com等），只包含AI专用子域名
+- **预防**: AI规则中禁止包含通用域名（google.com等），只包含AI专用子域名。修改subscription_service.py时必须同步修改config_generator.py
+
+### Bug #29: CDN优选IP返回104.x.x.x高延迟段（130ms+）
+- **版本**: v1.0.82
+- **日期**: 2026-04-23
+- **现象**: CDN优选IP返回104.21.x.x/104.16-18.x.x段，对中国用户延迟130ms+，远高于162.159.x.x段的50ms
+- **根因1**: WeTest.vip的DNS记录本身就是104段，即使用湖南电信DNS(222.246.129.80)或阿里DoH解析也返回104段。不是DNS服务器的问题，是WeTest.vip的Anycast分配问题
+- **根因2**: 之前代码过滤104段后为空就"全部保留"，导致高延迟IP被使用
+- **根因3**: 日本服务器无法直接dig中国内网DNS（超时），需要用DoH方式
+- **修复**:
+  1. CDN获取顺序改为：001315 API(返回173.245等优质段) → WeTest(104段严格过滤，为空就丢弃) → IPDB → 本地池(兜底)
+  2. 过滤后为空就丢弃，不再"全部保留"
+  3. 增加DoH支持（阿里DoH: dns.alidns.com），境外服务器也能解析
+  4. `is_hunan_ct_optimal()`只允许162.159/172.64/108.162/198.41/173.245段
+- **预防**: 
+  - 104.x.x.x段必须严格过滤，不能"全部保留"
+  - 001315 API优先（返回优质段），WeTest仅作补充
+  - 境外服务器必须用DoH方式解析DNS，直接dig中国DNS会超时
+
+### Bug #30: config_generator.py与subscription_service.py不同步
+- **版本**: v1.0.82
+- **日期**: 2026-04-23
+- **现象**: 修改subscription_service.py的AI规则后，config_generator.py没有同步修改，导致服务端配置还是旧版本
+- **根因**: 两个文件独立生成配置，修改一个忘了另一个
+- **修复**: 同步修改config_generator.py的AI规则
+- **预防**: 修改subscription_service.py时必须同步修改config_generator.py，两个文件都要更新。改A忘B=隐藏Bug
 
 ---
 
