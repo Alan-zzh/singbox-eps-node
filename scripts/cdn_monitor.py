@@ -74,7 +74,18 @@ except ImportError:
 
 logger = get_logger('cdn_monitor')
 
-DNS_SERVER = '8.8.8.8'
+# ⚠️ DNS服务器选择 - 关键避坑！
+# 【Bug #27 教训】：用8.8.8.8从日本服务器解析WeTest.vip，返回104.18.x.x段，对中国延迟150-200ms
+# 【正确做法】：用湖南电信DNS解析，返回162.159.x.x/172.64.x.x段，对中国延迟50ms
+# 【Bug #27 补充】：日本服务器无法直接dig中国内网DNS（超时），必须用DNS over HTTPS(DoH)
+# 湖南电信DoH：https://doh.360.cn/dns-query 或阿里DoH：https://dns.alidns.com/resolve
+DNS_SERVER = '222.246.129.80'
+DNS_SERVER_BACKUP = '59.51.78.210'
+# DoH服务器（从境外访问中国DNS必须用DoH，直接dig会超时）
+DOH_SERVERS = [
+    'https://dns.alidns.com/resolve',
+    'https://doh.pub/dns-query',
+]
 
 IPDB_API_URL = CDN_API_IPDB
 
@@ -132,15 +143,43 @@ def tcping(ip, port=TCPING_PORT, timeout=TCPING_TIMEOUT):
 def resolve_dns(dns_name, dns_server=DNS_SERVER, timeout=10):
     """通过指定DNS服务器解析域名，返回IP列表
     
-    使用dig命令解析，从日本服务器用Google DNS(8.8.8.8)解析
-    WeTest.vip的电信优选域名，获取电信线路最优IP。
+    优先使用DNS over HTTPS(DoH)方式解析：
+    - 从境外服务器（日本等）无法直接dig中国内网DNS（超时）
+    - DoH通过HTTPS请求，境外服务器也能访问中国DNS
+    - 阿里DoH(https://dns.alidns.com/resolve)返回中国线路最优IP
+    
+    降级：DoH失败时尝试传统dig方式
     """
+    ips = []
+    
+    # 优先使用DoH方式（境外服务器必须用DoH，直接dig中国DNS会超时）
+    for doh_url in DOH_SERVERS:
+        try:
+            import urllib.request
+            url = f"{doh_url}?name={dns_name}&type=A"
+            req = urllib.request.Request(url, headers={
+                'Accept': 'application/dns-json',
+                'User-Agent': 'Mozilla/5.0'
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+                for answer in data.get('Answer', []):
+                    ip = answer.get('data', '')
+                    if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
+                        ips.append(ip)
+            if ips:
+                logger.info(f"  DoH解析 {dns_name} @ {doh_url}: {ips}")
+                return ips
+        except Exception as e:
+            logger.debug(f"  DoH {doh_url} 失败: {e}")
+            continue
+    
+    # 降级：传统dig方式（仅在内网环境有效）
     try:
         result = subprocess.run(
             ['dig', '+short', dns_name, f'@{dns_server}', '+time=5'],
             capture_output=True, text=True, timeout=timeout
         )
-        ips = []
         for line in result.stdout.strip().split('\n'):
             ip = line.strip()
             if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
@@ -159,18 +198,26 @@ def fetch_from_wetest_ct():
     - cm.cloudflare.182682.xyz — 移动优选
     - cu.cloudflare.182682.xyz — 联通优选
     
-    每15分钟更新，从Google DNS(8.8.8.8)解析即可获取。
-    返回的IP已按电信用户延迟排序。
+    ⚠️ 必须用湖南电信DNS解析，不能用8.8.8.8！
+    【Bug #27 教训】：用8.8.8.8从日本解析返回104.18.x.x段，对中国延迟150-200ms
+    用湖南电信DNS解析返回162.159.x.x/172.64.x.x段，对中国延迟50ms
     """
-    logger.info(f"  查询WeTest.vip电信优选: {CDN_API_WETEST_CT}")
-    ips = resolve_dns(CDN_API_WETEST_CT)
+    logger.info(f"  查询WeTest.vip电信优选: {CDN_API_WETEST_CT} @ {DNS_SERVER}")
+    ips = resolve_dns(CDN_API_WETEST_CT, dns_server=DNS_SERVER)
+    # 如果主DNS无响应，尝试备用DNS
+    if not ips:
+        logger.info(f"  主DNS无响应，尝试备用: {DNS_SERVER_BACKUP}")
+        ips = resolve_dns(CDN_API_WETEST_CT, dns_server=DNS_SERVER_BACKUP)
     # 筛选湖南电信最优IP段，过滤掉104.16-21段
+    # ⚠️ 关键：过滤后为空就丢弃，不能"全部保留"！
+    # 【Bug #27 根因】：之前过滤后为空就全部保留104.x.x.x段，导致中国延迟130ms+
+    # WeTest.vip的DNS记录本身就是104段，即使用中国DNS解析也是104段
     filtered = [ip for ip in ips if is_hunan_ct_optimal(ip)]
     if filtered:
         logger.info(f"  WeTest电信返回 {len(ips)} 个IP，筛选后 {len(filtered)} 个: {filtered}")
     elif ips:
-        logger.info(f"  WeTest电信返回 {len(ips)} 个IP，但无湖南电信最优段，全部保留")
-        filtered = ips
+        logger.warning(f"  WeTest电信返回 {len(ips)} 个IP，但全部是104.x.x.x高延迟段，已丢弃")
+        filtered = []
     else:
         logger.warning("  WeTest电信DNS无响应")
         filtered = []
@@ -229,13 +276,13 @@ def fetch_from_ipdb_api():
             ip = line.strip()
             if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
                 ips.append(ip)
-        # 筛选湖南电信最优IP段
+        # 筛选湖南电信最优IP段，过滤掉104.x.x.x高延迟段
         filtered = [ip for ip in ips if is_hunan_ct_optimal(ip)]
         if filtered:
             logger.info(f"  IPDB返回 {len(ips)} 个IP，筛选后 {len(filtered)} 个: {filtered[:5]}...")
         elif ips:
-            logger.info(f"  IPDB返回 {len(ips)} 个IP，但无湖南电信最优段，全部保留")
-            filtered = ips
+            logger.warning(f"  IPDB返回 {len(ips)} 个IP，但全部是104.x.x.x高延迟段，已丢弃")
+            filtered = []
         else:
             logger.warning("  IPDB API返回空列表")
         return filtered
@@ -292,15 +339,23 @@ def fetch_cdn_ips():
     - 不可达IP自动替换为下一个可用IP
     - 确保每次更新都是实时同步的最新IP
     """
-    # 【规则7 CDN IP避坑教训】：
-    # v1.0.36 用日本服务器DNS实时解析，返回IP对中国用户延迟150-200ms
-    # v1.0.37 恢复固定IP池（中国用户实测50ms左右）才是正确方案
-    # WeTest.vip从日本服务器用8.8.8.8解析返回104.18.x.x段，对中国用户延迟高
-    # 正确策略：固定IP池为主（实测最优）+ 外部API仅作补充
+    # 【CDN IP获取策略 - 规则8修正版】：
+    # 步骤1：cf.001315.xyz/ct电信API（返回173.245.x.x等优质段，优先）
+    # 步骤2：WeTest.vip电信优选DNS（用阿里DoH解析，但返回104.x.x.x段需过滤）
+    # 步骤3：IPDB API（补充）
+    # 步骤4：本地实测IP池（兜底，162.159.x.x/172.64.x.x段）
+    #
+    # 【为什么001315优先？】：
+    # 001315 API返回173.245.x.x/8.39.x.x/8.35.x.x段，属于湖南电信最优段
+    # WeTest.vip即使用中国DNS解析也返回104.x.x.x段，对中国延迟130ms+，必须过滤
+    # 本地池是固定IP，延迟50ms，但不会变化
+    #
+    # 【Bug #27 根因】：WeTest.vip返回的104.x.x.x段对中国延迟高
+    # 【关键发现】：即使用阿里DoH/湖南电信DNS解析WeTest，仍然返回104.x.x.x段
+    # 这说明WeTest.vip的DNS记录本身就是104段，不是DNS服务器的问题
     valid_ips = []
     seen = set()
     
-    # 记录各方案获取结果
     source_results = {
         '001315_api': False, 
         'wetest_dns': False,
@@ -308,65 +363,50 @@ def fetch_cdn_ips():
         'local_pool': False
     }
 
-    # ==================== 步骤1：本地实测IP池（中国用户实测最优，优先使用） ====================
-    # 【规则7教训】：固定IP池24个IP是中国用户实测延迟50ms左右的优选IP
-    # 必须优先使用！外部API从日本服务器获取的IP不一定对中国最优
-    logger.info(f">>> 步骤1：本地实测IP池（中国用户实测最优，{len(CDN_PREFERRED_IPS)}个候选）")
-    local_success = False
-    for ip in CDN_PREFERRED_IPS:
-        if tcping(ip):
-            valid_ips.append(ip)
-            seen.add(ip)
-            logger.info(f"  {ip}(实测池): 可达")
-            local_success = True
-        else:
-            logger.info(f"  {ip}(实测池): 不可达")
-        if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-            break
-    source_results['local_pool'] = local_success
+    # ==================== 步骤1：cf.001315.xyz/ct电信API（返回优质段，优先使用） ====================
+    logger.info(f">>> 步骤1：cf.001315.xyz/ct电信API（返回优质段，优先）")
+    ct_001315_ips = fetch_from_001315_ct()
+    if ct_001315_ips:
+        api_success = False
+        for ip in ct_001315_ips:
+            if ip not in seen:
+                seen.add(ip)
+                if tcping(ip):
+                    valid_ips.append(ip)
+                    logger.info(f"  {ip}(001315电信): 可达")
+                    api_success = True
+                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                    break
+        source_results['001315_api'] = api_success
+    else:
+        logger.warning("  001315电信API无响应")
 
-    # 步骤2：cf.001315.xyz/ct电信API（补充，仅本地池不足时触发）
+    # 步骤2：WeTest.vip电信优选DNS（返回104.x.x.x段需过滤，仅保留优质段）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤2：cf.001315.xyz/ct电信API（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
-        ct_001315_ips = fetch_from_001315_ct()
-        if ct_001315_ips:
-            api_success = False
-            for ip in ct_001315_ips:
-                if ip not in seen:
-                    seen.add(ip)
-                    if tcping(ip):
-                        valid_ips.append(ip)
-                        logger.info(f"  {ip}(001315电信): 可达")
-                        api_success = True
-                    if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                        break
-            source_results['001315_api'] = api_success
-        else:
-            logger.warning("  001315电信API无响应")
-
-    # 步骤3：WeTest.vip电信优选DNS（补充，延迟较高仅作备选）
-    # 【规则7教训】：从日本解析返回104.18.x.x段对中国用户延迟高，仅作补充
-    if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤3：WeTest.vip电信优选DNS（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤2：WeTest.vip电信优选DNS（需过滤104段，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ct_ips = fetch_from_wetest_ct()
+        # ⚠️ 关键：WeTest返回的104.x.x.x段对中国延迟130ms+，必须严格过滤
+        # 只保留属于HUNAN_CT_OPTIMAL_PREFIXES的IP
         if ct_ips:
             dns_success = False
             for ip in ct_ips:
-                if ip not in seen:
+                if ip not in seen and is_hunan_ct_optimal(ip):
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
-                        logger.info(f"  {ip}(WeTest电信): 可达")
+                        logger.info(f"  {ip}(WeTest电信-优质): 可达")
                         dns_success = True
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
             source_results['wetest_dns'] = dns_success
+            if not dns_success:
+                logger.warning("  WeTest返回的IP全部是104.x.x.x高延迟段，已过滤")
         else:
             logger.warning("  WeTest电信DNS无响应")
 
-    # 步骤4：IPDB API（最后补充）
+    # 步骤3：IPDB API（补充）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤4：IPDB API（最后补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤3：IPDB API（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ipdb_ips = fetch_from_ipdb_api()
         if ipdb_ips:
             logger.info(f"  返回 {len(ipdb_ips)} 个IP: {ipdb_ips[:5]}...")
@@ -383,6 +423,21 @@ def fetch_cdn_ips():
             source_results['ipdb_api'] = api_success
         else:
             logger.warning("  IPDB API无响应")
+
+    # 步骤4：本地实测IP池（兜底保障，WeTest等全挂了才用）
+    if len(valid_ips) < CDN_TOP_IPS_COUNT:
+        logger.info(f"\n>>> 步骤4：本地实测IP池（兜底，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        local_success = False
+        for ip in CDN_PREFERRED_IPS:
+            if ip not in seen:
+                seen.add(ip)
+                if tcping(ip):
+                    valid_ips.append(ip)
+                    logger.info(f"  {ip}(实测池): 可达")
+                    local_success = True
+                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                    break
+        source_results['local_pool'] = local_success
 
     # 自动切换状态报告
     logger.info(f"\n[自动切换状态报告]")
