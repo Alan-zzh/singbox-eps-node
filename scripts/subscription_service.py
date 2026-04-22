@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v1.0.80
-Date: 2026-04-22
+Version: v1.0.82
+Date: 2026-04-23
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -680,6 +680,12 @@ def generate_singbox_config():
                 # 必须使用住宅IP（residential IP）才能正常访问。
                 # AI-SOCKS5提供住宅代理出口，确保AI网站不会被403/验证码拦截。
                 #
+                # 【Bug #28 教训】：
+                # 之前AI规则包含了google.com/googleapis.com/gstatic.com，
+                # 导致v2rayN延迟测试(www.google.com/generate_204)走了SOCKS5，
+                # 延迟测到360ms(SOCKS5延迟)而非正常代理延迟。
+                # 已移除这3个通用域名，只保留AI专用子域名(gemini.google.com等)。
+                #
                 # 【故障转移机制 - Bug #26教训】：
                 # ai-residential selector的outbounds包含["AI-SOCKS5", "direct"]
                 # 当AI-SOCKS5不可用（如住宅代理服务宕机、网络中断）时，
@@ -713,10 +719,7 @@ def generate_singbox_config():
                         "midjourney.com",
                         "stability.ai",
                         "cohere.com",
-                        "replicate.com",
-                        "google.com",
-                        "googleapis.com",
-                        "gstatic.com"
+                        "replicate.com"
                     ],
                     "domain_keyword": [
                         "openai",

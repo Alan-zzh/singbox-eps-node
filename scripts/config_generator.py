@@ -2,8 +2,8 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v1.0.80
-Date: 2026-04-22
+Version: v1.0.82
+Date: 2026-04-23
 功能：生成完整的 Singbox 配置
 ⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码
 """
@@ -260,12 +260,19 @@ config = {
             # 仅当配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量时，
             # 此规则才会被添加到路由规则中（由上面的条件判断控制）
             # 故障转移：AI-SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
+            # 出站标签ai-residential → AI-SOCKS5节点（故障转移：不可用时自动切direct）
+            # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
+            #
+            # 【Bug #28 教训 - 延迟测高根因】：
+            # 之前包含了google.com/googleapis.com/gstatic.com这3个通用域名，
+            # 导致用户v2rayN延迟测试(www.google.com/generate_204)走了AI-SOCKS5住宅代理，
+            # 延迟从正常的63ms(ping)+TLS开销飙升到360ms(SOCKS5住宅代理延迟)。
+            # 必须只保留AI专用子域名，不能包含通用google域名！
             "domain_suffix": [
                 "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
                 "gemini.google.com", "bard.google.com", "ai.google",
                 "aistudio.google.com", "perplexity.ai", "midjourney.com",
-                "stability.ai", "cohere.com", "replicate.com",
-                "google.com", "googleapis.com", "gstatic.com"
+                "stability.ai", "cohere.com", "replicate.com"
             ],
             "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio"],
             "outbound": "ai-residential"

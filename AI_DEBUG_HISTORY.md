@@ -236,19 +236,13 @@
   - 最终流量走向由route.final规则控制，DNS不需要提前绕代理
   - DNS查询走代理会增加额外延迟，导致所有域名解析都变慢
 
-### Bug #27: CDN优选IP从日本DNS解析返回高延迟IP（104.18.x.x段）
-- **版本**: v1.0.77 → v1.0.80
+### Bug #28: AI规则包含google.com导致延迟测试走SOCKS5（360ms）
+- **版本**: v1.0.80 → v1.0.81
 - **日期**: 2026-04-22
-- **现象**: WeTest.vip返回104.18.x.x段IP，用户反馈"越变越卡"
-- **根因**: 
-  - v1.0.77 修改 Bug #24 时，错误地将 WeTest.vip DNS（从日本服务器用 8.8.8.8 解析）设为步骤1优先
-  - 从日本服务器解析 WeTest.vip 返回 104.18.x.x 段，这些段对中国用户延迟高
-  - 违反了规则7：v1.0.36 已经踩过的坑——日本服务器DNS解析返回对中国延迟高的IP
-  - v1.0.37 恢复固定IP池才是正确方案，但我改Bug #24时忘了规则7
-- **修复**: 
-  - 步骤1改回本地实测IP池（162.159.x.x / 172.64.x.x 段，中国用户实测50ms）
-  - WeTest.vip降级到步骤3，仅作补充
-- **预防**: 修改任何配置前必须先读 AI_DEBUG_HISTORY.md 所有规则，不能只看局部
+- **现象**: v2rayN延迟测试显示170-193ms，但本地ping只有63ms；用户反馈"加了SOCKS5后延迟莫名其妙变高"
+- **根因**: AI规则的domain_suffix包含了google.com/googleapis.com/gstatic.com。v2rayN延迟测试用www.google.com/generate_204，被AI规则匹配走了SOCKS5。延迟测到的是SOCKS5延迟（360ms）而非正常代理延迟（63ms+TLS开销）
+- **修复**: 从AI规则中移除google.com/googleapis.com/gstatic.com。只保留AI专用子域名（gemini.google.com/bard.google.com/aistudio.google.com/ai.google）
+- **预防**: AI规则中禁止包含通用域名（google.com等），只包含AI专用子域名
 
 ---
 
