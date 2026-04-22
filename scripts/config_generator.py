@@ -2,8 +2,8 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v1.0.54
-Date: 2026-04-21
+Version: v1.0.79
+Date: 2026-04-23
 功能：生成完整的 Singbox 配置
 ⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码
 """
@@ -186,12 +186,28 @@ config = {
         {"type": "direct", "tag": "direct"},
         {"type": "block", "tag": "block"}
     ] + ([{
+        # ⚠️ ai-residential selector：AI网站流量自动路由到住宅代理
+        # 【故障转移机制 - Bug #26教训】：
+        # outbounds包含["AI-SOCKS5", "direct"]，AI-SOCKS5为默认首选
+        # 当AI-SOCKS5不可用（住宅代理服务宕机、凭据过期、网络中断）时，
+        # sing-box自动fallback到direct，从VPS直连出去
+        # 虽然直连可能被AI网站封锁，但至少不会无限转圈，用户能看到错误页面
+        #
+        # 【为什么selector而不是urltest】：
+        # selector允许管理员通过Clash API手动切换（如长期故障时切到direct）
+        # urltest是自动测速切换，无法手动干预
+        #
+        # 【Bug #26 故障转移教训】：
+        # 之前outbounds只有["AI-SOCKS5"]，没有direct备选
+        # 住宅代理宕机时所有AI网站流量全部中断，修复后加入direct作为第二选项
+        #
         # ⚠️ AI-SOCKS5是幕后路由出站，不是用户可见节点
         # 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
         # 用户在客户端节点列表中看不到AI-SOCKS5，AI网站流量自动走此出站
+        # 故障转移：AI-SOCKS5不可用时自动fallback到direct
         "type": "selector",
         "tag": "ai-residential",
-        "outbounds": ["AI-SOCKS5"],
+        "outbounds": ["AI-SOCKS5", "direct"],
         "default": "AI-SOCKS5"
     }, {
         "type": "socks",
@@ -204,11 +220,46 @@ config = {
     }] if ai_socks5_server and ai_socks5_port else []),
     "route": {
         "rules": [
+            # 【路由规则匹配顺序说明】：
+            # sing-box按数组顺序从上到下匹配，第一条命中的规则生效
+            # 因此规则顺序至关重要，优先级高的必须放在前面
         ] + ([{
+            # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，服务器直连）- 必须放在AI规则之前！
+            # 【Bug #25 路由顺序教训】：
+            # sing-box路由规则是按数组顺序匹配的，第一条匹配到的规则生效！
+            # 如果AI规则在前，x.com/twitter.com/grok.com会被AI规则匹配（因为它们也属于AI生态），
+            # 导致走ai-residential → AI-SOCKS5，但这些网站不需要住宅IP，走VPS直连即可
+            # 正确做法：排除规则必须放在AI规则之前，确保X/groK先被拦截走direct
+            #
+            # 【设计意图】：
+            # X/推特/groK访问频率高，数据中心IP完全能正常访问，
+            # 没必要浪费住宅代理流量（住宅代理通常按流量计费）
+            # 而且住宅代理延迟更高，影响用户体验
+            #
+            # 【为什么这里outbound是direct而不是ePS-Auto】：
+            # config_generator.py是服务端配置生成器，生成的是VPS上的singbox服务端配置
+            # 服务端配置中的direct = 从VPS直连出去（不经过SOCKS5）
+            # 这与服务端config.json的定位一致：服务端只负责接收流量并转发
+            # 禁止将以下域名移入AI规则
+            # 顺序说明：sing-box按顺序匹配，先匹配到的规则生效。如果AI规则在前，X/groK会先被AI规则匹配走SOCKS5
+            "domain_suffix": ["x.com", "twitter.com", "twimg.com", "t.co", "x.ai", "grok.com"],
+            "domain_keyword": ["twitter", "grok"],
+            "outbound": "direct"
+        }, {
             # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
-            # 出站标签ai-residential → AI-SOCKS5节点
-            # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
-            # 排除规则在下方（X/推特/groK走direct）
+            # 【设计意图】：
+            # OpenAI/Anthropic/Google AI等网站对数据中心IP有严格封锁，
+            # 必须使用住宅IP才能正常访问，否则会被403/验证码拦截
+            #
+            # 【故障转移机制 - Bug #26教训】：
+            # ai-residential selector的outbounds包含["AI-SOCKS5", "direct"]
+            # 当AI-SOCKS5不可用时自动fallback到direct
+            # 虽然直连可能被AI网站封锁，但至少不会断网
+            #
+            # 【触发条件】：
+            # 仅当配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量时，
+            # 此规则才会被添加到路由规则中（由上面的条件判断控制）
+            # 故障转移：AI-SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
             "domain_suffix": [
                 "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
                 "gemini.google.com", "bard.google.com", "ai.google",
@@ -218,15 +269,23 @@ config = {
             ],
             "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio"],
             "outbound": "ai-residential"
-        }, {
-            # ⚠️ 排除X/推特/groK（不走SOCKS5，走direct）
-            # 这些网站虽然也是AI相关，但不需要走SOCKS5代理
-            # 禁止将以下域名移入AI规则
-            "domain_suffix": ["x.com", "twitter.com", "twimg.com", "t.co", "x.ai", "grok.com"],
-            "domain_keyword": ["twitter", "grok"],
-            "outbound": "direct"
         }] if ai_socks5_server and ai_socks5_port else []) + [
             {"outbound": "direct"}
+            # 【final规则 - 兜底出站】：
+            # 未被前面任何规则匹配的流量全部走direct（从VPS直连出去）
+            #
+            # 【为什么服务端final是direct而不是代理】：
+            # config_generator.py生成的是VPS服务端配置，不是客户端配置
+            # 服务端的作用：接收客户端流量，然后根据路由规则决定下一步转发
+            # - AI网站 → 转发到AI-SOCKS5住宅代理
+            # - X/groK → 从VPS直连出去
+            # - 其他所有网站 → 从VPS直连出去（因为VPS在海外，可以访问全球网站）
+            #
+            # 【与subscription_service.py的区别】：
+            # subscription_service.py生成的是客户端配置（用户导入到sing-box客户端）
+            # 客户端的final是ePS-Auto（用户自选代理节点）
+            # 服务端的final是direct（VPS直连）
+            # 两者定位不同，不能混淆
         ]
     }
 }

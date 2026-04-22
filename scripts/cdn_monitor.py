@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.60
+Version: v1.0.79
 Date: 2026-04-21
 功能：
   - 从WeTest.vip电信优选DNS获取实时Cloudflare优选IP
@@ -250,16 +250,43 @@ def fetch_cdn_ips():
     """获取优选IP（4级降级保障机制，确保主方案失效时自动切换备选方案）
 
     【4级降级策略 - 按优先级自动切换】
-    1. 本地实测IP池 — 湖南电信实测最优IP，按延迟排序（主方案）
-    2. cf.001315.xyz/ct电信API — 返回 `IP#电信` 格式（备选方案1）
-    3. WeTest.vip电信优选DNS — 按运营商分类（备选方案2）
-    4. IPDB API bestcf — 通用优选IP（备选方案3）
+    
+    ⚠️ 重要：外部API优先于本地池，这是从多次Bug中总结出的最佳实践。
+    
+    第1级：WeTest.vip电信优选DNS（当前最快方案，实时获取）
+       - 优先级最高：通过DNS解析ct.cloudflare.182682.xyz获取电信线路最优IP
+       - 优势：每15分钟更新，IP始终是当前最优，延迟最低
+       - 原理：WeTest.vip在中国大陆有监测节点，DNS返回的IP已按延迟排序
+       - 【Bug #24 CDN不更新教训】：之前只用本地固定IP池，IP会过期失效，
+         导致用户连接延迟飙升甚至无法连接。实时获取确保IP永远有效。
+    
+    第2级：cf.001315.xyz/ct电信API（补充实时IP）
+       - 当第1级IP数量不足时触发
+       - 返回格式为 `IP#电信`，按运营商分类，电信线路专属IP
+       - 作为WeTest DNS的补充，两个源IP池互不重叠，增加可用IP数量
+    
+    第3级：IPDB API bestcf（通用优选IP，需筛选）
+       - 当第1、2级都不够时触发
+       - 返回通用优选IP，不按运营商分类，需要用HUNAN_CT_OPTIMAL_PREFIXES筛选
+       - 质量不如前两级，但比本地固定池更实时
+    
+    第4级：本地实测IP池（最后兜底保障）
+       - 当所有外部API都不可达时触发
+       - 池中IP按湖南电信实测延迟排列，但可能过期失效
+       - 这是最后的防线，确保即使所有API都挂了，仍有IP可用
+    
+    【为什么外部API优先于本地池？- Bug #24教训】
+    - v1.0.37之前只用固定IP池，IP会过期（Cloudflare经常变更Anycast分配）
+    - 过期IP的特征：TCPing不通或延迟飙升到200ms+
+    - 外部API实时获取的IP：延迟稳定在50-53ms
+    - 策略转变：实时获取为主，本地池兜底，确保IP永远最新
     
     【自动切换逻辑】
-    - 主方案（本地池）不可达时，自动切换到备选方案1
-    - 备选方案1不可达时，自动切换到备选方案2
-    - 备选方案2不可达时，自动切换到备选方案3
-    - 所有方案都不可达时，使用降级IP池
+    - 不是"主方案挂了才切备选"，而是"主方案不够就补备选"
+    - 每一级都尝试获取IP，TCPing验证可达性后加入valid_ips
+    - 达到CDN_TOP_IPS_COUNT（默认5个）就停止，避免浪费API请求
+    - 如果某级API不可达，跳过该级，继续下一级
+    - 所有方案都不可达时，使用本地降级IP池前5个
     
     【湖南电信最优IP段筛选】
     - 162.159.x.x / 172.64.x.x / 108.162.x.x 段延迟50-53ms（最优）
@@ -275,31 +302,42 @@ def fetch_cdn_ips():
     seen = set()
     
     # 记录各方案获取结果，用于自动切换判断
+    # 最后会输出每个方案的成功/失败状态，方便排查问题
     source_results = {
-        'local_pool': False,
         '001315_api': False, 
         'wetest_dns': False,
-        'ipdb_api': False
+        'ipdb_api': False,
+        'local_pool': False
     }
 
-    # 步骤1：本地实测IP池（湖南电信实测最优，按延迟排序）
-    logger.info(f">>> 步骤1：本地实测IP池（湖南电信最优，{len(CDN_PREFERRED_IPS)}个候选）")
-    local_success = False
-    for ip in CDN_PREFERRED_IPS:
-        if tcping(ip):
-            valid_ips.append(ip)
-            seen.add(ip)
-            logger.info(f"  {ip}(实测池): 可达")
-            local_success = True
-        else:
-            logger.info(f"  {ip}(实测池): 不可达")
-        if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-            break
-    source_results['local_pool'] = local_success
+    # ==================== 步骤1：WeTest.vip电信优选DNS（实时获取，优先级最高） ====================
+    # 【作用】：通过DNS解析ct.cloudflare.182682.xyz获取实时最优电信IP
+    # 【为什么是第1步】：
+    #   - IP每15分钟更新，始终是当前延迟最低的IP
+    #   - WeTest在中国大陆有监测节点，返回的IP已按电信延迟排序
+    #   - 比固定IP池可靠100倍（固定IP会过期）
+    # 【筛选逻辑】：获取后用HUNAN_CT_OPTIMAL_PREFIXES过滤，只保留湖南电信最优段
+    # 【TCPing验证】：每个IP都要TCPing 443端口，确保可达才加入valid_ips
+    logger.info(f">>> 步骤1：WeTest.vip电信优选DNS（实时获取当前最快IP）")
+    ct_ips = fetch_from_wetest_ct()
+    if ct_ips:
+        dns_success = False
+        for ip in ct_ips:
+            if ip not in seen:
+                seen.add(ip)
+                if tcping(ip):
+                    valid_ips.append(ip)
+                    logger.info(f"  {ip}(WeTest电信): 可达")
+                    dns_success = True
+                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                    break
+        source_results['wetest_dns'] = dns_success
+    else:
+        logger.warning("  WeTest电信DNS无响应")
 
-    # 步骤2：cf.001315.xyz/ct电信API（备选方案1）
+    # 步骤2：cf.001315.xyz/ct电信API（补充实时IP）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤2：cf.001315.xyz/ct电信API（备选方案1，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤2：cf.001315.xyz/ct电信API（补充实时IP，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ct_001315_ips = fetch_from_001315_ct()
         if ct_001315_ips:
             api_success = False
@@ -316,28 +354,9 @@ def fetch_cdn_ips():
         else:
             logger.warning("  001315电信API无响应")
 
-    # 步骤3：WeTest.vip电信优选DNS（备选方案2）
+    # 步骤3：IPDB API bestcf（补充通用优选IP）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤3：WeTest.vip电信优选DNS（备选方案2，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
-        ct_ips = fetch_from_wetest_ct()
-        if ct_ips:
-            dns_success = False
-            for ip in ct_ips:
-                if ip not in seen:
-                    seen.add(ip)
-                    if tcping(ip):
-                        valid_ips.append(ip)
-                        logger.info(f"  {ip}(电信DNS): 可达")
-                        dns_success = True
-                    if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                        break
-            source_results['wetest_dns'] = dns_success
-        else:
-            logger.warning("  WeTest电信DNS无响应")
-
-    # 步骤4：IPDB API bestcf（备选方案3）
-    if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤4：IPDB API bestcf（备选方案3，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤3：IPDB API bestcf（补充通用优选IP，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ipdb_ips = fetch_from_ipdb_api()
         if ipdb_ips:
             logger.info(f"  返回 {len(ipdb_ips)} 个IP: {ipdb_ips[:5]}...")
@@ -354,6 +373,20 @@ def fetch_cdn_ips():
             source_results['ipdb_api'] = api_success
         else:
             logger.warning("  IPDB API无响应")
+
+    # 步骤4：本地实测IP池（最后兜底保障）
+    if len(valid_ips) < CDN_TOP_IPS_COUNT:
+        logger.info(f"\n>>> 步骤4：本地实测IP池（兜底保障，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        local_success = False
+        for ip in CDN_PREFERRED_IPS:
+            if ip not in seen and tcping(ip):
+                valid_ips.append(ip)
+                seen.add(ip)
+                logger.info(f"  {ip}(实测池): 可达")
+                local_success = True
+            if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                break
+        source_results['local_pool'] = local_success
 
     # 自动切换状态报告
     logger.info(f"\n[自动切换状态报告]")

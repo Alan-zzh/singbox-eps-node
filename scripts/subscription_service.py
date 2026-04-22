@@ -2,7 +2,7 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v1.0.60
+Version: v1.0.79
 Date: 2026-04-22
 功能：
   - 提供Base64订阅链接（包含所有节点）
@@ -363,34 +363,59 @@ def generate_singbox_config():
                 {
                     "tag": "dns_proxy",
                     "address": "tls://8.8.8.8",
-                    "detour": "ePS-Auto"
+                    "detour": "direct"
+                    # ⚠️ detour必须是direct，不能是"ePS-Auto"或其他代理出站！
+                    # 【Bug #23 DNS代理死循环教训】：
+                    # 当detour指向代理出站（如ePS-Auto）时，DNS查询本身要走代理，
+                    # 但代理连接又需要先解析代理服务器的域名（如AI-SOCKS5的域名），
+                    # 这会导致DNS解析再次触发dns_proxy，形成无限递归，最终singbox崩溃。
+                    # 正确做法：所有DNS服务器都走direct直连，让DNS查询从VPS直接发出，
+                    # 不经过任何代理链路，避免循环依赖。
+                    # 原理：DNS是基础设施，必须100%可靠。直连DNS虽然可能延迟略高，
+                    # 但保证了稳定性。代理出站依赖DNS解析，DNS不能反过来依赖代理。
                 },
                 {
                     "tag": "dns_direct",
                     "address": "h3://dns.alidns.com/dns-query",
                     "detour": "direct"
+                    # 国内DNS（阿里DoH），专门用于解析中国大陆网站域名
+                    # detour同样必须是direct，理由同上
+                    # 使用h3协议（HTTP/3）可绕过国内对传统DoH(853)的干扰
                 },
                 {
                     "tag": "dns_block",
                     "address": "rcode://success"
+                    # 屏蔽DNS：返回success但不返回任何IP，用于屏蔽广告/恶意域名
+                    # 原理：当route.rules中某条规则的outbound是"dns_block"时，
+                    # 该域名的DNS查询会被此服务器处理，返回空响应，客户端无法连接
                 },
                 {
                     "tag": "dns_fakeip",
                     "address": "fakeip"
+                    # FakeIP模式：返回198.18.0.0/15范围内的假IP，真实连接时singbox自动替换
+                    # 优势：减少DNS查询延迟，避免DNS污染
+                    # 注意：本项目未启用fakeip作为默认DNS，仅在dns.fakeip.enabled=True时生效
                 }
             ],
             "rules": [
                 {
                     "outbound": "any",
                     "server": "dns_direct"
+                    # 最高优先级：只要流量走了任何出站（无论代理还是直连），DNS都用国内服务器
+                    # 这是sing-box的内置规则，确保已分类流量的DNS解析走正确路径
                 },
                 {
                     "rule_set": "geosite-cn",
                     "server": "dns_direct"
+                    # 中国大陆网站 → 用阿里DoH解析，返回真实国内CDN IP
+                    # 原理：国内网站在国内有CDN节点，用国内DNS能拿到最优IP
                 },
                 {
                     "rule_set": "geosite-geolocation-!cn",
                     "server": "dns_proxy"
+                    # 非中国大陆网站 → 用Google DNS(tls)解析
+                    # 注意：虽然tag叫dns_proxy，但detour是direct，DNS查询本身还是直连
+                    # 只是解析结果会被标记为"需要代理"，后续路由规则决定走哪个出站
                 }
             ],
             "rule_set": [
@@ -408,6 +433,8 @@ def generate_singbox_config():
                 }
             ],
             "final": "dns_proxy",
+            # DNS final规则：未被前面任何DNS规则匹配的域名，统一用dns_proxy解析
+            # 即：非中国大陆网站默认用Google DNS，确保全球网站都能正常解析
             "fakeip": {
                 "enabled": True,
                 "inet4_range": "198.18.0.0/15"
@@ -448,9 +475,10 @@ def generate_singbox_config():
         ] + ([{
                 # ai-residential: 幕后路由出站，AI网站流量自动走此出站
                 # 用户在客户端看不到这个选项，路由规则自动匹配AI域名后走SOCKS5
+                # 故障转移：AI-SOCKS5不可用时自动fallback到direct
                 "type": "selector",
                 "tag": "ai-residential",
-                "outbounds": ["AI-SOCKS5"],
+                "outbounds": ["AI-SOCKS5", "direct"],
                 "default": "AI-SOCKS5"
             }] if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else []) + [
             {
@@ -596,19 +624,81 @@ def generate_singbox_config():
                 {
                     "protocol": "dns",
                     "outbound": "dns-out"
+                    # 最高优先级：DNS流量直接交给sing-box内部DNS引擎处理
+                    # 原理：DNS是UDP 53端口的特殊流量，必须先于所有HTTP/HTTPS流量被匹配
+                    # 如果这条规则在后面，DNS查询可能被误发到代理节点，导致解析失败
                 },
                 {
                     "ip_is_private": True,
                     "outbound": "direct"
+                    # 私有IP（192.168.x.x, 10.x.x.x, 172.16-31.x.x等）必须直连
+                    # 原理：这些是内网地址，走代理没有意义，且可能导致代理节点连接本地服务失败
                 },
                 {
                     "rule_set": ["geosite-cn", "geoip-cn"],
                     "outbound": "direct"
+                    # 中国大陆网站和IP → 直连，不消耗代理流量
+                    # 原理：国内网站在国内访问延迟低，不需要绕行VPS
+                    # 注意：geosite-cn（域名匹配）和geoip-cn（IP匹配）是"或"关系，
+                    # 只要满足任一条件就走direct，确保国内流量100%直连
+                },
+                # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，走ePS-Auto正常代理）- 必须放在AI规则之前！
+                # 【Bug #25 路由顺序教训】：
+                # sing-box路由规则是按数组顺序匹配的，第一条匹配到的规则生效！
+                # 如果AI规则在前，x.com/twitter.com/grok.com会先被AI规则匹配（因为它们也是AI相关），
+                # 导致走ai-residential → AI-SOCKS5，但用户其实希望这些网站走普通代理（ePS-Auto）
+                # 正确做法：排除规则必须放在AI规则之前，确保X/groK先被拦截，走ePS-Auto
+                #
+                # 【设计意图】：
+                # X/推特/groK虽然是AI相关（x.ai是Elon Musk的AI，grok是xAI产品），
+                # 但它们的访问频率极高，且不需要住宅IP伪装，走VPS代理完全够用
+                # 如果把它们塞进AI-SOCKS5，不仅浪费住宅代理流量，还会增加延迟
+                #
+                # 【故障转移机制】：
+                # 出站标签是ePS-Auto（用户可见的节点选择器），包含5个代理节点+direct
+                # 如果当前选择的节点不可用，用户可以手动切换到其他节点或直连
+                # 禁止将以下域名移入AI规则
+                # 顺序说明：sing-box按顺序匹配，先匹配到的规则生效。如果AI规则在前，X/groK会先被AI规则匹配走SOCKS5
+                {
+                    "domain_suffix": [
+                        "x.com",
+                        "twitter.com",
+                        "twimg.com",
+                        "t.co",
+                        "x.ai",
+                        "grok.com"
+                    ],
+                    "domain_keyword": [
+                        "twitter",
+                        "grok"
+                    ],
+                    "outbound": "ePS-Auto"
                 },
                 # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
-                # 出站标签ai-residential → AI-SOCKS5节点
+                # 【设计意图】：
+                # OpenAI/Anthropic/Google AI等网站对数据中心IP有严格封锁，
+                # 必须使用住宅IP（residential IP）才能正常访问。
+                # AI-SOCKS5提供住宅代理出口，确保AI网站不会被403/验证码拦截。
+                #
+                # 【故障转移机制 - Bug #26教训】：
+                # ai-residential selector的outbounds包含["AI-SOCKS5", "direct"]
+                # 当AI-SOCKS5不可用（如住宅代理服务宕机、网络中断）时，
+                # sing-box会自动fallback到direct（从VPS直连出去）
+                # 虽然直连可能被AI网站封锁，但至少不会断网，用户仍能看到错误页面
+                # 而不是无限转圈或连接超时
+                #
+                # 【为什么selector而不是直接写outbound】：
+                # selector类型允许后续手动切换（如通过Clash API），
+                # 如果AI-SOCKS5长期故障，管理员可以手动切到direct
+                # 如果是urltest或loadbalance类型，则无法手动干预
+                #
+                # 【Bug #26 故障转移教训】：
+                # 之前ai-residential的outbounds只有["AI-SOCKS5"]，没有direct备选
+                # 当AI-SOCKS5宕机时，所有AI网站流量全部中断，用户无法访问
+                # 修复后加入direct作为第二选项，确保至少不断网
+                # 出站标签ai-residential → AI-SOCKS5节点（故障转移：不可用时自动切direct）
                 # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
-                # 排除规则在下方（X/推特/groK走direct）
+                # 故障转移：AI-SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
                 {
                     "domain_suffix": [
                         "openai.com",
@@ -637,24 +727,6 @@ def generate_singbox_config():
                         "aistudio"
                     ],
                     "outbound": "ai-residential"
-                },
-                # ⚠️ 排除X/推特/groK（不走SOCKS5，走direct）
-                # 这些网站虽然也是AI相关，但不需要走SOCKS5代理
-                # 禁止将以下域名移入AI规则
-                {
-                    "domain_suffix": [
-                        "x.com",
-                        "twitter.com",
-                        "twimg.com",
-                        "t.co",
-                        "x.ai",
-                        "grok.com"
-                    ],
-                    "domain_keyword": [
-                        "twitter",
-                        "grok"
-                    ],
-                    "outbound": "direct"
                 }
             ],
             "rule_set": [
@@ -679,6 +751,27 @@ def generate_singbox_config():
             ],
             "auto_detect_interface": True,
             "final": "ePS-Auto"
+            # 【final规则 - 兜底出站】：
+            # 未被前面任何路由规则匹配的流量，全部走ePS-Auto
+            #
+            # 【为什么是ePS-Auto而不是direct】：
+            # ePS-Auto是用户可见的节点选择器，包含5个代理节点（VLESS-Reality、VLESS-WS、
+            # VLESS-HTTPUpgrade、Trojan-WS、Hysteria2）+ direct
+            # 默认值是VLESS-Reality，用户可以手动切换到其他节点或直连
+            #
+            # 【设计意图】：
+            # final规则覆盖的是"未被分类的全球网站"（如github.com、youtube.com等）
+            # 这些网站需要走代理才能访问，所以final不能是direct
+            # 如果final是direct，用户访问未分类网站时会从VPS直连（VPS在海外，国内用户无法直连）
+            # 正确做法：final走ePS-Auto，让用户自己选择用哪个代理节点访问全球网站
+            #
+            # 【匹配流程总结】：
+            # 1. DNS流量 → dns-out（内部处理）
+            # 2. 私有IP → direct（直连）
+            # 3. 中国大陆网站/IP → direct（直连）
+            # 4. X/推特/groK → ePS-Auto（普通代理，排除AI-SOCKS5）
+            # 5. AI网站 → ai-residential → AI-SOCKS5（住宅代理，故障时切direct）
+            # 6. 其他所有网站 → ePS-Auto（兜底，用户自选节点）
         },
         "experimental": {
             "cache_file": {

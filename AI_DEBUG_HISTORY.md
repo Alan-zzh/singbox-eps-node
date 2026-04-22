@@ -183,18 +183,58 @@
 - **修复**: `net.core.default_qdisc=fq` → `net.core.default_qdisc=fq_pie`
 - **预防**: 降级方案应选择功能最接近原方案（CAKE=FQ+PIE）的替代品（FQ-PIE）
 
-### Bug #22: CAKE降级方案仅设置sysctl未实际应用到网卡
-- **版本**: v1.0.74 → v1.0.75
+### Bug #23: DNS代理查询导致延迟飙升（dns_proxy走ePS-Auto而非direct）
+- **版本**: v1.0.75 → v1.0.76
 - **日期**: 2026-04-22
-- **现象**: VPS上CAKE队列显示"未启用（降级为FQ）"，降级方案也不生效
-- **根因**: 两个问题叠加：
-  1. 多数VPS精简内核缺少`sch_cake`模块，代码只尝试`modprobe`未主动安装`linux-modules-extra`
-  2. 降级时只设置`default_qdisc=fq_pie`到sysctl.conf，未通过`tc qdisc replace`实际应用到网卡接口
-- **修复**:
-  1. `setup_cake_qdisc()`增加安装`linux-modules-extra-$(uname -r)`步骤
-  2. 新增`setup_fq_pie_qdisc()`函数：`tc qdisc replace dev $MAIN_IF root fq_pie` + systemd持久化
-  3. 所有降级分支从`set_default_qdisc_fq_pie`升级为`setup_fq_pie_qdisc "$MAIN_IF"`
-- **预防**: 降级方案必须实际应用到网卡（tc qdisc replace），不能只设置sysctl参数（sysctl只影响新连接）
+- **现象**: 代理服务器上测节点延迟很高，但本地连接显示延迟正常；所有流量（包括非AI网站）延迟都异常高
+- **根因**: subscription_service.py中dns_proxy的detour设置为"ePS-Auto"，导致DNS查询走了代理节点→SOCKS5→多了一层代理→延迟飙升。dns_direct的detour是"direct"是正确的，但dns_proxy用错了
+- **修复**: subscription_service.py第366行 `detour: "ePS-Auto"` → `detour: "direct"`
+- **原理说明**:
+  - dns_proxy（8.8.8.8）负责解析非国内域名，应该直连获取DNS结果，由后续路由规则决定流量走向
+  - dns_proxy走ePS-Auto会导致DNS查询本身也绕代理，增加额外延迟
+  - 最终路由（final: "ePS-Auto"）已经确保非国内/非AI流量走代理，DNS不需要提前绕代理
+- **预防**: DNS服务器detour应设为direct，最终流量走向由route.final规则控制
+
+### Bug #24: CDN优选IP不自动更新（本地池永远优先，外部API永不触发）
+- **版本**: v1.0.76 → v1.0.77
+- **日期**: 2026-04-22
+- **现象**: 优选IP一两天不更新，永远是本地池的那几个IP
+- **根因**: fetch_cdn_ips() 中本地池24个IP永远优先，只要前5个可达就停止，步骤2/3/4的外部API（WeTest.vip/001315/IPDB）永远不会被调用
+- **修复**: 调整获取顺序为：WeTest.vip电信优选DNS（步骤1，实时获取）→ 001315电信API（步骤2，补充）→ IPDB API（步骤3，补充）→ 本地实测IP池（步骤4，兜底）
+- **预防**: 外部API必须优先于本地固定池，确保每小时获取最新最快IP
+
+### Bug #25: SOCKS5路由规则顺序错误导致X/推特/groK走错
+- **版本**: v1.0.77 → v1.0.78
+- **日期**: 2026-04-22
+- **现象**: X/推特/groK 被AI规则匹配走了SOCKS5，而不是正常代理
+- **根因**: subscription_service.py 和 config_generator.py 中，AI规则在X/推特/groK排除规则之前。sing-box按顺序匹配规则，先匹配到的生效，导致X/groK先被AI规则捕获走SOCKS5
+- **修复**: 将X/推特/groK排除规则移到AI规则之前。客户端配置outbound改为ePS-Auto（走正常代理），服务端配置outbound为direct（VPS直连）
+- **预防**: 排除规则必须放在被排除的规则之前，sing-box按顺序匹配
+
+### Bug #26: SOCKS5缺少故障转移机制
+- **版本**: v1.0.77 → v1.0.78
+- **日期**: 2026-04-22
+- **现象**: SOCKS5住宅代理挂了，AI网站完全无法访问
+- **根因**: ai-residential selector 的 outbounds 只有 ["AI-SOCKS5"]，没有fallback选项
+- **修复**: ai-residential selector 的 outbounds 改为 ["AI-SOCKS5", "direct"]，SOCKS5不可用时自动切直连
+- **预防**: 所有selector必须包含fallback选项，防止单点故障
+
+### 新增预防规则：路由规则顺序规范
+- **教训来源**: Bug #25
+- **正确做法**:
+  - sing-box按顺序匹配route.rules，先匹配到的规则生效
+  - 排除规则必须放在被排除的规则之前
+  - 路由规则顺序应为：dns → private → 国内直连 → 排除规则 → AI规则 → final
+  - 修改任何路由规则后必须检查前后规则是否有冲突
+  - 客户端配置和服务端配置的路由逻辑要区分清楚（客户端用ePS-Auto，服务端用direct）
+
+### 新增预防规则：DNS配置规范
+- **教训来源**: Bug #23
+- **正确做法**:
+  - DNS服务器的detour必须设为direct，不能走代理
+  - dns_proxy负责解析非国内域名，应该直连获取DNS结果
+  - 最终流量走向由route.final规则控制，DNS不需要提前绕代理
+  - DNS查询走代理会增加额外延迟，导致所有域名解析都变慢
 
 ---
 
