@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.79
+Version: v1.0.80
 Date: 2026-04-21
 功能：
   - 从WeTest.vip电信优选DNS获取实时Cloudflare优选IP
@@ -298,11 +298,15 @@ def fetch_cdn_ips():
     - 不可达IP自动替换为下一个可用IP
     - 确保每次更新都是实时同步的最新IP
     """
+    # 【规则7 CDN IP避坑教训】：
+    # v1.0.36 用日本服务器DNS实时解析，返回IP对中国用户延迟150-200ms
+    # v1.0.37 恢复固定IP池（中国用户实测50ms左右）才是正确方案
+    # WeTest.vip从日本服务器用8.8.8.8解析返回104.18.x.x段，对中国用户延迟高
+    # 正确策略：固定IP池为主（实测最优）+ 外部API仅作补充
     valid_ips = []
     seen = set()
     
-    # 记录各方案获取结果，用于自动切换判断
-    # 最后会输出每个方案的成功/失败状态，方便排查问题
+    # 记录各方案获取结果
     source_results = {
         '001315_api': False, 
         'wetest_dns': False,
@@ -310,34 +314,26 @@ def fetch_cdn_ips():
         'local_pool': False
     }
 
-    # ==================== 步骤1：WeTest.vip电信优选DNS（实时获取，优先级最高） ====================
-    # 【作用】：通过DNS解析ct.cloudflare.182682.xyz获取实时最优电信IP
-    # 【为什么是第1步】：
-    #   - IP每15分钟更新，始终是当前延迟最低的IP
-    #   - WeTest在中国大陆有监测节点，返回的IP已按电信延迟排序
-    #   - 比固定IP池可靠100倍（固定IP会过期）
-    # 【筛选逻辑】：获取后用HUNAN_CT_OPTIMAL_PREFIXES过滤，只保留湖南电信最优段
-    # 【TCPing验证】：每个IP都要TCPing 443端口，确保可达才加入valid_ips
-    logger.info(f">>> 步骤1：WeTest.vip电信优选DNS（实时获取当前最快IP）")
-    ct_ips = fetch_from_wetest_ct()
-    if ct_ips:
-        dns_success = False
-        for ip in ct_ips:
-            if ip not in seen:
-                seen.add(ip)
-                if tcping(ip):
-                    valid_ips.append(ip)
-                    logger.info(f"  {ip}(WeTest电信): 可达")
-                    dns_success = True
-                if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                    break
-        source_results['wetest_dns'] = dns_success
-    else:
-        logger.warning("  WeTest电信DNS无响应")
+    # ==================== 步骤1：本地实测IP池（中国用户实测最优，优先使用） ====================
+    # 【规则7教训】：固定IP池24个IP是中国用户实测延迟50ms左右的优选IP
+    # 必须优先使用！外部API从日本服务器获取的IP不一定对中国最优
+    logger.info(f">>> 步骤1：本地实测IP池（中国用户实测最优，{len(CDN_PREFERRED_IPS)}个候选）")
+    local_success = False
+    for ip in CDN_PREFERRED_IPS:
+        if tcping(ip):
+            valid_ips.append(ip)
+            seen.add(ip)
+            logger.info(f"  {ip}(实测池): 可达")
+            local_success = True
+        else:
+            logger.info(f"  {ip}(实测池): 不可达")
+        if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+            break
+    source_results['local_pool'] = local_success
 
-    # 步骤2：cf.001315.xyz/ct电信API（补充实时IP）
+    # 步骤2：cf.001315.xyz/ct电信API（补充，仅本地池不足时触发）
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤2：cf.001315.xyz/ct电信API（补充实时IP，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤2：cf.001315.xyz/ct电信API（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ct_001315_ips = fetch_from_001315_ct()
         if ct_001315_ips:
             api_success = False
@@ -354,9 +350,29 @@ def fetch_cdn_ips():
         else:
             logger.warning("  001315电信API无响应")
 
-    # 步骤3：IPDB API bestcf（补充通用优选IP）
+    # 步骤3：WeTest.vip电信优选DNS（补充，延迟较高仅作备选）
+    # 【规则7教训】：从日本解析返回104.18.x.x段对中国用户延迟高，仅作补充
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤3：IPDB API bestcf（补充通用优选IP，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤3：WeTest.vip电信优选DNS（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        ct_ips = fetch_from_wetest_ct()
+        if ct_ips:
+            dns_success = False
+            for ip in ct_ips:
+                if ip not in seen:
+                    seen.add(ip)
+                    if tcping(ip):
+                        valid_ips.append(ip)
+                        logger.info(f"  {ip}(WeTest电信): 可达")
+                        dns_success = True
+                    if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                        break
+            source_results['wetest_dns'] = dns_success
+        else:
+            logger.warning("  WeTest电信DNS无响应")
+
+    # 步骤4：IPDB API（最后补充）
+    if len(valid_ips) < CDN_TOP_IPS_COUNT:
+        logger.info(f"\n>>> 步骤4：IPDB API（最后补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ipdb_ips = fetch_from_ipdb_api()
         if ipdb_ips:
             logger.info(f"  返回 {len(ipdb_ips)} 个IP: {ipdb_ips[:5]}...")
@@ -373,20 +389,6 @@ def fetch_cdn_ips():
             source_results['ipdb_api'] = api_success
         else:
             logger.warning("  IPDB API无响应")
-
-    # 步骤4：本地实测IP池（最后兜底保障）
-    if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤4：本地实测IP池（兜底保障，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
-        local_success = False
-        for ip in CDN_PREFERRED_IPS:
-            if ip not in seen and tcping(ip):
-                valid_ips.append(ip)
-                seen.add(ip)
-                logger.info(f"  {ip}(实测池): 可达")
-                local_success = True
-            if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                break
-        source_results['local_pool'] = local_success
 
     # 自动切换状态报告
     logger.info(f"\n[自动切换状态报告]")
