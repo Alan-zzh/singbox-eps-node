@@ -269,6 +269,37 @@
 - **修复**: 同步修改config_generator.py的AI规则
 - **预防**: 修改subscription_service.py时必须同步修改config_generator.py，两个文件都要更新。改A忘B=隐藏Bug
 
+### Bug #31: CDN优选IP自动更新服务卡住
+- **版本**: v1.0.82
+- **日期**: 2026-04-24
+- **现象**: CDN优选IP停在2026-04-23 22:18:35不再更新，过了24小时后还是同一套IP
+- **根因**: singbox-cdn服务的 `time.sleep(3600)` 卡住，守护进程模式虽然显示active但不再执行后续更新
+- **修复**:
+  1. 手动运行CDN更新，IP已更换
+  2. 重启singbox-cdn服务
+  3. 添加crontab定时任务：每小时0分自动重启singbox-cdn，防止卡住
+- **预防**: singbox-cdn服务必须有定时重启保障（每小时一次），防止time.sleep或其他原因导致服务挂住
+
+### Bug #32: config_generator.py缺少DNS配置和final规则
+- **版本**: v1.0.83
+- **日期**: 2026-04-24
+- **现象**: 服务端config.json的DNS服务器数=0，final为空，只有3条路由规则
+- **根因**: config_generator.py从未添加DNS配置，final规则写成了普通规则而非route.final字段
+- **修复**:
+  1. 添加DNS配置（dns_proxy: tls://8.8.8.8 detour=direct, dns_direct: 223.5.5.5）
+  2. 将 `{"outbound":"direct"}` 普通规则改为 `"final": "direct"`
+- **预防**: config_generator.py生成的服务端配置必须包含DNS和final，与subscription_service.py的客户端配置保持结构一致
+
+### Bug #33: S-UI旧面板残留进程和目录
+- **版本**: v1.0.83
+- **日期**: 2026-04-24
+- **现象**: /opt/s-ui-manager/cdn_monitor.py还在运行，/usr/local/s-ui/sui进程还在，占用内存
+- **根因**: install.sh的uninstall_old_panels只做了stop/disable，没有删除服务文件、目录和杀残留进程
+- **修复**:
+  1. 手动清理服务器上的S-UI残留（停止服务+删除服务文件+删除目录+杀进程）
+  2. install.sh的uninstall_old_panels加强：删除所有相关systemd服务文件+删除安装目录+杀残留进程+daemon-reload
+- **预防**: 卸载旧面板必须彻底：stop+disable+删除服务文件+删除目录+杀残留进程+daemon-reload
+
 ---
 
 ## Bug 修复历史

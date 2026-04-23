@@ -88,6 +88,23 @@ config = {
         "output": "/var/log/singbox.log",
         "timestamp": True
     },
+    # ⚠️ DNS配置 - 服务端也需要DNS解析能力
+    # dns_proxy用8.8.8.8解析国外域名，detour=direct避免DNS查询走代理（Bug #23教训）
+    # dns_direct用223.5.5.5解析国内域名（备用）
+    "dns": {
+        "servers": [
+            {
+                "tag": "dns_proxy",
+                "address": "tls://8.8.8.8",
+                "detour": "direct"
+            },
+            {
+                "tag": "dns_direct",
+                "address": "223.5.5.5",
+                "detour": "direct"
+            }
+        ]
+    },
     "inbounds": socks5_inbound + [
         {
             "type": "vless",
@@ -276,24 +293,11 @@ config = {
             ],
             "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio"],
             "outbound": "ai-residential"
-        }] if ai_socks5_server and ai_socks5_port else []) + [
-            {"outbound": "direct"}
-            # 【final规则 - 兜底出站】：
-            # 未被前面任何规则匹配的流量全部走direct（从VPS直连出去）
-            #
-            # 【为什么服务端final是direct而不是代理】：
-            # config_generator.py生成的是VPS服务端配置，不是客户端配置
-            # 服务端的作用：接收客户端流量，然后根据路由规则决定下一步转发
-            # - AI网站 → 转发到AI-SOCKS5住宅代理
-            # - X/groK → 从VPS直连出去
-            # - 其他所有网站 → 从VPS直连出去（因为VPS在海外，可以访问全球网站）
-            #
-            # 【与subscription_service.py的区别】：
-            # subscription_service.py生成的是客户端配置（用户导入到sing-box客户端）
-            # 客户端的final是ePS-Auto（用户自选代理节点）
-            # 服务端的final是direct（VPS直连）
-            # 两者定位不同，不能混淆
-        ]
+        }] if ai_socks5_server and ai_socks5_port else []),
+        "final": "direct"
+        # ⚠️ final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
+        # 服务端final是direct（VPS在海外，直连即可访问全球网站）
+        # 客户端final是ePS-Auto（用户自选代理节点），两者不能混淆
     }
 }
 

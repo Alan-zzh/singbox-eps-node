@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.82
+# 版本: v1.0.83
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -84,13 +84,28 @@ install_dependencies() {
 
 uninstall_old_panels() {
     log_step "检查并卸载旧面板..."
+    # ⚠️ S-UI彻底卸载：停止服务+删除服务文件+删除目录+杀残留进程
+    # Bug #33教训：只stop/disable不够，S-UI的cdn_monitor进程会自动重启
     for panel in s-ui x-ui marzban 3x-ui; do
         if systemctl is-active --quiet "$panel" 2>/dev/null; then
             log_warn "检测到 $panel 正在运行，正在卸载..."
             systemctl stop "$panel" 2>/dev/null || true
             systemctl disable "$panel" 2>/dev/null || true
         fi
+        # 清理所有相关systemd服务文件
+        rm -f /etc/systemd/system/"$panel".service
+        rm -f /etc/systemd/system/"$panel"-cdn.service
+        rm -f /etc/systemd/system/"$panel"-cdn-monitor.service
+        rm -f /etc/systemd/system/"$panel"-sub.service
+        rm -f /etc/systemd/system/multi-user.target.wants/"$panel".service
+        rm -f /etc/systemd/system/multi-user.target.wants/"$panel"-cdn-monitor.service
     done
+    # S-UI特殊处理：删除安装目录和残留进程
+    rm -rf /opt/s-ui-manager /usr/local/s-ui
+    pkill -f '/opt/s-ui-manager' 2>/dev/null || true
+    pkill -f '/usr/local/s-ui' 2>/dev/null || true
+    systemctl daemon-reload
+    log_info "旧面板卸载完成"
 }
 
 set_default_qdisc_cake() {
