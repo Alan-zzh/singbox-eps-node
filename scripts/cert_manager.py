@@ -2,7 +2,7 @@
 """
 Singbox 证书管理服务
 Author: Alan
-Version: v1.0.54
+Version: v1.0.85
 Date: 2026-04-20
 功能：
   - 支持 Cloudflare API 申请长期证书
@@ -202,6 +202,7 @@ def restart_singbox():
     """重启Singbox和订阅服务"""
     os.system('systemctl restart singbox')
     os.system('systemctl restart singbox-sub')
+    os.system('systemctl restart singbox-cdn')
     logger.info("[OK] Singbox 与订阅服务已重启")
 
 def renew_cert():

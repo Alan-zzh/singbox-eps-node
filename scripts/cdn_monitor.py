@@ -2,7 +2,7 @@
 """
 CDN监控脚本
 Author: Alan
-Version: v1.0.82
+Version: v1.0.85
 Date: 2026-04-23
 功能：
   - 本地实测IP池优先，外部API补充
@@ -57,14 +57,14 @@ except ImportError:
         logging.basicConfig(level=logging.INFO)
         return logging.getLogger(name)
     CDN_PREFERRED_IPS = [
+        '162.159.38.161', '108.162.198.221', '162.159.44.242',
+        '172.64.52.35', '172.64.53.231', '172.64.229.110',
+        '162.159.39.14', '172.64.41.181', '172.64.34.89',
         '162.159.45.66', '162.159.39.48', '172.64.53.253',
         '162.159.44.192', '172.64.52.244', '162.159.38.190',
-        '108.162.198.29', '162.159.15.207', '162.159.19.243',
-        '162.159.58.128', '162.159.38.180', '108.162.198.116',
-        '172.64.53.134', '162.159.39.89', '162.159.45.244',
-        '162.159.44.128', '172.64.52.173', '172.64.33.166',
+        '108.162.198.29', '162.159.38.180', '108.162.198.116',
+        '172.64.53.134', '162.159.39.89', '172.64.52.173',
         '172.64.53.179', '172.64.52.205', '108.162.198.145',
-        '104.16.123.96', '104.16.124.96', '104.17.136.90',
     ]
     CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
     CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
@@ -91,7 +91,9 @@ IPDB_API_URL = CDN_API_IPDB
 
 # 湖南电信最优IP段（从实测数据提炼）
 # 162.159.x.x / 172.64.x.x / 108.162.x.x 段对湖南电信延迟最低(50-53ms)
+# 198.41.x.x / 173.245.x.x 段延迟50-55ms（cf.vvhan.com电信推荐）
 # 104.16-21.x.x 段对湖南电信延迟高(130ms+)，需要过滤掉
+# ⚠️ 8.39/8.35段虽被001315 API返回，但实测数据不支持其为优质段，已移除
 HUNAN_CT_OPTIMAL_PREFIXES = ('162.159.', '172.64.', '108.162.', '198.41.', '173.245.')
 
 TCPING_PORT = 443
@@ -113,8 +115,9 @@ def init_db():
     """初始化数据库"""
     os.makedirs(DATA_DIR, exist_ok=True)
     db_path = os.path.join(DATA_DIR, 'singbox.db')
-    conn = sqlite3.connect(db_path)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cdn_settings (
@@ -124,7 +127,8 @@ def init_db():
         """)
         conn.commit()
     finally:
-        conn.close()
+        if conn:
+            conn.close()
     return db_path
 
 
@@ -369,14 +373,16 @@ def fetch_cdn_ips():
     if ct_001315_ips:
         api_success = False
         for ip in ct_001315_ips:
-            if ip not in seen:
+            if ip not in seen and is_hunan_ct_optimal(ip):
                 seen.add(ip)
                 if tcping(ip):
                     valid_ips.append(ip)
-                    logger.info(f"  {ip}(001315电信): 可达")
+                    logger.info(f"  {ip}(001315电信-优质): 可达")
                     api_success = True
                 if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                     break
+        if not api_success and ct_001315_ips:
+            logger.warning(f"  001315返回的IP均不在最优段，已过滤: {[ip for ip in ct_001315_ips if not is_hunan_ct_optimal(ip)][:5]}")
         source_results['001315_api'] = api_success
     else:
         logger.warning("  001315电信API无响应")

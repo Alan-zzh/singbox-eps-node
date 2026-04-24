@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v1.0.83 | **更新**: 2026-04-24
+**版本**: v1.0.85 | **更新**: 2026-04-25
 
 ---
 
@@ -8,7 +8,7 @@
 
 全自动CDN优选IP管理 + 多协议代理订阅生成系统。一条命令完成部署，客户端导入订阅即可使用。
 
-- **代理内核**: sing-box 1.13.9
+- **代理内核**: sing-box 1.10.0
 - **后端**: Python 3 + Flask
 - **数据库**: SQLite
 - **CDN**: Cloudflare
@@ -23,7 +23,7 @@
 |------|------|------|
 | singbox | 443, 8443, 2053, 2083 | 代理内核 |
 | singbox-sub | 2087 | HTTPS订阅（走CDN） |
-| singbox-cdn | - | CDN优选IP监控（每小时） |
+| singbox-cdn | - | CDN优选IP监控（每小时，crontab兜底重启） |
 
 ### 节点列表
 | 节点 | 地址 | 方式 |
@@ -64,7 +64,8 @@
 │   ├── cdn_monitor.py      # CDN优选IP监控
 │   ├── tg_bot.py           # Telegram机器人
 │   ├── logger.py           # 日志管理
-│   └── health_check.sh     # 健康检查（每5分钟）
+│   ├── health_check.sh     # 健康检查（每5分钟）
+│   └── diagnose.sh         # 一键诊断脚本（14项检查）
 ├── logs/
 └── backups/
 ```
@@ -103,6 +104,8 @@
 3. IPDB API bestcf（补充）
 4. 本地实测IP池（兜底，162.159.x.x/172.64.x.x段）
 ⚠️ Bug #29教训：WeTest.vip返回104.x.x.x段对中国延迟130ms+，必须过滤不能"全部保留"
+⚠️ Bug #31教训：time.sleep(3600)会卡住，crontab每小时0分重启singbox-cdn兜底保障
+自动同步：cdn_monitor每小时更新IP写入数据库 → subscription_service每次订阅请求实时读取 → 用户更新订阅即可获取最新IP
 
 ### cert_manager.py — 证书管理+端口跳跃
 - Cloudflare API源证书（15年有效期）
@@ -136,14 +139,43 @@
 - 无感切换：某端口被封自动跳其他端口，不断线
 
 ### 3. CDN优选IP（4级降级）
-1. cf.001315.xyz/ct电信API（返回173.245等优质段，优先）
+1. cf.001315.xyz/ct电信API（返回优质段，优先，**也必须经过is_hunan_ct_optimal()过滤**）
 2. WeTest.vip电信优选DNS（DoH解析，104段严格过滤后丢弃）
-3. IPDB API bestcf（补充）
+3. IPDB API（bestcf类型）
 4. 本地实测IP池（兜底，162.159.x.x/172.64.x.x段）
 
-最优IP段: 162.159.x.x / 172.64.x.x / 108.162.x.x / 173.245.x.x / 198.41.x.x（50-55ms）
-⚠️ 104.16-21.x.x段延迟130ms+，必须过滤
-过滤: 104.16-21.x.x（130ms+）
+#### CDN优选IP核心规则（Bug #29/#35/#40教训总结）
+
+**实测确认的优质IP段（50-55ms延迟，60+mb/s带宽）：**
+| IP段 | 延迟 | 带宽 | 来源 |
+|------|------|------|------|
+| 162.159.x.x | 50-53ms | 58-62mb/s | 用户实测+001315 API+cf.vvhan.com |
+| 172.64.x.x | 50-53ms | 50-60mb/s | 用户实测+001315 API+cf.vvhan.com |
+| 108.162.x.x | 50-51ms | 61mb/s | 用户实测+cf.vvhan.com |
+| 198.41.x.x | 50-55ms | 50+mb/s | cf.vvhan.com电信推荐 |
+| 173.245.x.x | 50-55ms | 50+mb/s | cf.vvhan.com电信推荐+001315 API |
+
+**必须过滤的IP段：**
+| IP段 | 延迟 | 原因 | Bug# |
+|------|------|------|------|
+| 104.16-21.x.x | 66-130ms | WeTest返回此段，延迟高带宽低，严格过滤 | #29 |
+| 8.39.x.x | 未知 | 001315 API返回但实测数据不支持，必须过滤 | #40 |
+| 8.35.x.x | 未知 | 001315 API返回但实测数据不支持，必须过滤 | #40 |
+
+**关键规则：**
+1. **所有来源的IP都必须经过is_hunan_ct_optimal()过滤**，包括001315 API（Bug #40教训）
+2. **104.16-21段严格过滤后丢弃**，不能"全部保留"（Bug #29教训）
+3. **8.39/8.35段虽被001315 API返回，但实测数据不支持其为优质段，必须过滤**（Bug #40教训）
+4. **CDN本地池CDN_PREFERRED_IPS也必须遵守过滤规则**，不能因为"本地池"就放松标准（Bug #35教训）
+5. **HUNAN_CT_OPTIMAL_PREFIXES只包含实测确认的优质段**，未经实测验证的段不能加入
+6. **境外服务器必须用DoH解析WeTest**，直接dig会返回104段（Bug #27教训）
+7. **CDN更新服务crontab每小时重启兜底**，time.sleep(3600)会卡住（Bug #31教训）
+
+**CDN_PREFERRED_IPS本地池更新方法：**
+1. 访问 https://stockhost.ru/cf 或 https://api.uouin.com/cloudflare.html 获取最新电信排名
+2. 只选取162.159/172.64/108.162/198.41/173.245段的IP
+3. 按延迟从低到高排列
+4. 同步更新config.py和cdn_monitor.py的ImportError降级块
 
 ### 4. SOCKS5 AI路由
 - 触发: 配置AI_SOCKS5_SERVER后自动生效
@@ -287,6 +319,14 @@
 **教训**: config.py导入失败时except块只定义了get_logger，后续代码引用SERVER_IP等变量时NameError导致服务无法启动
 **做法**: except块中定义所有必需变量的降级值
 
+### 规则18：小内存VPS必须配Swap
+**教训**: 414MB内存无Swap，OOM killer杀掉singbox进程导致掉线（Bug #39）
+**做法**: <1GB内存的VPS必须创建2GB Swap，禁用fwupd/snapd等不必要的服务
+
+### 规则19：日志必须配logrotate
+**教训**: singbox日志12MB+且持续增长，无轮转机制（运维#1）
+**做法**: /etc/logrotate.d/singbox 配置 daily + rotate 7 + maxsize 50M
+
 ---
 
 ## 七、Bug修复历史
@@ -315,6 +355,23 @@
 | 20 | v1.0.74 | geoip/geosite在1.12+移除 | sing-box FATAL退出 | 改用rule_set格式 |
 | 21 | v1.0.74 | CAKE降级FQ不如FQ-PIE | 选了最基础降级方案 | fq→fq_pie |
 | 22 | v1.0.75 | CAKE降级仅设sysctl未应用 | 未tc qdisc replace到网卡 | 新增setup_fq_pie_qdisc()+主动安装模块 |
+| 23 | v1.0.76 | DNS代理查询延迟飙升 | dns_proxy走ePS-Auto | detour改为direct |
+| 24 | v1.0.77 | CDN优选IP不自动更新 | 本地池永远优先 | 外部API优先于本地池 |
+| 25 | v1.0.78 | X/推特/groK走SOCKS5 | AI规则在排除规则之前 | 排除规则移到AI规则之前 |
+| 26 | v1.0.78 | SOCKS5无故障转移 | selector无fallback | 加direct作为第二选项 |
+| 28 | v1.0.82 | AI规则含google.com延迟高 | v2rayN测速走SOCKS5 | 移除通用google域名 |
+| 29 | v1.0.82 | CDN返回104段高延迟 | WeTest返回104段 | 001315优先+104段严格过滤 |
+| 30 | v1.0.82 | config_generator与sub不同步 | 改A忘B | 两个文件必须同步更新 |
+| 31 | v1.0.82 | CDN优选IP更新服务卡住 | time.sleep卡住 | crontab每小时重启singbox-cdn |
+| 32 | v1.0.83 | config_generator缺DNS和final | 从未添加 | 添加DNS+final:direct |
+| 33 | v1.0.83 | S-UI残留进程和目录 | 只stop/disable | 删服务文件+目录+杀进程 |
+| 34 | v1.0.84 | CDN重启crontab未写入install.sh | Bug #31修复只在服务器 | install.sh加crontab兜底 |
+| 35 | v1.0.85 | CDN本地池混入104.x.x.x高延迟IP | 本地池未过滤104段 | 移除104段，替换为162.159/172.64段 |
+| 36 | v1.0.85 | cert_manager续签后漏重启singbox-cdn | restart_singbox()漏服务 | 加singbox-cdn重启 |
+| 37 | v1.0.85 | health_check漏检UDP端口(HY2) | 只检查TCP端口 | 增加UDP 443检查 |
+| 38 | v1.0.85 | cdn_monitor数据库连接泄漏 | conn.close()不在finally | 改try/finally |
+| 39 | v1.0.85 | 414MB内存无Swap，OOM杀进程 | 无Swap+fwupd占144MB | 创建2GB Swap+禁用fwupd |
+| 40 | v1.0.85 | HUNAN_CT_OPTIMAL_PREFIXES含未验证段 | 8.39/8.35实测不支持 | 移除8.39/8.35，001315也加过滤 |
 
 ---
 
@@ -338,6 +395,8 @@
 | v1.0.72 | 04-22 | reinstall改为操作系统重装+root密码确认 |
 | v1.0.74 | 04-22 | geoip/geosite改rule_set+CAKE降级改FQ-PIE |
 | v1.0.75 | 04-22 | CAKE模块主动安装+FQ-PIE实际应用到网卡+精确诊断 |
+| v1.0.84 | 04-24 | CDN每小时crontab重启兜底+JSUI清理+版本号统一 |
+| v1.0.85 | 04-25 | 修复CDN本地池104段+cert漏重启+UDP端口检查+DB连接泄漏+OOM/Swap+8.39/8.35段 |
 
 ---
 

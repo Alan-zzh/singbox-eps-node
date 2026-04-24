@@ -2,7 +2,7 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v1.0.82
+Version: v1.0.85
 Date: 2026-04-23
 功能：生成完整的 Singbox 配置
 ⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码

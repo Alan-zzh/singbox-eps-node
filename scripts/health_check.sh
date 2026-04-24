@@ -93,11 +93,16 @@ check_ports() {
     log "--- 端口监听检查 ---"
     for port in 443 8443 2053 2083 2087; do
         if ss -tlnp | grep -q ":$port "; then
-            log "  端口 $port: ✅ 监听中"
+            log "  端口 $port/TCP: ✅ 监听中"
         else
-            log "  端口 $port: ❌ 未监听"
+            log "  端口 $port/TCP: ❌ 未监听"
         fi
     done
+    if ss -ulnp | grep -q ":443 "; then
+        log "  端口 443/UDP: ✅ 监听中 (HY2/QUIC)"
+    else
+        log "  端口 443/UDP: ❌ 未监听 (HY2/QUIC不可用)"
+    fi
 }
 
 # ============================================================

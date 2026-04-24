@@ -2,7 +2,7 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v1.0.82
+Version: v1.0.85
 Date: 2026-04-23
 功能：
   - 提供Base64订阅链接（包含所有节点）

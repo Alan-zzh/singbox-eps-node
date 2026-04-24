@@ -300,6 +300,74 @@
   2. install.sh的uninstall_old_panels加强：删除所有相关systemd服务文件+删除安装目录+杀残留进程+daemon-reload
 - **预防**: 卸载旧面板必须彻底：stop+disable+删除服务文件+删除目录+杀残留进程+daemon-reload
 
+### Bug #34: CDN重启crontab未写入install.sh
+- **版本**: v1.0.84
+- **日期**: 2026-04-24
+- **现象**: Bug #31修复时只在服务器上手动添加了crontab，但install.sh的setup_health_check_cron()没有写入，导致新服务器安装后CDN优选IP还是会卡住
+- **根因**: 修复Bug #31时只在运行中的服务器上手动执行了crontab命令，忘记同步更新install.sh的安装脚本
+- **修复**:
+  1. install.sh的setup_health_check_cron()添加：每小时0分自动重启singbox-cdn
+  2. 同时清理JSUI残留进程和目录
+  3. 统一所有文件版本号为v1.0.84
+- **预防**: 修复服务器问题时，必须同步更新install.sh安装脚本，确保新服务器安装也能获得同样的修复
+
+### Bug #35: CDN本地IP池混入104.x.x.x高延迟段
+- **版本**: v1.0.85
+- **日期**: 2026-04-25
+- **现象**: config.py的CDN_PREFERRED_IPS列表包含104.16.123.96/104.16.124.96/104.17.136.90三个104段IP，这些IP对中国用户延迟130ms+，违反了Bug #29自己制定的"104段严格过滤"规则
+- **根因**: 本地IP池和外部API过滤逻辑是分开的。外部API获取的IP会经过is_hunan_ct_optimal()过滤，但本地硬编码的CDN_PREFERRED_IPS没有经过同样的过滤，导致104段IP"混"进了本地池
+- **修复**:
+  1. config.py: 移除3个104段IP，替换为162.159.36.1/172.64.35.78/162.159.40.55
+  2. cdn_monitor.py: ImportError降级块中的CDN_PREFERRED_IPS同步更新
+- **预防**: 本地IP池也必须遵守104.x.x.x过滤规则，不能因为"本地池"就放松标准。新增IP到CDN_PREFERRED_IPS时必须检查是否属于HUNAN_CT_OPTIMAL_PREFIXES
+
+### Bug #36: cert_manager续签后漏重启singbox-cdn
+- **版本**: v1.0.85
+- **日期**: 2026-04-25
+- **现象**: cert_manager.py证书续签后只重启singbox和singbox-sub，漏了singbox-cdn。CDN监控服务使用旧证书继续运行，可能导致HTTPS请求失败
+- **根因**: Bug #15修复时只在tg_bot.py的update_env_and_restart()中添加了singbox-cdn重启，但cert_manager.py的restart_singbox()没有同步修改。两个文件各自独立调用重启命令，没有统一引用
+- **修复**: cert_manager.py的restart_singbox()添加 `os.system('systemctl restart singbox-cdn')`
+- **预防**: 服务重启必须覆盖所有相关服务（singbox + singbox-sub + singbox-cdn），无论在哪个文件中调用重启。建议将重启逻辑统一到config.py的一个函数中
+
+### Bug #37: health_check漏检UDP端口（HY2/QUIC不可检测）
+- **版本**: v1.0.85
+- **日期**: 2026-04-25
+- **现象**: health_check.sh的check_ports()只检查TCP端口，不检查UDP端口。Hysteria2使用QUIC协议（UDP 443），如果UDP 443未监听，HY2节点完全不可用，但健康检查不会报警
+- **根因**: 初始实现时只考虑了TCP协议的端口检查，忽略了HY2使用UDP协议的特殊性
+- **修复**: check_ports()增加UDP 443端口检查：`ss -ulnp | grep -q ":443 "`
+- **预防**: 端口检查必须同时覆盖TCP和UDP，特别是HY2/QUIC协议使用UDP
+
+### Bug #38: cdn_monitor数据库连接泄漏
+- **版本**: v1.0.85
+- **日期**: 2026-04-25
+- **现象**: cdn_monitor.py的init_db()函数中，如果cursor.execute()或conn.commit()抛异常，数据库连接不会关闭，导致连接泄漏
+- **根因**: conn.close()直接写在函数末尾，没有用try/finally包裹。违反了项目铁律#14"数据库连接必须在finally中关闭"
+- **修复**: 将conn = sqlite3.connect()移入try块，conn = None兜底，finally中if conn防护关闭
+- **预防**: 所有数据库连接必须在finally中关闭，即使init_db()这种简单函数也不能例外
+
+### Bug #39: 414MB内存无Swap，OOM Killer杀掉进程导致掉线
+- **版本**: v1.0.85
+- **日期**: 2026-04-25
+- **现象**: 服务器"时不时掉线突然连不上"，但ping正常。dmesg显示OOM killer已触发61次，杀掉了fwupd等进程。服务器只有414MB内存，无Swap分区
+- **根因**: AWS t3.micro实例只有414MB内存，运行singbox(27MB)+subscription_service(36MB)+cdn_monitor(26MB)+系统服务后内存耗尽。fwupd服务占用144MB触发OOM，如果singbox进程被OOM杀掉就会导致"突然连不上"
+- **修复**:
+  1. 创建2GB Swap文件并写入/etc/fstab持久化
+  2. 设置vm.swappiness=10（优先用物理内存，Swap做紧急缓冲）
+  3. 禁用并mask fwupd.service（占用144MB且VPS不需要固件更新）
+  4. 禁用snapd.service（节省24MB）
+- **预防**: 小内存VPS（<1GB）必须配Swap（至少2GB），fwupd/snapd等不必要的服务必须禁用
+
+### Bug #40: HUNAN_CT_OPTIMAL_PREFIXES包含未实测验证的IP段
+- **版本**: v1.0.85
+- **日期**: 2026-04-25
+- **现象**: CDN优选IP数据库中出现8.39.125.x和8.35.211.x段IP，这些段不在用户实测数据中。001315 API返回这些IP但未经is_hunan_ct_optimal()过滤直接使用，导致非优质段IP进入CDN列表
+- **根因**: 001315电信API返回8.39.x.x和8.35.x.x段IP，代码注释误标为"属于湖南电信最优段"，但用户实测数据（2026-04-25）显示优质段只有162.159/172.64/108.162/198.41/173.245。8.39/8.35段不在任何第三方CDN优选数据源中出现
+- **修复**:
+  1. HUNAN_CT_OPTIMAL_PREFIXES移除'8.39.'和'8.35.'前缀
+  2. 001315 API返回的IP也必须经过is_hunan_ct_optimal()过滤
+  3. CDN_PREFERRED_IPS用用户实测优质IP更新（前9个为实测排名）
+- **预防**: CDN最优IP段必须以用户实测数据为准，API返回的IP段未经实测验证不能加入最优前缀列表
+
 ---
 
 ## Bug 修复历史

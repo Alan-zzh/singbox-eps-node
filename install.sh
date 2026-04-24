@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.83
+# 版本: v1.0.85
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -86,7 +86,7 @@ uninstall_old_panels() {
     log_step "检查并卸载旧面板..."
     # ⚠️ S-UI彻底卸载：停止服务+删除服务文件+删除目录+杀残留进程
     # Bug #33教训：只stop/disable不够，S-UI的cdn_monitor进程会自动重启
-    for panel in s-ui x-ui marzban 3x-ui; do
+    for panel in s-ui x-ui marzban 3x-ui js-ui jsui; do
         if systemctl is-active --quiet "$panel" 2>/dev/null; then
             log_warn "检测到 $panel 正在运行，正在卸载..."
             systemctl stop "$panel" 2>/dev/null || true
@@ -100,10 +100,15 @@ uninstall_old_panels() {
         rm -f /etc/systemd/system/multi-user.target.wants/"$panel".service
         rm -f /etc/systemd/system/multi-user.target.wants/"$panel"-cdn-monitor.service
     done
-    # S-UI特殊处理：删除安装目录和残留进程
-    rm -rf /opt/s-ui-manager /usr/local/s-ui
+    # S-UI/JSUI特殊处理：删除安装目录和残留进程
+    # Bug #33教训：只stop/disable不够，S-UI的cdn_monitor进程会自动重启
+    # JSUI也可能有残留进程在/opt/js-ui-manager或/usr/local/js-ui
+    rm -rf /opt/s-ui-manager /usr/local/s-ui /opt/js-ui-manager /usr/local/js-ui
     pkill -f '/opt/s-ui-manager' 2>/dev/null || true
     pkill -f '/usr/local/s-ui' 2>/dev/null || true
+    pkill -f '/opt/js-ui-manager' 2>/dev/null || true
+    pkill -f '/usr/local/js-ui' 2>/dev/null || true
+    pkill -f 'cdn_monitor.py.*s-ui' 2>/dev/null || true
     systemctl daemon-reload
     log_info "旧面板卸载完成"
 }
@@ -641,7 +646,48 @@ setup_health_check_cron() {
     log_step "配置定时任务..."
     (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
     (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * cd ${BASE_DIR} && venv/bin/python3 scripts/cert_manager.py --renew >> ${BASE_DIR}/logs/cert_renew.log 2>&1") | crontab -
-    log_info "定时任务已配置（健康检查每5分钟 + 证书续签每月1号凌晨3点）"
+    # ⚠️ Bug #31教训：singbox-cdn的time.sleep(3600)会卡住，必须每小时重启一次
+    # 守护进程模式虽然显示active但不再执行后续更新，crontab重启是兜底保障
+    (crontab -l 2>/dev/null | grep -v "singbox-cdn"; echo "0 * * * * systemctl restart singbox-cdn >> ${BASE_DIR}/logs/cdn_restart.log 2>&1") | crontab -
+    log_info "定时任务已配置（健康检查每5分钟 + CDN每小时重启 + 证书续签每月1号凌晨3点）"
+}
+
+setup_swap_and_optimize() {
+    log_step "检查内存和Swap..."
+    local total_mem=$(free -m | awk '/^Mem:/{print $2}')
+    if [ "$total_mem" -lt 1024 ] && [ ! -f /swapfile ]; then
+        log_info "内存 ${total_mem}MB < 1GB，创建2GB Swap..."
+        dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        sysctl vm.swappiness=10 >> /dev/null 2>&1 || true
+        grep -q 'vm.swappiness' /etc/sysctl.conf && sed -i 's/vm.swappiness=.*/vm.swappiness=10/' /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+        log_info "2GB Swap已创建并启用"
+    elif [ -f /swapfile ]; then
+        log_info "Swap已存在，跳过"
+    else
+        log_info "内存 ${total_mem}MB >= 1GB，无需Swap"
+    fi
+    systemctl stop fwupd.service 2>/dev/null || true
+    systemctl disable fwupd.service 2>/dev/null || true
+    systemctl mask fwupd.service 2>/dev/null || true
+    if [ ! -f /etc/logrotate.d/singbox ]; then
+        cat > /etc/logrotate.d/singbox << 'EOF'
+/var/log/singbox.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 50M
+}
+EOF
+        log_info "singbox日志轮转已配置"
+    fi
 }
 
 start_services() {
@@ -819,6 +865,7 @@ cmd_reset() {
     create_systemd_services
     setup_firewall
     setup_port_hopping
+    setup_swap_and_optimize
     setup_health_check_cron
     start_services
     verify_installation
@@ -932,7 +979,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.82${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.85${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -980,7 +1027,7 @@ main() {
         "")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.82${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.85${NC}"
             echo "=========================================="
             echo ""
             check_root
@@ -1000,6 +1047,7 @@ main() {
             setup_firewall
             setup_port_hopping
             create_systemd_services
+            setup_swap_and_optimize
             setup_health_check_cron
             start_services
             verify_installation

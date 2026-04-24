@@ -2,7 +2,7 @@
 """
 TG机器人总控脚本
 Author: Alan
-Version: v1.0.54
+Version: v1.0.85
 Date: 2026-04-20
 功能：
   - /status 查看服务器状态
