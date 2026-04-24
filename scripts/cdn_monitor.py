@@ -3,34 +3,38 @@
 CDN监控脚本
 Author: Alan
 Version: v1.0.85
-Date: 2026-04-23
+Date: 2026-04-25
 功能：
-  - 本地实测IP池优先，外部API补充
-  - TCPing验证可达性
+  - 从中国电信CDN优选API获取实测最优IP
+  - TCPing仅验证可达性，不用于排序（日本服务器TCPing所有CF IP都是1-2ms）
+  - API返回的IP顺序就是中国网络实测排序，直接信任
   - 每小时自动更新，确保始终使用最优IP
   - 自动分配每个协议独立IP
 
-⚠️ CDN优选IP获取策略（按优先级）：
-  1. 本地实测IP池（CDN_PREFERRED_IPS）- 最优先！
-     - 162.159.x.x / 172.64.x.x 段，中国用户实测50ms
-     - TCPing验证可达性，不可达自动替换
-     - 【Bug #27 避坑】：外部API从日本服务器获取的IP（104.18.x.x段）对中国延迟高
-  2. cf.001315.xyz/ct电信API（补充方案1）
-     - 返回格式为 `IP#电信`，解析提取电信专用IP
-     - 仅本地池不足时触发
-  3. WeTest.vip电信优选DNS（补充方案2）
-     - 通过DNS解析获取电信线路最优IP
-     - ⚠️ 从日本服务器用8.8.8.8解析可能返回104.18.x.x段（高延迟），需筛选
-  4. IPDB API bestcf（最后补充）
-     - 返回通用优选IP，不按运营商分类
+⚠️ CDN优选IP获取策略（v1.0.85重构）：
+
+  核心原则：API返回的IP顺序=中国网络实测排序，直接信任，不用TCPing排序
+
+  步骤1：090227电信API（最高优先级）
+     - 返回纯162.159.x.x段IP，中国电信实测最优
+     - 格式：IP#CT，按延迟从低到高排列
+  
+  步骤2：001315电信API（补充）
+     - 返回混合段IP（162.159/173.245/198.41/8.39等）
+     - 过滤非优质段后使用
+  
+  步骤3：WeTest DNS（降级）
+     - DoH解析，返回104段需过滤
+  
+  步骤4：IPDB API（降级）
+     - 返回104段需过滤
+  
+  步骤5：本地实测IP池（兜底）
 
 历史教训：
-  - v1.0.36用日本服务器DNS实时解析，返回的IP对中国延迟150-200ms
-  - v1.0.37恢复固定IP池，但IP可能过期失效
-  - v1.0.45改用指定DNS解析+固定IP池降级，但指定DNS从日本不可达
-  - v1.0.55改用中国DoH解析+优选IP池TCPing验证可达性
-  - v1.0.56改用IPDB API获取实时优选IP，但不按运营商分类
-  - v1.0.57改用WeTest.vip电信优选DNS，按运营商分类获取最优IP
+  - v1.0.36: 日本DNS解析返回104段，中国延迟150-200ms
+  - v1.0.55: DoH解析+TCPing验证，但TCPing从日本测都是1-2ms无法区分
+  - v1.0.85: 发现090227 API返回纯162.159段，这才是用户实测那种质量的IP
 """
 
 import os
@@ -48,7 +52,7 @@ try:
     from config import (
         SERVER_IP, DATA_DIR, CF_DOMAIN,
         CDN_MONITOR_INTERVAL, CDN_TOP_IPS_COUNT,
-        CDN_PREFERRED_IPS, CDN_API_WETEST_CT, CDN_API_IPDB, CDN_API_001315_CT,
+        CDN_PREFERRED_IPS, CDN_API_WETEST_CT, CDN_API_IPDB, CDN_API_001315_CT, CDN_API_090227_CT,
     )
     from logger import get_logger
 except ImportError:
@@ -60,15 +64,13 @@ except ImportError:
         '162.159.38.161', '108.162.198.221', '162.159.44.242',
         '172.64.52.35', '172.64.53.231', '172.64.229.110',
         '162.159.39.14', '172.64.41.181', '172.64.34.89',
-        '162.159.45.66', '162.159.39.48', '172.64.53.253',
-        '162.159.44.192', '172.64.52.244', '162.159.38.190',
-        '108.162.198.29', '162.159.38.180', '108.162.198.116',
-        '172.64.53.134', '162.159.39.89', '172.64.52.173',
-        '172.64.53.179', '172.64.52.205', '108.162.198.145',
+        '104.18.41.58', '104.18.32.206', '172.64.229.250',
+        '104.18.42.36', '162.159.13.213', '162.159.5.56',
     ]
     CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
     CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
     CDN_API_001315_CT = 'https://cf.001315.xyz/ct'
+    CDN_API_090227_CT = 'https://addressesapi.090227.xyz/ct'
     CDN_MONITOR_INTERVAL = 3600
     CDN_TOP_IPS_COUNT = 5
 
@@ -228,6 +230,40 @@ def fetch_from_wetest_ct():
     return filtered
 
 
+def fetch_from_090227_ct():
+    """从addressesapi.090227.xyz/ct获取电信优选IP
+
+    090227 API返回中国电信实测最优Cloudflare IP：
+    - 返回纯162.159.x.x段IP，延迟50-55ms
+    - 格式：IP#CT，按延迟从低到高排列
+    - 这是目前找到的最优质数据源，返回的IP与用户实测完全一致
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(CDN_API_090227_CT)
+        req.add_header('User-Agent', 'Mozilla/5.0')
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content = resp.read().decode('utf-8').strip()
+
+        ips = []
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            ip = line.split('#')[0].strip()
+            if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
+                ips.append(ip)
+        if ips:
+            logger.info(f"  090227电信API返回 {len(ips)} 个IP: {ips[:5]}...")
+        else:
+            logger.warning("  090227电信API返回空列表")
+        return ips
+    except Exception as e:
+        logger.warning(f"  090227电信API获取失败: {e}")
+        return []
+
+
 def fetch_from_001315_ct():
     """从cf.001315.xyz/ct获取电信优选IP
 
@@ -296,103 +332,65 @@ def fetch_from_ipdb_api():
 
 
 def fetch_cdn_ips():
-    """获取优选IP（4级降级保障机制，确保主方案失效时自动切换备选方案）
+    """从多个数据源获取CDN优选IP，按中国网络实测排序
 
-    【4级降级策略 - 按优先级自动切换】
-    
-    ⚠️ 重要：本地实测IP池优先！外部API仅作补充。
-    这是Bug #27的教训：外部API从日本服务器获取的IP（104.18.x.x段）对中国延迟高。
-    
-    第1级：本地实测IP池（CDN_PREFERRED_IPS）- 最优先！
-       - 162.159.x.x / 172.64.x.x 段，中国用户实测50ms
-       - TCPing验证可达性，不可达自动跳过
-       - 【Bug #27 避坑】：WeTest.vip从日本服务器解析返回104.18.x.x段，延迟150-200ms
-    
-    第2级：cf.001315.xyz/ct电信API（补充实时IP）
-       - 当第1级IP数量不足时触发
-       - 返回格式为 `IP#电信`，按运营商分类，电信线路专属IP
-    
-    第3级：WeTest.vip电信优选DNS（补充方案2）
-       - 当第1、2级都不够时触发
-       - ⚠️ 从日本服务器用8.8.8.8解析可能返回104.18.x.x段，需筛选
-    
-    第4级：IPDB API bestcf（通用优选IP，需筛选）
-       - 当第1、2、3级都不够时触发
-       - 返回通用优选IP，不按运营商分类
-    
-    【为什么本地池优先？- Bug #27教训】
-    - WeTest.vip从日本服务器用8.8.8.8解析，返回104.18.x.x段
-    - 104.18.x.x段对中国用户延迟150-200ms，远高于本地池的50ms
-    - 本地池（162.159.x.x / 172.64.x.x）是湖南电信实测最优IP
-    - 策略：本地池优先，外部API仅补充不足部分
-    
-    【自动切换逻辑】
-    - 不是"主方案挂了才切备选"，而是"主方案不够就补备选"
-    - 每一级都尝试获取IP，TCPing验证可达性后加入valid_ips
-    - 达到CDN_TOP_IPS_COUNT（默认5个）就停止，避免浪费API请求
-    - 如果某级API不可达，跳过该级，继续下一级
-    - 所有方案都不可达时，使用本地降级IP池前5个
-    
-    【湖南电信最优IP段筛选】
-    - 162.159.x.x / 172.64.x.x / 108.162.x.x 段延迟50-53ms（最优）
-    - 198.41.x.x / 173.245.x.x 段延迟50-55ms（次优）
-    - 104.16-21.x.x 段延迟130ms+（必须过滤）
-    
-    【实时同步机制】
-    - 每小时自动检测一次IP可达性
-    - 不可达IP自动替换为下一个可用IP
-    - 确保每次更新都是实时同步的最新IP
+    核心原则：API返回的IP顺序=中国网络实测排序，直接信任
+    TCPing仅验证IP是否可达，不用于排序（日本服务器TCPing所有CF IP都是1-2ms）
     """
-    # 【CDN IP获取策略 - 规则8修正版】：
-    # 步骤1：cf.001315.xyz/ct电信API（返回173.245.x.x等优质段，优先）
-    # 步骤2：WeTest.vip电信优选DNS（用阿里DoH解析，但返回104.x.x.x段需过滤）
-    # 步骤3：IPDB API（补充）
-    # 步骤4：本地实测IP池（兜底，162.159.x.x/172.64.x.x段）
-    #
-    # 【为什么001315优先？】：
-    # 001315 API返回173.245.x.x/8.39.x.x/8.35.x.x段，属于湖南电信最优段
-    # WeTest.vip即使用中国DNS解析也返回104.x.x.x段，对中国延迟130ms+，必须过滤
-    # 本地池是固定IP，延迟50ms，但不会变化
-    #
-    # 【Bug #27 根因】：WeTest.vip返回的104.x.x.x段对中国延迟高
-    # 【关键发现】：即使用阿里DoH/湖南电信DNS解析WeTest，仍然返回104.x.x.x段
-    # 这说明WeTest.vip的DNS记录本身就是104段，不是DNS服务器的问题
     valid_ips = []
     seen = set()
     
     source_results = {
+        '090227_api': False,
         '001315_api': False, 
         'wetest_dns': False,
         'ipdb_api': False,
         'local_pool': False
     }
 
-    # ==================== 步骤1：cf.001315.xyz/ct电信API（返回优质段，优先使用） ====================
-    logger.info(f">>> 步骤1：cf.001315.xyz/ct电信API（返回优质段，优先）")
-    ct_001315_ips = fetch_from_001315_ct()
-    if ct_001315_ips:
+    # ==================== 步骤1：090227电信API（最高优先级，返回纯162.159段） ====================
+    logger.info(f">>> 步骤1：090227电信API（返回纯162.159段，最高优先级）")
+    ct_090227_ips = fetch_from_090227_ct()
+    if ct_090227_ips:
         api_success = False
-        for ip in ct_001315_ips:
-            if ip not in seen and is_hunan_ct_optimal(ip):
+        for ip in ct_090227_ips:
+            if ip not in seen:
                 seen.add(ip)
                 if tcping(ip):
                     valid_ips.append(ip)
-                    logger.info(f"  {ip}(001315电信-优质): 可达")
+                    logger.info(f"  {ip}(090227电信): 可达")
                     api_success = True
                 if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                     break
-        if not api_success and ct_001315_ips:
-            logger.warning(f"  001315返回的IP均不在最优段，已过滤: {[ip for ip in ct_001315_ips if not is_hunan_ct_optimal(ip)][:5]}")
-        source_results['001315_api'] = api_success
+        source_results['090227_api'] = api_success
     else:
-        logger.warning("  001315电信API无响应")
+        logger.warning("  090227电信API无响应")
 
-    # 步骤2：WeTest.vip电信优选DNS（返回104.x.x.x段需过滤，仅保留优质段）
+    # ==================== 步骤2：001315电信API（补充，需过滤非优质段） ====================
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤2：WeTest.vip电信优选DNS（需过滤104段，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤2：001315电信API（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        ct_001315_ips = fetch_from_001315_ct()
+        if ct_001315_ips:
+            api_success = False
+            for ip in ct_001315_ips:
+                if ip not in seen and is_hunan_ct_optimal(ip):
+                    seen.add(ip)
+                    if tcping(ip):
+                        valid_ips.append(ip)
+                        logger.info(f"  {ip}(001315电信-优质): 可达")
+                        api_success = True
+                    if len(valid_ips) >= CDN_TOP_IPS_COUNT:
+                        break
+            if not api_success and ct_001315_ips:
+                logger.warning(f"  001315返回的IP均不在最优段，已过滤: {[ip for ip in ct_001315_ips if not is_hunan_ct_optimal(ip)][:5]}")
+            source_results['001315_api'] = api_success
+        else:
+            logger.warning("  001315电信API无响应")
+
+    # ==================== 步骤3：WeTest DNS（降级，返回104段需过滤） ====================
+    if len(valid_ips) < CDN_TOP_IPS_COUNT:
+        logger.info(f"\n>>> 步骤3：WeTest DNS（需过滤104段，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ct_ips = fetch_from_wetest_ct()
-        # ⚠️ 关键：WeTest返回的104.x.x.x段对中国延迟130ms+，必须严格过滤
-        # 只保留属于HUNAN_CT_OPTIMAL_PREFIXES的IP
         if ct_ips:
             dns_success = False
             for ip in ct_ips:
@@ -400,7 +398,7 @@ def fetch_cdn_ips():
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
-                        logger.info(f"  {ip}(WeTest电信-优质): 可达")
+                        logger.info(f"  {ip}(WeTest-优质): 可达")
                         dns_success = True
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
@@ -410,19 +408,18 @@ def fetch_cdn_ips():
         else:
             logger.warning("  WeTest电信DNS无响应")
 
-    # 步骤3：IPDB API（补充）
+    # ==================== 步骤4：IPDB API（降级） ====================
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤3：IPDB API（补充，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤4：IPDB API（降级，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         ipdb_ips = fetch_from_ipdb_api()
         if ipdb_ips:
-            logger.info(f"  返回 {len(ipdb_ips)} 个IP: {ipdb_ips[:5]}...")
             api_success = False
             for ip in ipdb_ips:
-                if ip not in seen:
+                if ip not in seen and is_hunan_ct_optimal(ip):
                     seen.add(ip)
                     if tcping(ip):
                         valid_ips.append(ip)
-                        logger.info(f"  {ip}(IPDB): 可达")
+                        logger.info(f"  {ip}(IPDB-优质): 可达")
                         api_success = True
                     if len(valid_ips) >= CDN_TOP_IPS_COUNT:
                         break
@@ -430,9 +427,9 @@ def fetch_cdn_ips():
         else:
             logger.warning("  IPDB API无响应")
 
-    # 步骤4：本地实测IP池（兜底保障，WeTest等全挂了才用）
+    # ==================== 步骤5：本地实测IP池（兜底） ====================
     if len(valid_ips) < CDN_TOP_IPS_COUNT:
-        logger.info(f"\n>>> 步骤4：本地实测IP池（兜底，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
+        logger.info(f"\n>>> 步骤5：本地实测IP池（兜底，还需{CDN_TOP_IPS_COUNT - len(valid_ips)}个）")
         local_success = False
         for ip in CDN_PREFERRED_IPS:
             if ip not in seen:
