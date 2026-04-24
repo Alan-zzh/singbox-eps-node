@@ -2,7 +2,7 @@
 """
 统一配置模块
 Author: Alan
-Version: v1.0.85
+Version: v2.0.0
 Date: 2026-04-23
 功能：集中管理所有配置参数
 
@@ -153,6 +153,7 @@ CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
 CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
 CDN_API_001315_CT = 'https://cf.001315.xyz/ct'
 CDN_API_090227_CT = 'https://addressesapi.090227.xyz/ct'
+CDN_API_VVHAN = 'https://api.vvhan.com/tool/cf_ip'
 
 CERT_VALIDITY_DAYS = 365
 
