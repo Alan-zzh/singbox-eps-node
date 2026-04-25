@@ -23,7 +23,6 @@ except ImportError:
     BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CERT_DIR = os.path.join(BASE_DIR, 'cert')
 
-# 读取环境变量
 env_vars = {}
 env_file = os.path.join(BASE_DIR, '.env')
 if os.path.exists(env_file):
@@ -50,15 +49,11 @@ ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
 ai_socks5_user = env_vars.get('AI_SOCKS5_USER', '')
 ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
 
-# ⚠️ SSL证书路径：优先fullchain.pem（Let's Encrypt/Cloudflare正式证书），降级cert.pem（自签名）
-# cert_manager.py生成cert.pem+key.pem，acme.sh生成fullchain.pem+key.pem
-# fullchain.pem包含完整证书链，客户端验证更可靠
 _cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
 _cert_key = os.path.join(CERT_DIR, 'key.pem')
 if not os.path.exists(_cert_chain):
     _cert_chain = os.path.join(CERT_DIR, 'cert.pem')
 
-# 如果证书文件不存在，自动生成自签名证书（避免singbox因证书缺失启动失败）
 if not os.path.exists(_cert_chain) or not os.path.exists(_cert_key):
     import subprocess
     cert_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cert_manager.py')
@@ -67,18 +62,12 @@ if not os.path.exists(_cert_chain) or not os.path.exists(_cert_key):
     if not os.path.exists(_cert_key):
         _cert_key = os.path.join(CERT_DIR, 'key.pem')
 
-# ⚠️ SOCKS5入站：仅当用户名和密码均非空时才启用，避免空凭据导致无认证暴露
 socks5_inbound = [{
     "type": "socks",
     "tag": "socks-in",
     "listen": "0.0.0.0",
     "listen_port": 1080,
-    "users": [
-        {
-            "username": socks5_user,
-            "password": socks5_pass
-        }
-    ]
+    "users": [{"username": socks5_user, "password": socks5_pass}]
 }] if socks5_user and socks5_pass else []
 
 config = {
@@ -88,21 +77,10 @@ config = {
         "output": "/var/log/singbox.log",
         "timestamp": True
     },
-    # ⚠️ DNS配置 - 服务端也需要DNS解析能力
-    # dns_proxy用8.8.8.8解析国外域名，detour=direct避免DNS查询走代理（Bug #23教训）
-    # dns_direct用223.5.5.5解析国内域名（备用）
     "dns": {
         "servers": [
-            {
-                "tag": "dns_proxy",
-                "address": "tls://8.8.8.8",
-                "detour": "direct"
-            },
-            {
-                "tag": "dns_direct",
-                "address": "223.5.5.5",
-                "detour": "direct"
-            }
+            {"tag": "dns_proxy", "address": "tls://8.8.8.8", "detour": "direct"},
+            {"tag": "dns_direct", "address": "223.5.5.5", "detour": "direct"}
         ]
     },
     "inbounds": socks5_inbound + [
@@ -129,18 +107,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 8443,
             "users": [{"uuid": vless_ws_uuid}],
-            "transport": {
-                "type": "ws",
-                "path": "/vless-ws",
-                "headers": {"Host": cf_domain or server_ip}
-            },
-            "tls": {
-                "enabled": True,
-                "server_name": cf_domain or server_ip,
-                "certificate_path": _cert_chain,
-                "key_path": _cert_key,
-                "alpn": ["http/1.1"]
-            }
+            "transport": {"type": "ws", "path": "/vless-ws", "headers": {"Host": cf_domain or server_ip}},
+            "tls": {"enabled": True, "server_name": cf_domain or server_ip, "certificate_path": _cert_chain, "key_path": _cert_key, "alpn": ["http/1.1"]}
         },
         {
             "type": "vless",
@@ -148,18 +116,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 2053,
             "users": [{"uuid": vless_ws_uuid}],
-            "transport": {
-                "type": "httpupgrade",
-                "path": "/vless-upgrade",
-                "host": cf_domain or server_ip
-            },
-            "tls": {
-                "enabled": True,
-                "server_name": cf_domain or server_ip,
-                "certificate_path": _cert_chain,
-                "key_path": _cert_key,
-                "alpn": ["http/1.1"]
-            }
+            "transport": {"type": "httpupgrade", "path": "/vless-upgrade", "host": cf_domain or server_ip},
+            "tls": {"enabled": True, "server_name": cf_domain or server_ip, "certificate_path": _cert_chain, "key_path": _cert_key, "alpn": ["http/1.1"]}
         },
         {
             "type": "trojan",
@@ -167,18 +125,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 2083,
             "users": [{"password": trojan_pass}],
-            "transport": {
-                "type": "ws",
-                "path": "/trojan-ws",
-                "headers": {"Host": cf_domain or server_ip}
-            },
-            "tls": {
-                "enabled": True,
-                "server_name": cf_domain or server_ip,
-                "certificate_path": _cert_chain,
-                "key_path": _cert_key,
-                "alpn": ["http/1.1"]
-            }
+            "transport": {"type": "ws", "path": "/trojan-ws", "headers": {"Host": cf_domain or server_ip}},
+            "tls": {"enabled": True, "server_name": cf_domain or server_ip, "certificate_path": _cert_chain, "key_path": _cert_key, "alpn": ["http/1.1"]}
         },
         {
             "type": "hysteria2",
@@ -186,17 +134,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 443,
             "users": [{"password": hysteria2_pass}],
-            "tls": {
-                "enabled": True,
-                "server_name": "www.apple.com",
-                "certificate_path": _cert_chain,
-                "key_path": _cert_key,
-                "alpn": ["h3"]
-            },
-            "obfs": {
-                "type": "salamander",
-                "password": hysteria2_pass[:8]
-            }
+            "tls": {"enabled": True, "server_name": "www.apple.com", "certificate_path": _cert_chain, "key_path": _cert_key, "alpn": ["h3"]},
+            "obfs": {"type": "salamander", "password": hysteria2_pass[:8]}
         }
     ],
     "outbounds": [
@@ -230,10 +169,10 @@ config = {
                 "stability.ai", "cohere.com", "replicate.com",
                 "kimi.moonshot.cn", "deepseek.com",
                 "cerebras.net", "inflection.ai", "mistral.ai",
-                "meta.ai", "ai.com", "openai.org", "chat.openai.com",
+                "meta.ai", "openai.org", "chat.openai.com",
                 "api.openai.com", "platform.openai.com", "playground.openai.com"
             ],
-            "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio", "ai", "chatgpt"],
+            "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio", "chatgpt"],
             "domain": ["gemini.google.com"],
             "outbound": "ai-residential"
         }] if ai_socks5_server and ai_socks5_port else []),
