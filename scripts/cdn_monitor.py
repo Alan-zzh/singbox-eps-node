@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 """
-CDN监控脚本
+Singbox CDN优选IP学习系统
 Author: Alan
-Version: v2.0.0
+Version: v3.0.0
 Date: 2026-04-25
-功能：
-  - 从多个中国实测CDN优选API聚合IP，综合评分排序
-  - 多源交叉验证：同一IP被多个数据源推荐则大幅加分
-  - 评分维度：数据源可信度 + 排名位置 + 交叉验证 + IP段参考
-  - TCPing仅验证可达性，不用于排序（日本服务器TCPing所有CF IP都是1-2ms）
-  - 每小时自动更新，确保始终使用最优IP
-  - 自动分配每个协议独立IP
 
-⚠️ CDN优选IP获取策略（v2.0.0重构 - 多源聚合+评分排序）：
+架构设计：用户投喂 + 自动验证 + 历史评分 = 持续优化的CDN优选系统
 
-  核心原则：不再按IP段前缀硬过滤，改为多源聚合+综合评分排序
+v3.0 核心特性：
+  1. IP性能数据库：每个IP独立记录历史延迟/成功率/连续失败次数
+  2. 综合评分算法：平均延迟40% + 成功率30% + 稳定性20% + 新鲜度10%
+  3. 自动淘汰机制：连续5次失败降权，连续3天不达标移出优选池
+  4. 用户投喂通道：config.py的IP作为"候选池"，脚本自动验证后入库
+  5. 不依赖IP段前缀：完全基于历史表现数据，越用越准
 
-  数据源（按可信度排序）：
-  1. vvhan API — 中国实测，含延迟/速度/数据中心，每15分钟更新
-  2. 090227电信API — 中国电信实测，纯162.159段
-  3. 001315电信API — 中国电信实测，混合段
-  4. WeTest DNS — DoH解析，质量不稳定
-  5. IPDB API — 通用优选，大量104段
-  6. 本地实测IP池 — 兜底
+工作流：
+  每小时执行 → 从候选池+外部API收集IP → TCP测试 → 记录性能 → 综合评分 → 选最优5个
 
-  评分公式：
-  总分 = 数据源可信度分 + 排名加分 + 交叉验证加分 + IP段参考分
-
-历史教训：
-  - v1.0.36: 日本DNS解析返回104段，中国延迟150-200ms
-  - v1.0.55: DoH解析+TCPing验证，但TCPing从日本测都是1-2ms无法区分
-  - v1.0.85: 发现090227 API返回纯162.159段，但硬过滤导致001315的8.39段被丢弃
-  - v2.0.0: 彻底重构为多源聚合+评分排序，不再硬过滤IP段
+历史版本：
+  - v2.0.0: 多源聚合+评分排序（理论优选≠实际最优）
+  - v2.2.0: TCP连通测试+本地池优先（解决服务器端测试无意义问题）
+  - v3.0.0: 学习系统+自动淘汰（持续优化，越用越准）
 """
 
 import os
@@ -42,6 +31,7 @@ import json
 import socket
 import subprocess
 import re
+import fcntl
 from datetime import datetime
 from collections import defaultdict
 
@@ -51,7 +41,8 @@ try:
     from config import (
         SERVER_IP, DATA_DIR, CF_DOMAIN,
         CDN_MONITOR_INTERVAL, CDN_TOP_IPS_COUNT,
-        CDN_PREFERRED_IPS, CDN_API_WETEST_CT, CDN_API_IPDB,
+        CDN_PREFERRED_IPS, CDN_IP_BLACKLIST,
+        CDN_API_WETEST_CT, CDN_API_IPDB,
         CDN_API_001315_CT, CDN_API_090227_CT, CDN_API_VVHAN,
     )
     from logger import get_logger
@@ -67,6 +58,7 @@ except ImportError:
         '104.18.41.58', '104.18.32.206', '172.64.229.250',
         '104.18.42.36', '162.159.13.213', '162.159.5.56',
     ]
+    CDN_IP_BLACKLIST = []
     CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
     CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
     CDN_API_001315_CT = 'https://cf.001315.xyz/ct'
@@ -90,43 +82,24 @@ TCPING_PORT = 443
 TCPING_TIMEOUT = 3
 
 SOURCE_WEIGHT = {
-    'vvhan': 30,
-    '090227': 25,
-    '001315': 15,
-    'wetest': 10,
+    'vvhan': 5,
+    '090227': 5,
+    '001315': 5,
+    'wetest': 5,
     'ipdb': 5,
-    'local': 0,
+    'local': 5,
 }
 
-RANK_BASE_SCORE = 20
-RANK_DECAY = 2
+# v3.0 综合评分权重
+SCORE_LATENCY_WEIGHT = 0.40    # 平均延迟占比40%
+SCORE_SUCCESS_WEIGHT = 0.30    # 成功率占比30%
+SCORE_STABILITY_WEIGHT = 0.20  # 稳定性占比20%
+SCORE_FRESHNESS_WEIGHT = 0.10  # 新鲜度占比10%
 
-CROSS_VERIFY_BONUS = 15
-
-IP_PREFIX_SCORE = {
-    '162.159.': 10,
-    '108.162.': 10,
-    '172.64.': 8,
-    '173.245.': 8,
-    '198.41.': 8,
-    '104.16.': -10,
-    '104.17.': -10,
-    '104.18.': -10,
-    '104.19.': -10,
-    '104.20.': -10,
-    '104.21.': -10,
-    '8.39.': -5,
-    '8.35.': -5,
-}
-
-
-def get_ip_prefix_score(ip):
-    prefix_score = 0
-    for prefix, score in IP_PREFIX_SCORE.items():
-        if ip.startswith(prefix):
-            prefix_score = score
-            break
-    return prefix_score
+# 淘汰阈值
+ELIMINATE_CONSECUTIVE_FAILS = 5       # 连续失败次数
+ELIMINATE_DAYS_NO_SUCCESS = 3         # 连续多少天无成功记录
+MAX_PERFORMANCE_HISTORY = 100         # 每个IP最多保留多少条历史记录
 
 
 def init_db():
@@ -142,11 +115,203 @@ def init_db():
                 value TEXT
             )
         """)
+        # v3.0 新增：IP性能历史表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ip_performance (
+                ip TEXT PRIMARY KEY,
+                total_tests INTEGER DEFAULT 0,
+                success_count INTEGER DEFAULT 0,
+                fail_count INTEGER DEFAULT 0,
+                consecutive_fails INTEGER DEFAULT 0,
+                avg_latency REAL DEFAULT 0,
+                min_latency REAL DEFAULT 9999,
+                max_latency REAL DEFAULT 0,
+                last_test_time TEXT,
+                last_success_time TEXT,
+                first_seen TEXT,
+                source TEXT DEFAULT 'unknown'
+            )
+        """)
+        # v3.0 新增：每次测试的详细记录表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ip_test_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                latency REAL,
+                success INTEGER,
+                test_time TEXT NOT NULL
+            )
+        """)
         conn.commit()
     finally:
         if conn:
             conn.close()
     return db_path
+
+
+def record_ip_test(db_path, ip, latency, success, source='local'):
+    """记录IP测试结果到数据库"""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+
+        cursor.execute(
+            "INSERT INTO ip_test_history (ip, latency, success, test_time) VALUES (?, ?, ?, ?)",
+            (ip, latency if success else None, 1 if success else 0, now)
+        )
+
+        cursor.execute("SELECT * FROM ip_performance WHERE ip = ?", (ip,))
+        row = cursor.fetchone()
+
+        if row:
+            total = row[1] + 1
+            success_cnt = row[2] + (1 if success else 0)
+            fail_cnt = row[3] + (0 if success else 1)
+            consec_fails = (row[4] + 1) if not success else 0
+            old_avg = row[5]
+            old_success_cnt = row[2]
+            if success and latency is not None:
+                new_avg = (old_avg * old_success_cnt + latency) / (old_success_cnt + 1)
+            else:
+                new_avg = old_avg
+            min_lat = min(row[6], latency) if success and latency is not None else row[6]
+            max_lat = max(row[7], latency) if success and latency is not None else row[7]
+            last_success = row[9] if not success else now
+
+            cursor.execute("""
+                UPDATE ip_performance SET
+                    total_tests=?, success_count=?, fail_count=?,
+                    consecutive_fails=?, avg_latency=?, min_latency=?,
+                    max_latency=?, last_test_time=?, last_success_time=?
+                WHERE ip=?
+            """, (total, success_cnt, fail_cnt, consec_fails, new_avg,
+                  min_lat, max_lat, now, last_success, ip))
+        else:
+            cursor.execute("""
+                INSERT INTO ip_performance
+                (ip, total_tests, success_count, fail_count, consecutive_fails,
+                 avg_latency, min_latency, max_latency, last_test_time,
+                 last_success_time, first_seen, source)
+                VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (ip, 1 if success else 0, 0 if success else 1, 0 if success else 1,
+                  latency if success else 0,
+                  latency if success else 9999,
+                  latency if success else 0,
+                  now, now if success else None, now, source))
+
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_ip_performance(db_path, ip):
+    """获取IP的性能数据"""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ip_performance WHERE ip = ?", (ip,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                'ip': row[0],
+                'total_tests': row[1],
+                'success_count': row[2],
+                'fail_count': row[3],
+                'consecutive_fails': row[4],
+                'avg_latency': row[5],
+                'min_latency': row[6],
+                'max_latency': row[7],
+                'last_test_time': row[8],
+                'last_success_time': row[9],
+                'first_seen': row[10],
+                'source': row[11],
+            }
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def calculate_composite_score(perf, current_latency=None):
+    """
+    v3.0 综合评分算法
+    评分 = 延迟分(40%) + 成功率分(30%) + 稳定性分(20%) + 新鲜度分(10%)
+    分数越低越好（延迟低=分高）
+    """
+    if perf is None or perf['total_tests'] == 0:
+        # 新IP，给中等分数让它有机会表现
+        return 50.0
+
+    total = perf['total_tests']
+    success = perf['success_count']
+    avg_lat = perf['avg_latency']
+    consec_fails = perf['consecutive_fails']
+    last_success = perf['last_success_time']
+
+    # 1. 延迟分（40%）：延迟越低分越高，0-100ms为满分，>500ms为0分
+    if avg_lat > 0:
+        latency_score = max(0, 100 * (1 - avg_lat / 500))
+    else:
+        latency_score = 50  # 无数据时给中等分
+
+    # 2. 成功率分（30%）
+    success_rate = success / total if total > 0 else 0
+    success_score = success_rate * 100
+
+    # 3. 稳定性分（20%）：连续失败会大幅扣分
+    stability_score = max(0, 100 - consec_fails * 20)
+
+    # 4. 新鲜度分（10%）：最近3天有成功记录得满分，否则递减
+    freshness_score = 0
+    if last_success:
+        try:
+            last_dt = datetime.fromisoformat(last_success)
+            days_since = (datetime.now() - last_dt).days
+            freshness_score = max(0, 100 - days_since * 33)
+        except Exception:
+            freshness_score = 0
+
+    # 加权总分
+    total_score = (
+        latency_score * SCORE_LATENCY_WEIGHT +
+        success_score * SCORE_SUCCESS_WEIGHT +
+        stability_score * SCORE_STABILITY_WEIGHT +
+        freshness_score * SCORE_FRESHNESS_WEIGHT
+    )
+
+    return round(total_score, 2)
+
+
+def should_eliminate_ip(perf):
+    """判断IP是否应该被淘汰"""
+    if perf is None:
+        return False, "新IP，保留观察"
+
+    # 连续失败次数过多
+    if perf['consecutive_fails'] >= ELIMINATE_CONSECUTIVE_FAILS:
+        return True, f"连续失败{perf['consecutive_fails']}次"
+
+    # 成功率太低（测试超过10次后）
+    if perf['total_tests'] >= 10:
+        success_rate = perf['success_count'] / perf['total_tests']
+        if success_rate < 0.2:
+            return True, f"成功率仅{success_rate*100:.0f}%"
+
+    # 最近多天无成功记录
+    if perf['last_success_time']:
+        try:
+            last_dt = datetime.fromisoformat(perf['last_success_time'])
+            days_since = (datetime.now() - last_dt).days
+            if days_since >= ELIMINATE_DAYS_NO_SUCCESS and perf['total_tests'] >= 5:
+                return True, f"{days_since}天无成功记录"
+        except Exception:
+            pass
+
+    return False, "正常"
 
 
 def tcping(ip, port=TCPING_PORT, timeout=TCPING_TIMEOUT):
@@ -158,6 +323,29 @@ def tcping(ip, port=TCPING_PORT, timeout=TCPING_TIMEOUT):
         return result == 0
     except Exception:
         return False
+
+
+def http_latency_test(ip, port=443, timeout=5, test_url='/'):
+    """
+    用TCP连接测试IP可达性（不依赖HTTPS/SNI，兼容所有Cloudflare IP）
+    返回: (延迟ms, 是否成功) 或 (None, False) 如果失败
+    """
+    import socket
+    sni_host = CF_DOMAIN if CF_DOMAIN else 'cloudflare.com'
+
+    start_time = time.time()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((ip, port))
+        elapsed = (time.time() - start_time) * 1000
+        sock.close()
+        if result == 0:
+            return elapsed, True
+        return None, False
+    except Exception as e:
+        logger.debug(f"  TCP测试 {ip} 失败: {e}")
+        return None, False
 
 
 def resolve_dns(dns_name, dns_server=DNS_SERVER, timeout=10):
@@ -333,126 +521,138 @@ def fetch_from_ipdb_api():
 
 
 def fetch_cdn_ips():
-    ip_scores = defaultdict(lambda: {
-        'total_score': 0,
-        'sources': [],
-        'rank_scores': {},
-        'source_scores': {},
-        'cross_bonus': 0,
-        'prefix_score': 0,
-        'latency': None,
-        'speed': None,
-    })
-
+    db_path = init_db()
+    candidate_ips = {}
     source_status = {}
 
-    logger.info(">>> 步骤1：vvhan API（中国实测，含延迟/速度/数据中心）")
+    logger.info(">>> 步骤1：收集所有候选IP")
+
+    logger.info("  1.1 用户投喂候选池")
+    if CDN_IP_BLACKLIST:
+        logger.info(f"  黑名单过滤: {len(CDN_IP_BLACKLIST)} 个IP将被跳过")
+    for ip in CDN_PREFERRED_IPS:
+        if ip in CDN_IP_BLACKLIST:
+            logger.debug(f"  跳过黑名单IP: {ip}")
+            continue
+        if ip not in candidate_ips:
+            candidate_ips[ip] = {'sources': ['local'], 'speed': None}
+        else:
+            candidate_ips[ip]['sources'].append('local')
+    source_status['local'] = len(CDN_PREFERRED_IPS) > 0
+
+    logger.info("  1.2 vvhan API")
     vvhan_data = fetch_from_vvhan_ct()
     source_status['vvhan'] = bool(vvhan_data)
     if vvhan_data:
-        for rank, item in enumerate(vvhan_data):
+        for item in vvhan_data:
             ip = item['ip']
-            ip_scores[ip]['sources'].append('vvhan')
-            ip_scores[ip]['source_scores']['vvhan'] = SOURCE_WEIGHT['vvhan']
-            ip_scores[ip]['rank_scores']['vvhan'] = max(0, RANK_BASE_SCORE - rank * RANK_DECAY)
-            if item.get('latency') is not None:
-                try:
-                    ip_scores[ip]['latency'] = float(item['latency'])
-                except (ValueError, TypeError):
-                    pass
-            if item.get('speed'):
-                ip_scores[ip]['speed'] = item['speed']
+            if ip not in candidate_ips:
+                candidate_ips[ip] = {'sources': ['vvhan'], 'speed': item.get('speed')}
+            else:
+                candidate_ips[ip]['sources'].append('vvhan')
 
-    logger.info("\n>>> 步骤2：090227电信API（中国电信实测，纯162.159段）")
+    logger.info("  1.3 090227电信API")
     ips_090227 = fetch_from_090227_ct()
     source_status['090227'] = bool(ips_090227)
     if ips_090227:
-        for rank, ip in enumerate(ips_090227):
-            ip_scores[ip]['sources'].append('090227')
-            ip_scores[ip]['source_scores']['090227'] = SOURCE_WEIGHT['090227']
-            ip_scores[ip]['rank_scores']['090227'] = max(0, RANK_BASE_SCORE - rank * RANK_DECAY)
+        for ip in ips_090227:
+            if ip not in candidate_ips:
+                candidate_ips[ip] = {'sources': ['090227'], 'speed': None}
+            else:
+                candidate_ips[ip]['sources'].append('090227')
 
-    logger.info("\n>>> 步骤3：001315电信API（中国电信实测，混合段）")
+    logger.info("  1.4 001315电信API")
     ips_001315 = fetch_from_001315_ct()
     source_status['001315'] = bool(ips_001315)
     if ips_001315:
-        for rank, ip in enumerate(ips_001315):
-            ip_scores[ip]['sources'].append('001315')
-            ip_scores[ip]['source_scores']['001315'] = SOURCE_WEIGHT['001315']
-            ip_scores[ip]['rank_scores']['001315'] = max(0, RANK_BASE_SCORE - rank * RANK_DECAY)
+        for ip in ips_001315:
+            if ip not in candidate_ips:
+                candidate_ips[ip] = {'sources': ['001315'], 'speed': None}
+            else:
+                candidate_ips[ip]['sources'].append('001315')
 
-    logger.info("\n>>> 步骤4：WeTest DNS（DoH解析）")
+    logger.info("  1.5 WeTest DNS")
     ips_wetest = fetch_from_wetest_ct()
     source_status['wetest'] = bool(ips_wetest)
     if ips_wetest:
-        for rank, ip in enumerate(ips_wetest):
-            ip_scores[ip]['sources'].append('wetest')
-            ip_scores[ip]['source_scores']['wetest'] = SOURCE_WEIGHT['wetest']
-            ip_scores[ip]['rank_scores']['wetest'] = max(0, RANK_BASE_SCORE - rank * RANK_DECAY)
+        for ip in ips_wetest:
+            if ip not in candidate_ips:
+                candidate_ips[ip] = {'sources': ['wetest'], 'speed': None}
+            else:
+                candidate_ips[ip]['sources'].append('wetest')
 
-    logger.info("\n>>> 步骤5：IPDB API（通用优选）")
+    logger.info("  1.6 IPDB API")
     ips_ipdb = fetch_from_ipdb_api()
     source_status['ipdb'] = bool(ips_ipdb)
     if ips_ipdb:
-        for rank, ip in enumerate(ips_ipdb):
-            ip_scores[ip]['sources'].append('ipdb')
-            ip_scores[ip]['source_scores']['ipdb'] = SOURCE_WEIGHT['ipdb']
-            ip_scores[ip]['rank_scores']['ipdb'] = max(0, RANK_BASE_SCORE - rank * RANK_DECAY)
+        for ip in ips_ipdb:
+            if ip not in candidate_ips:
+                candidate_ips[ip] = {'sources': ['ipdb'], 'speed': None}
+            else:
+                candidate_ips[ip]['sources'].append('ipdb')
 
-    logger.info("\n>>> 步骤6：本地实测IP池（兜底）")
-    local_count = 0
-    for rank, ip in enumerate(CDN_PREFERRED_IPS):
-        if ip not in ip_scores:
-            ip_scores[ip]['sources'].append('local')
-            ip_scores[ip]['source_scores']['local'] = SOURCE_WEIGHT['local']
-            ip_scores[ip]['rank_scores']['local'] = max(0, RANK_BASE_SCORE - rank * RANK_DECAY)
-            local_count += 1
-    source_status['local'] = local_count > 0
+    # v3.0 黑名单全局过滤（所有来源都要过滤）
+    if CDN_IP_BLACKLIST:
+        before_count = len(candidate_ips)
+        for bl_ip in CDN_IP_BLACKLIST:
+            if bl_ip in candidate_ips:
+                del candidate_ips[bl_ip]
+        after_count = len(candidate_ips)
+        if before_count > after_count:
+            logger.info(f"  黑名单过滤: 移除了 {before_count - after_count} 个黑名单IP: {CDN_IP_BLACKLIST}")
 
-    for ip, info in ip_scores.items():
-        info['prefix_score'] = get_ip_prefix_score(ip)
+    logger.info(f"\n  共收集 {len(candidate_ips)} 个候选IP")
 
-        unique_sources = set(info['sources'])
-        cross_count = len(unique_sources)
-        if cross_count >= 2:
-            info['cross_bonus'] = (cross_count - 1) * CROSS_VERIFY_BONUS
+    logger.info("\n>>> 步骤2：TCP连通测试 + 记录性能数据")
+    tested_results = []
+    for ip, info in candidate_ips.items():
+        latency, success = http_latency_test(ip)
+        source_tag = 'local' if 'local' in info['sources'] else 'external'
+        record_ip_test(db_path, ip, latency, success, source=source_tag)
 
-        source_total = sum(info['source_scores'].values())
-        rank_total = sum(info['rank_scores'].values())
-        info['total_score'] = (
-            source_total
-            + rank_total
-            + info['cross_bonus']
-            + info['prefix_score']
-        )
-
-    sorted_ips = sorted(
-        ip_scores.items(),
-        key=lambda x: x[1]['total_score'],
-        reverse=True
-    )
-
-    logger.info(f"\n{'='*60}")
-    logger.info(f"[评分排序] 共 {len(sorted_ips)} 个候选IP，开始TCPing验证")
-    logger.info(f"{'='*60}")
-
-    valid_ips = []
-    for ip, info in sorted_ips:
-        if tcping(ip):
-            sources_str = '+'.join(set(info['sources']))
-            cross_str = f"×{len(set(info['sources']))}" if len(set(info['sources'])) >= 2 else ""
-            latency_str = f" 延迟={info['latency']}ms" if info['latency'] is not None else ""
-            logger.info(
-                f"  ✓ {ip} | 评分={info['total_score']} "
-                f"(源={source_total_sum(info)} 排名={rank_total_sum(info)} "
-                f"交叉={info['cross_bonus']} 段={info['prefix_score']}) "
-                f"| 来源={sources_str}{cross_str}{latency_str}"
-            )
-            valid_ips.append(ip)
-            if len(valid_ips) >= CDN_TOP_IPS_COUNT:
-                break
+        if success and latency is not None:
+            perf = get_ip_performance(db_path, ip)
+            score = calculate_composite_score(perf)
+            tested_results.append({
+                'ip': ip,
+                'latency': latency,
+                'speed': info.get('speed'),
+                'score': score,
+                'sources': info['sources'],
+                'perf': perf,
+            })
         else:
-            logger.debug(f"  ✗ {ip} | 评分={info['total_score']} | TCPing不可达，跳过")
+            logger.debug(f"  ✗ {ip} | TCP测试失败")
+
+    logger.info(f"\n>>> 步骤3：综合评分排序（v3.0学习算法）")
+    tested_results.sort(key=lambda x: (-x['score'], x['latency']))
+
+    local_count = sum(1 for r in tested_results if 'local' in r['sources'])
+    external_count = len(tested_results) - local_count
+    logger.info(f"  本地池可达 {local_count} 个，外部API可达 {external_count} 个")
+
+    for i, r in enumerate(tested_results[:15]):
+        perf = r['perf']
+        speed_str = f" 速度={r['speed']}" if r['speed'] else ""
+        tag = "[本地]" if 'local' in r['sources'] else "[外部]"
+        test_info = ""
+        if perf:
+            test_info = f" 测试{perf['total_tests']}次 成功率{perf['success_count']}/{perf['total_tests']}"
+        logger.info(f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} 延迟={r['latency']:.1f}ms{speed_str}{test_info}")
+
+    # v3.0 淘汰机制：标记不达标的IP
+    eliminated = []
+    for r in tested_results:
+        elim, reason = should_eliminate_ip(r['perf'])
+        if elim:
+            eliminated.append((r['ip'], reason))
+
+    if eliminated:
+        logger.info(f"\n  淘汰 {len(eliminated)} 个不达标IP:")
+        for ip, reason in eliminated[:5]:
+            logger.info(f"    ✗ {ip} - {reason}")
+
+    valid_ips = [r['ip'] for r in tested_results[:CDN_TOP_IPS_COUNT]]
 
     logger.info(f"\n[数据源状态报告]")
     for source, success in source_status.items():
@@ -463,16 +663,18 @@ def fetch_cdn_ips():
         logger.info(f"\n[OK] 最终优选 {len(valid_ips)} 个IP: {valid_ips}")
         return valid_ips
     else:
-        logger.warning("[WARN] 所有IP均不可达，使用降级IP池前5个")
+        logger.warning("[WARN] 所有IP测试均失败，使用本地池前5个")
         return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT]
 
 
-def source_total_sum(info):
-    return sum(info['source_scores'].values())
-
-
-def rank_total_sum(info):
-    return sum(info['rank_scores'].values())
+def parse_speed(speed_str):
+    """解析速度字符串为数字（mb/s）"""
+    if not speed_str:
+        return 0
+    try:
+        return float(str(speed_str).replace('mb/s', '').strip())
+    except Exception:
+        return 0
 
 
 def assign_and_save_ips(ips):
@@ -521,6 +723,14 @@ def run_once():
 
 
 if __name__ == '__main__':
+    LOCK_FILE = '/tmp/cdn_monitor.lock'
+    lock_fd = open(LOCK_FILE, 'w')
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print(f"cdn_monitor已在运行，退出 (lock: {LOCK_FILE})")
+        sys.exit(0)
+
     init_db()
     while True:
         try:

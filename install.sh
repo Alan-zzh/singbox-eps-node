@@ -561,9 +561,12 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/singbox run -c ${BASE_DIR}/config.json
+ExecStartPre=/bin/bash -c 'test -f ${BASE_DIR}/config.json || python3 ${BASE_DIR}/scripts/config_generator.py'
+ExecStart=/usr/local/bin/sing-box run -c ${BASE_DIR}/config.json
 Restart=on-failure
-RestartSec=5
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
 LimitNOFILE=65535
 
 [Install]
@@ -619,12 +622,10 @@ setup_firewall() {
 
 setup_health_check_cron() {
     log_step "配置定时任务..."
+    chmod +x "${BASE_DIR}/scripts/health_check.sh" "${BASE_DIR}/scripts/diagnose.sh" 2>/dev/null || true
     (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
     (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * /usr/bin/python3 ${BASE_DIR}/scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
-    # ⚠️ Bug #31教训：singbox-cdn的time.sleep(3600)会卡住，必须每小时重启一次
-    # 守护进程模式虽然显示active但不再执行后续更新，crontab重启是兜底保障
-    (crontab -l 2>/dev/null | grep -v "singbox-cdn"; echo "0 * * * * systemctl restart singbox-cdn >> ${BASE_DIR}/logs/cdn_restart.log 2>&1") | crontab -
-    log_info "定时任务已配置（健康检查每5分钟 + CDN每小时重启 + 证书续签每月1号凌晨3点）"
+    log_info "定时任务已配置（健康检查每5分钟 + 证书续签每月1号凌晨3点）"
 }
 
 setup_swap_and_optimize() {
@@ -645,9 +646,24 @@ setup_swap_and_optimize() {
     else
         log_info "内存 ${total_mem}MB >= 1GB，无需Swap"
     fi
-    systemctl stop fwupd.service 2>/dev/null || true
-    systemctl disable fwupd.service 2>/dev/null || true
-    systemctl mask fwupd.service 2>/dev/null || true
+    systemctl stop fwupd.service fwupd-refresh.service fwupd-refresh.timer 2>/dev/null || true
+    systemctl disable fwupd.service fwupd-refresh.service fwupd-refresh.timer 2>/dev/null || true
+    systemctl mask fwupd.service fwupd-refresh.service fwupd-refresh.timer 2>/dev/null || true
+    pkill -9 fwupd 2>/dev/null || true
+    for svc in ModemManager udisks2 unattended-upgrades multipathd caddy; do
+        systemctl stop $svc 2>/dev/null || true
+        systemctl disable $svc 2>/dev/null || true
+        systemctl mask $svc 2>/dev/null || true
+    done
+    systemctl stop multipathd.socket 2>/dev/null || true
+    systemctl disable multipathd.socket 2>/dev/null || true
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > /etc/systemd/journald.conf.d/size-limit.conf << 'JEOF'
+[Journal]
+SystemMaxUse=50M
+RuntimeMaxUse=20M
+JEOF
+    systemctl restart systemd-journald 2>/dev/null || true
     if [ ! -f /etc/logrotate.d/singbox ]; then
         cat > /etc/logrotate.d/singbox << 'EOF'
 /var/log/singbox.log {

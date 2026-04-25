@@ -207,12 +207,39 @@ check_disk() {
 }
 
 # ============================================================
+# 0. config.json自愈检查（最关键，必须在服务检查之前）
+# ⚠️ Bug #48教训：config.json被删导致singbox无限重启FATAL
+# 必须在check_services之前执行，否则重启singbox也是白搭
+# ============================================================
+check_config_json() {
+    log "--- config.json自愈检查 ---"
+    if [ -f "$BASE_DIR/config.json" ]; then
+        SIZE=$(stat -c%s "$BASE_DIR/config.json" 2>/dev/null || echo "0")
+        if [ "$SIZE" -gt 100 ]; then
+            log "  config.json: ✅ 存在 (${SIZE}字节)"
+            return 0
+        fi
+    fi
+    log "  config.json: ❌ 不存在或为空，自动重新生成..."
+    cd "$BASE_DIR" && python3 scripts/config_generator.py >> "$LOG_FILE" 2>&1
+    if [ -f "$BASE_DIR/config.json" ]; then
+        SIZE=$(stat -c%s "$BASE_DIR/config.json" 2>/dev/null || echo "0")
+        log "  config.json: ✅ 已恢复 (${SIZE}字节)"
+        # config.json恢复后需要重启singbox才能生效
+        systemctl restart singbox 2>/dev/null || true
+    else
+        log "  config.json: ❌ 自动生成失败，需要人工介入"
+    fi
+}
+
+# ============================================================
 # 主流程
 # ============================================================
 log "=========================================="
 log "singbox-eps-node 健康检查开始"
 log "=========================================="
 
+check_config_json
 check_port_integrity
 check_services
 check_ports

@@ -236,6 +236,27 @@
   - 最终流量走向由route.final规则控制，DNS不需要提前绕代理
   - DNS查询走代理会增加额外延迟，导致所有域名解析都变慢
 
+### Bug #43: CDN外部API高分IP实际延迟高（50-68ms），理论优选≠实际最优
+- **版本**: v2.0.0 → v2.2.0
+- **日期**: 2026-04-25
+- **现象**: CDN优选IP返回的外部API高分IP（如162.159.39.178/172.64.52.132）实际延迟50-68ms，而用户本地手动测试的低延迟IP（如162.159.38.60延迟35ms）反而被评分系统忽略。外部API返回的是中国用户测试结果，但日本服务器实际连接延迟差异大
+- **根因**: 
+  1. 评分系统依赖外部API的排名和IP段前缀打分，但这些都是"理论值"，不反映真实链路质量
+  2. IP段前缀固定加分（162.159段+10分），但同段内IP实际表现差异巨大
+  3. 本地池IP评分只有0分，被外部API的高分IP覆盖
+  4. 服务器端tcping测试所有CF IP都是1-2ms，无法区分实际延迟
+- **修复**:
+  1. cdn_monitor.py重构为混合模式：外部API只收集候选IP → HTTP真实延迟测试 → 按延迟排序
+  2. 新增http_latency_test()函数，对所有候选IP发送HTTPS请求测真实响应时间
+  3. 排序规则改为：延迟优先（升序），速度次之
+  4. 外部API统一降权（各5分），本地池同样5分，不再按来源给高分
+  5. config.py本地池更新为用户实测最优IP（108.162.198.57等7个新IP，速度>60mb/s）
+  6. 移除IP_PREFIX_SCORE中的162.159/108.162固定加分，仅保留104段降权（-10分）
+- **预防**: 
+  - CDN优选IP必须以真实HTTP延迟测试为准，外部API仅提供候选IP，不直接给高分
+  - IP段前缀不再作为判断标准，真实表现才是唯一标准
+  - 用户本地测试数据必须优先于外部API数据
+
 ### Bug #28: AI规则包含google.com导致延迟测试走SOCKS5（360ms）
 - **版本**: v1.0.80 → v1.0.82
 - **日期**: 2026-04-23
@@ -439,7 +460,144 @@
 - IPDB(5分)：大量104段+不按运营商分类
 - 本地池(0分)：兜底，可能过时
 
+### Bug #44: CDN评分依赖理论值不反映真实表现，IP段前缀判断规则狭隘
+- **版本**: v2.2.0 → v3.0.0
+- **日期**: 2026-04-25
+- **现象**: CDN评分系统依赖外部API排名+IP段前缀打分（如162.159段固定+10分），但同段内IP实际表现差异巨大。理论高分IP（如162.159.39.178延迟50-68ms）用户本地实测速度不行，而用户手动测试的好IP反而评分低。IP段判断逻辑反复调整不稳定，今天改明天改
+- **根因**: 
+  1. 评分系统依赖"理论值"（外部API排名+IP段前缀），不反映真实链路质量
+  2. 没有历史数据积累机制，每次重新评分，无法做长期趋势分析
+  3. 没有淘汰机制，不好的IP永远在候选池里竞争
+  4. 用户无法手动标记不想要的IP
+- **修复**:
+  1. 重构为v3.0学习系统：IP性能数据库+综合评分+自动淘汰+用户投喂
+  2. 新增ip_performance表：记录每个IP的历史延迟/成功率/连续失败次数
+  3. 综合评分算法：平均延迟40% + 成功率30% + 稳定性20% + 新鲜度10%
+  4. 自动淘汰机制：连续5次失败降权，连续3天不达标移出优选池
+  5. 黑名单机制：用户手动标记不好的IP直接跳过
+  6. 用户投喂通道：config.py的IP池作为候选池，脚本自动验证后入库
+  7. 不再依赖IP段前缀打分，完全基于历史表现数据
+- **预防**: 
+  - CDN优选IP必须基于历史表现数据做综合评分，不能依赖IP段前缀
+  - 学习系统必须记录每个IP的性能历史，越用越准
+  - 用户投喂+自动验证+自动淘汰，形成持续优化闭环
+
+### Bug #45: health_check.sh无执行权限导致健康检查完全失效
+- **版本**: v3.0.0 → v3.0.1
+- **日期**: 2026-04-26
+- **现象**: 健康检查crontab每5分钟执行一次，但每次都报Permission denied。服务挂了不会自动恢复，singbox凌晨重启46次无人救
+- **根因**: install.sh的setup_health_check_cron()只添加了crontab条目，没有给health_check.sh加chmod +x执行权限。Git上传的文件默认没有执行权限
+- **修复**: 
+  1. 服务器: `chmod +x health_check.sh diagnose.sh`
+  2. install.sh: setup_health_check_cron()开头添加 `chmod +x "${BASE_DIR}/scripts/health_check.sh" "${BASE_DIR}/scripts/diagnose.sh"`
+- **预防**: 安装脚本添加crontab前必须先chmod +x，Git上传的脚本文件默认无执行权限
+
+### Bug #46: fwupd-refresh.timer未禁用导致fwupd反复重启触发OOM
+- **版本**: v3.0.0 → v3.0.1
+- **日期**: 2026-04-26
+- **现象**: Bug #39修复时只mask了fwupd.service，漏了fwupd-refresh.timer。timer定期触发fwupd-refresh.service，后者又拉起fwupd，fwupd占用144MB内存触发OOM killer
+- **根因**: fwupd-refresh.timer是fwupd的定时触发器，mask service不等于mask timer。timer到时间会重新拉起service
+- **修复**: 
+  1. `systemctl stop fwupd-refresh.timer`
+  2. `systemctl mask fwupd-refresh.timer`
+  3. `pkill -9 fwupd`
+- **预防**: 禁用服务时必须同时禁用其timer，否则timer会重新拉起service。systemctl mask要覆盖service+timer
+
+### Bug #47: api.vvhan.com域名DNS失效(NXDOMAIN)，CDN最高可信度数据源不可用
+- **版本**: v3.0.0 → v3.0.1
+- **日期**: 2026-04-26
+- **现象**: cdn_monitor.py每小时报错"vvhan电信API获取失败: Name or service not known"。vvhan.com主域名可解析，但api.vvhan.com子域名返回NXDOMAIN
+- **根因**: vvhan API的DNS记录被删除或域名配置变更，api.vvhan.com不再存在
+- **修复**: cdn_monitor.py已有try/except降级处理，vvhan失败时自动降级到090227/001315/WeTest/IPDB/本地池。无需代码修改，记录此问题供参考
+- **预防**: 外部API随时可能失效，必须有降级方案。当前5个数据源+本地池的冗余设计是正确的
+
+### Bug #48: singbox凌晨因config.json不存在重启46次，服务长时间不可用
+- **版本**: v3.0.0 → v3.0.1
+- **日期**: 2026-04-26
+- **现象**: 4月25日凌晨01:25，singbox连续重启46次（约5分钟），日志显示"FATAL: open config.json: no such file or directory"
+- **根因**: config.json被删除或未生成。可能是cert_manager.py续签或某次部署操作误删了config.json。由于health_check.sh无执行权限（Bug #45），没有自动恢复机制
+- **修复**: 
+  1. 重新运行config_generator.py生成config.json
+  2. 重启所有服务
+  3. 修复health_check.sh权限（Bug #45），确保自动恢复
+- **预防**: 
+  - config.json被删时health_check应能自动重新生成
+  - health_check.sh必须有执行权限
+  - 部署操作后必须验证config.json存在
+
+### Bug #49: Windows CRLF换行符导致上传的shell脚本无法执行
+- **版本**: v3.0.1
+- **日期**: 2026-04-26
+- **现象**: 从Windows上传health_check.sh到Linux后报"cannot execute: required file not found"，脚本有+x权限但无法执行
+- **根因**: Windows编辑器保存文件时使用CRLF(\r\n)换行符，Linux bash解释器把\r当成命令的一部分，导致#!/bin/bash\r无法匹配到解释器
+- **修复**: `sed -i 's/\r$//' file.sh` 转换换行符
+- **预防**: 
+  - 上传shell脚本到Linux后必须执行`sed -i 's/\r$//'`转换换行符
+  - 或在SFTP上传时使用binary模式并确保本地文件是LF换行
+  - install.sh部署流程中应加入自动换行符转换
+
+### Bug #50: systemd ExecStartPre中cd命令路径解析错误
+- **版本**: v3.0.1
+- **日期**: 2026-04-26
+- **现象**: singbox.service的ExecStartPre=`cd /root/singbox-eps-node && python3 scripts/config_generator.py`报错"python3: can't open file '//scripts/config_generator.py'"
+- **根因**: systemd中ExecStartPre的bash -c执行cd时，如果cd失败（或WorkingDirectory未设置），相对路径scripts/会解析为//scripts/。systemd不使用shell的当前目录概念
+- **修复**: 改用绝对路径：`python3 /root/singbox-eps-node/scripts/config_generator.py`
+- **预防**: systemd服务文件中所有路径必须使用绝对路径，禁止cd+相对路径的组合
+
 ---
+
+## 自愈机制设计（v3.0.1新增）
+
+### 三层自愈保障
+
+| 层级 | 机制 | 触发条件 | 恢复动作 |
+|------|------|----------|----------|
+| 第1层 | systemd ExecStartPre | singbox启动时config.json不存在 | 自动运行config_generator.py生成 |
+| 第2层 | health_check.sh | 每5分钟crontab检查 | config.json缺失→自动生成+重启singbox |
+| 第3层 | StartLimitBurst=5 | singbox连续崩溃 | 60秒内最多重启5次，防止无限重启 |
+
+### 自愈验证记录（2026-04-26）
+
+| 测试场景 | 操作 | 结果 |
+|----------|------|------|
+| systemd自愈 | 删除config.json → systemctl restart singbox | ✅ config.json自动恢复，singbox正常启动 |
+| health_check自愈 | 删除config.json → 运行health_check.sh | ✅ config.json自动恢复，singbox自动重启 |
+| 启动限速 | config.json持续不存在 | ✅ 60秒内最多重启5次，不再无限循环 |
+
+### Bug #51: cdn_monitor.py进程泄漏，5个孤儿进程浪费80MB内存
+- **版本**: v3.0.1
+- **日期**: 2026-04-26
+- **现象**: 服务器上发现5个cdn_monitor.py进程在运行，只有1个是systemd管理的daemon，其余4个是孤儿进程，总共浪费80MB内存
+- **根因**: 
+  1. crontab中有`0 * * * * systemctl restart singbox-cdn`，每小时重启cdn_monitor服务（Bug #31遗留）
+  2. 手动启动的cdn_monitor进程（`--update`模式）不会被systemd管理，重启服务不会清理它们
+  3. cdn_monitor.py没有进程锁，允许多个实例同时运行
+- **修复**: 
+  1. 删除crontab中每小时重启singbox-cdn的条目（cdn_monitor.py的while True循环已自带定时，无需外部重启）
+  2. 给cdn_monitor.py添加fcntl文件锁，第二个实例启动时检测到锁文件直接退出
+- **预防**: 
+  - 守护进程必须加进程锁（fcntl.flock），防止多实例运行
+  - crontab不应重启已有while True循环的daemon服务
+  - systemd Restart=always已能处理进程崩溃，不需要crontab兜底
+
+### Bug #52: VPS系统服务浪费大量内存(60MB+)
+- **版本**: v3.0.1
+- **日期**: 2026-04-26
+- **现象**: 414MB VPS跑个代理就用了244MB内存，S-UI面板同样功能只需约100MB
+- **根因**: AWS Ubuntu默认安装了大量桌面/VPS不需要的服务：
+  - multipathd: 26MB（多路径存储，VPS不需要）
+  - caddy: 15MB（旧S-UI面板反代，已不用）
+  - amazon-ssm-agent: 13MB（AWS管理代理）
+  - udisksd: 7MB（磁盘管理GUI）
+  - ModemManager: 6MB（调制解调器管理）
+  - polkitd: 6MB（桌面权限管理）
+  - unattended-upgrades: 3.6MB（自动更新）
+  - journald: 18MB（日志无上限增长）
+- **修复**: 
+  1. 禁用所有不必要服务：ModemManager/udisks2/unattended-upgrades/multipathd/caddy
+  2. 限制journald日志大小：SystemMaxUse=50M
+  3. install.sh加入服务禁用步骤，防止下次部署再出现
+- **效果**: 内存从244MB降到181MB，可用内存从169MB升到233MB，Swap从104MB降到19MB
 
 ## Bug 修复历史
 

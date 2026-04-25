@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v2.0.0 | **更新**: 2026-04-25
+**版本**: v3.0.1 | **更新**: 2026-04-26
 
 ---
 
@@ -23,7 +23,7 @@
 |------|------|------|
 | singbox | 443, 8443, 2053, 2083 | 代理内核 |
 | singbox-sub | 2087 | HTTPS订阅（走CDN） |
-| singbox-cdn | - | CDN优选IP监控（每小时，crontab兜底重启） |
+| singbox-cdn | - | CDN优选IP监控（每小时，进程锁防重复启动） |
 
 ### 节点列表
 | 节点 | 地址 | 方式 |
@@ -113,7 +113,7 @@
 - 162.159/108.162段加分（+10分），172.64/173.245/198.41段加分（+8分）
 
 ⚠️ Bug #29教训：WeTest.vip返回104.x.x.x段对中国延迟130ms+，评分系统自动降权
-⚠️ Bug #31教训：time.sleep(3600)会卡住，crontab每小时0分重启singbox-cdn兜底保障
+⚠️ Bug #31教训：~~time.sleep(3600)会卡住，crontab每小时0分重启singbox-cdn兜底保障~~ 已废弃：cdn_monitor.py加进程锁后不再需要crontab重启（Bug #51）
 ⚠️ Bug #41教训：硬过滤IP段导致优质IP被丢弃，必须用评分制替代
 自动同步：cdn_monitor每小时更新IP写入数据库 → subscription_service每次订阅请求实时读取 → 用户更新订阅即可获取最新IP
 
@@ -125,9 +125,21 @@
 - iptables持久化
 
 ### health_check.sh — 健康检查与自动恢复
+- **config.json自愈**（v3.0.1新增）：config.json不存在时自动运行config_generator.py恢复
 - 端口完整性校验、服务状态检查与自动重启
 - 订阅接口可用性检查、防火墙状态检查
 - 证书有效期检查、磁盘空间检查
+
+### 三层自愈机制（v3.0.1新增）
+| 层级 | 机制 | 说明 |
+|------|------|------|
+| 第1层 | systemd ExecStartPre | singbox启动前自动检查config.json，缺失则生成 |
+| 第2层 | health_check.sh | 每5分钟检查config.json+服务状态，异常自动恢复 |
+| 第3层 | StartLimitBurst=5 | singbox连续崩溃时60秒内最多重启5次 |
+
+### cdn_monitor.py — CDN优选IP学习系统
+- 进程锁（v3.0.1新增）：fcntl.flock防止多实例运行导致内存泄漏
+- while True循环自带定时，不需要crontab重启
 
 ### tg_bot.py — Telegram管理机器人
 - 可用命令：/状态 /续签 /订阅 /重启 /优选 /设置住宅 /删除住宅
@@ -605,6 +617,8 @@
 | v1.0.84 | 04-24 | CDN每小时crontab重启兜底+JSUI清理+版本号统一 |
 | v1.0.85 | 04-25 | 修复CDN本地池104段+cert漏重启+UDP端口检查+DB连接泄漏+OOM/Swap+8.39/8.35段 |
 | v2.0.0 | 04-25 | CDN优选IP重构：多源聚合+综合评分排序，新增vvhan API，不再硬过滤IP段，订阅添加subscription-userinfo头 |
+| v3.0.0 | 04-25 | CDN学习系统：IP性能数据库+综合评分+自动淘汰+用户投喂 |
+| v3.0.1 | 04-26 | 三层自愈机制+进程锁防泄漏+VPS内存优化(244MB→181MB)+禁用无用服务 |
 
 ---
 
