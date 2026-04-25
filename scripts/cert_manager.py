@@ -2,7 +2,7 @@
 """
 Singbox 证书管理服务
 Author: Alan
-Version: v1.0.85
+Version: v2.0.0
 Date: 2026-04-20
 功能：
   - 支持 Cloudflare API 申请长期证书

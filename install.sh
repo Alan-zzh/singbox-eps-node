@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v1.0.85
+# 版本: v2.0.0
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -979,7 +979,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v1.0.85${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v2.0.0${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -1027,7 +1027,7 @@ main() {
         "")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v1.0.85${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v2.0.0${NC}"
             echo "=========================================="
             echo ""
             check_root
