@@ -377,10 +377,11 @@ install_singbox() {
     cd /tmp
     wget -q "$SINGBOX_URL" -O singbox.tar.gz
     tar -xzf singbox.tar.gz
-    cp "sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}/sing-box" /usr/local/bin/singbox
-    chmod +x /usr/local/bin/singbox
+    cp "sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}/sing-box" /usr/local/bin/sing-box
+    chmod +x /usr/local/bin/sing-box
+    ln -sf /usr/local/bin/sing-box /usr/local/bin/singbox
     rm -rf singbox.tar.gz "sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}"
-    log_info "Singbox 安装完成: $(singbox version | head -1)"
+    log_info "Singbox 安装完成: $(sing-box version | head -1)"
 }
 
 clone_repo() {
@@ -402,14 +403,8 @@ clone_repo() {
 setup_python_env() {
     log_step "配置Python环境..."
     cd "$BASE_DIR"
-    python3 -m venv venv
-    source venv/bin/activate
-    if [ -f "requirements.txt" ]; then
-        pip install --quiet -r requirements.txt
-    else
-        pip install --quiet flask python-dotenv
-    fi
-    deactivate
+    pip3 install --quiet flask python-dotenv
+    log_info "Python依赖已安装（flask + python-dotenv）"
 }
 
 generate_uuids_and_passwords() {
@@ -542,41 +537,19 @@ EOF
 generate_config() {
     log_step "生成Singbox配置..."
     cd "$BASE_DIR"
-    source venv/bin/activate
     python3 scripts/config_generator.py
-    deactivate
 }
 
 setup_certificate() {
     log_step "配置SSL证书..."
     cd "$BASE_DIR"
-    source venv/bin/activate
-    CF_API=$(python3 -c "
-import os
-from dotenv import load_dotenv
-load_dotenv('.env')
-token = os.getenv('CF_API_TOKEN', '')
-domain = os.getenv('CF_DOMAIN', '')
-print(f'{token}|{domain}')
-")
-    CF_TOKEN=$(echo "$CF_API" | cut -d'|' -f1)
-    CF_DOM=$(echo "$CF_API" | cut -d'|' -f2)
-    if [ -n "$CF_TOKEN" ] && [ -n "$CF_DOM" ]; then
-        log_info "检测到CF_API_TOKEN和CF_DOMAIN，尝试申请Cloudflare证书..."
-        python3 scripts/cert_manager.py --cf-cert || python3 scripts/cert_manager.py
-    else
-        log_info "未配置CF_API_TOKEN，使用自签名证书..."
-        python3 scripts/cert_manager.py
-    fi
-    deactivate
+    python3 scripts/cert_manager.py --cf-cert || python3 scripts/cert_manager.py
 }
 
 setup_port_hopping() {
     log_step "设置Hysteria2端口跳跃规则 (21000-21200 → 443, UDP+TCP)..."
     cd "$BASE_DIR"
-    source venv/bin/activate
     python3 scripts/cert_manager.py --setup-iptables
-    deactivate
 }
 
 create_systemd_services() {
@@ -604,26 +577,28 @@ After=network.target singbox.service
 [Service]
 Type=simple
 WorkingDirectory=${BASE_DIR}
-ExecStart=${BASE_DIR}/venv/bin/python3 scripts/subscription_service.py
-Restart=on-failure
+ExecStart=/usr/bin/python3 ${BASE_DIR}/scripts/subscription_service.py
+Restart=always
 RestartSec=5
-LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
     cat > /etc/systemd/system/singbox-cdn.service << EOF
 [Unit]
-Description=Singbox CDN Monitor Service (4级降级保障)
+Description=Singbox CDN Monitor Service (多源聚合评分排序)
 After=network.target singbox.service
 
 [Service]
 Type=simple
 WorkingDirectory=${BASE_DIR}
-ExecStart=${BASE_DIR}/venv/bin/python3 scripts/cdn_monitor.py
-Restart=on-failure
+ExecStart=/usr/bin/python3 ${BASE_DIR}/scripts/cdn_monitor.py --daemon
+Restart=always
 RestartSec=5
-LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -645,7 +620,7 @@ setup_firewall() {
 setup_health_check_cron() {
     log_step "配置定时任务..."
     (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
-    (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * cd ${BASE_DIR} && venv/bin/python3 scripts/cert_manager.py --renew >> ${BASE_DIR}/logs/cert_renew.log 2>&1") | crontab -
+    (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * /usr/bin/python3 ${BASE_DIR}/scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
     # ⚠️ Bug #31教训：singbox-cdn的time.sleep(3600)会卡住，必须每小时重启一次
     # 守护进程模式虽然显示active但不再执行后续更新，crontab重启是兜底保障
     (crontab -l 2>/dev/null | grep -v "singbox-cdn"; echo "0 * * * * systemctl restart singbox-cdn >> ${BASE_DIR}/logs/cdn_restart.log 2>&1") | crontab -
@@ -694,16 +669,16 @@ start_services() {
     log_step "启动所有服务..."
     if [ ! -f "${BASE_DIR}/config.json" ]; then
         log_error "config.json 不存在！重新生成..."
-        cd "$BASE_DIR" && source venv/bin/activate && python3 scripts/config_generator.py && deactivate
+        cd "$BASE_DIR" && python3 scripts/config_generator.py
     fi
     if ! python3 -c "import json; json.load(open('${BASE_DIR}/config.json'))" 2>/dev/null; then
         log_error "config.json 语法错误！重新生成..."
-        cd "$BASE_DIR" && source venv/bin/activate && python3 scripts/config_generator.py && deactivate
+        cd "$BASE_DIR" && python3 scripts/config_generator.py
     fi
     CERT_DIR_PATH="${BASE_DIR}/cert"
     if [ ! -f "${CERT_DIR_PATH}/cert.pem" ] && [ ! -f "${CERT_DIR_PATH}/fullchain.pem" ]; then
         log_warn "证书文件缺失，重新生成自签名证书..."
-        cd "$BASE_DIR" && source venv/bin/activate && python3 scripts/cert_manager.py && deactivate
+        cd "$BASE_DIR" && python3 scripts/cert_manager.py
     fi
     systemctl enable singbox singbox-sub singbox-cdn 2>/dev/null || true
     systemctl start singbox
