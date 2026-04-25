@@ -383,10 +383,18 @@
 - 幕后路由，用户无需手动选择
 
 ### 5. 按月流量统计
-- 每次订阅请求自动累加
+- 每次订阅请求自动累加（/sub和/singbox路由均统计）
 - 每月14号自动归零
-- API: `/api/traffic`
+- API: `/api/traffic`（返回JSON）
 - 首页蓝色流量统计区域
+- **subscription-userinfo响应头**（v2.0.0新增，Bug #42修复）：
+  - /sub和/singbox路由的HTTP响应头包含`subscription-userinfo`
+  - 格式：`upload=0; download={bytes_used}; total=-1; expire=0`
+  - 客户端（v2rayN/Clash/Shadowrocket等）通过此头显示流量信息
+  - upload=0：上传流量不统计
+  - download={bytes_used}：当月已用下载流量（字节）
+  - total=-1：总流量不限
+  - expire=0：永不过期
 
 ### 6. SSL证书
 - 优先级: fullchain.pem > cert.pem
@@ -596,7 +604,7 @@
 | v1.0.75 | 04-22 | CAKE模块主动安装+FQ-PIE实际应用到网卡+精确诊断 |
 | v1.0.84 | 04-24 | CDN每小时crontab重启兜底+JSUI清理+版本号统一 |
 | v1.0.85 | 04-25 | 修复CDN本地池104段+cert漏重启+UDP端口检查+DB连接泄漏+OOM/Swap+8.39/8.35段 |
-| v2.0.0 | 04-25 | CDN优选IP重构：多源聚合+综合评分排序，新增vvhan API，不再硬过滤IP段 |
+| v2.0.0 | 04-25 | CDN优选IP重构：多源聚合+综合评分排序，新增vvhan API，不再硬过滤IP段，订阅添加subscription-userinfo头 |
 
 ---
 

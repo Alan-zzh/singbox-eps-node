@@ -386,6 +386,21 @@
   6. 数据源可信度权重：vvhan(30) > 090227(25) > 001315(15) > WeTest(10) > IPDB(5) > 本地池(0)
 - **预防**: CDN优选IP判断不能靠单一规则硬过滤，必须多源聚合+综合评分
 
+### Bug #42: 订阅响应缺少subscription-userinfo头，客户端看不到流量统计
+- **版本**: v2.0.0
+- **日期**: 2026-04-25
+- **现象**: 用户更新订阅后在客户端（v2rayN/Clash等）看不到流量统计信息。服务端首页和/api/traffic接口能看到流量数据，但客户端订阅更新时收不到
+- **根因**: subscription_service.py的/sub和/singbox路由只返回了内容（Base64/JSON），没有在HTTP响应头中添加`subscription-userinfo`头。这是代理订阅协议的标准做法：客户端通过读取响应头`subscription-userinfo`来显示流量信息，格式为`upload=0; download=字节数; total=-1; expire=0`
+- **修复**:
+  1. /sub路由：Response添加`headers={'subscription-userinfo': userinfo}`
+  2. /singbox路由：同上
+  3. userinfo格式：`upload=0; download={bytes_used}; total=-1; expire=0`
+     - upload=0：上传流量（本项目不统计上传，固定0）
+     - download={bytes_used}：当月已用下载流量（字节）
+     - total=-1：总流量不限（-1表示无限）
+     - expire=0：永不过期（0表示无限期）
+- **预防**: 订阅响应必须包含subscription-userinfo头，否则客户端无法显示流量统计
+
 ### 数据源调研记录（v2.0.0重构依据，2026-04-25）
 
 > 以下是Bug #41修复过程中对所有CDN优选IP数据源的调研结果。

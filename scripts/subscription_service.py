@@ -880,9 +880,11 @@ def create_app():
                         logger.warning(f"Failed to fetch external sub {sub_url}: {e}")
         sub_text = '\n'.join(links)
         sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
-        # 记录本次请求产生的流量
         update_traffic(len(sub_b64.encode('utf-8')))
-        return Response(sub_b64, mimetype='text/plain')
+        traffic = get_traffic_stats()
+        userinfo = f"upload=0; download={traffic['bytes_used']}; total=-1; expire=0"
+        return Response(sub_b64, mimetype='text/plain',
+                        headers={'subscription-userinfo': userinfo})
 
     @app.route(f'/singbox/{COUNTRY_CODE}')
     @app.route('/singbox')
@@ -892,12 +894,16 @@ def create_app():
         """
         config = generate_singbox_config()
         config_json = json.dumps(config, indent=2, ensure_ascii=False)
-        # 记录本次请求产生的流量
         update_traffic(len(config_json.encode('utf-8')))
+        traffic = get_traffic_stats()
+        userinfo = f"upload=0; download={traffic['bytes_used']}; total=-1; expire=0"
         return Response(
             config_json,
             mimetype='application/json',
-            headers={'Content-Disposition': 'attachment; filename=singbox-config.json'}
+            headers={
+                'Content-Disposition': 'attachment; filename=singbox-config.json',
+                'subscription-userinfo': userinfo
+            }
         )
 
     @app.route('/api/traffic')
