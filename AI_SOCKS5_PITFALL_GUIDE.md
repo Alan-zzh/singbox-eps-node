@@ -1,7 +1,8 @@
 # AI-SOCKS5 路由避坑指南
 
-**版本**: v1.0  
+**版本**: v1.1  
 **创建日期**: 2026-04-25  
+**更新日期**: 2026-04-26  
 **适用范围**: Singbox EPS Node 项目的 AI-SOCKS5 自动路由功能
 
 ---
@@ -96,7 +97,10 @@ AI-SOCKS5 是一个**幕后路由出站**，不是用户可见的代理节点。
   "meta.ai", "openai.org", "chat.openai.com",
   "api.openai.com", "platform.openai.com", "playground.openai.com",
   "generativelanguage.googleapis.com",
-  "gemini.googleusercontent.com"
+  "gemini.googleusercontent.com",
+  "makersuite.google.com",
+  "notebooklm.google.com",
+  "geminicode.app"
 ]
 ```
 
@@ -177,6 +181,17 @@ print(json.dumps(ai[0],indent=2) if ai else 'NO AI RULE')
 4. ❌ 把 AI-SOCKS5 加入 Base64 订阅链接或 ePS-Auto 选择器
 5. ❌ 移除 ai-residential 的 direct 故障转移选项
 6. ❌ 让 DNS 服务器的 detour 指向代理出站
+
+### Bug #8: 遗漏部分 Gemini 相关域名
+**现象**: 用户访问 Gemini 时报异常流量检测 "IP 54.250.149.157 ≠ 206.163.4.241"  
+**根因**: 路由规则中缺少以下 Gemini 相关域名：
+- `makersuite.google.com` - Google AI Studio 旧版域名
+- `notebooklm.google.com` - Google NotebookLM AI 笔记工具
+- `geminicode.app` - Gemini 代码生成工具
+
+这些域名未被 AI 规则匹配，走了 direct 直连（VPS IP: 54.250.149.157），而不是 SOCKS5 住宅代理（206.163.4.241）  
+**修复**: 在 domain_suffix 中添加缺失的 3 个域名  
+**教训**: Google AI 生态有多个子域名，必须全面覆盖，不能只加主域名
 
 ---
 

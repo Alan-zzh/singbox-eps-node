@@ -732,7 +732,10 @@ def generate_singbox_config():
                         "platform.openai.com",
                         "playground.openai.com",
                         "generativelanguage.googleapis.com",
-                        "gemini.googleusercontent.com"
+                        "gemini.googleusercontent.com",
+                        "makersuite.google.com",
+                        "notebooklm.google.com",
+                        "geminicode.app"
                     ],
                     "domain_keyword": [
                         "openai",

@@ -295,7 +295,10 @@ config = {
                 "meta.ai", "openai.org", "chat.openai.com",
                 "api.openai.com", "platform.openai.com", "playground.openai.com",
                 "generativelanguage.googleapis.com",
-                "gemini.googleusercontent.com"
+                "gemini.googleusercontent.com",
+                "makersuite.google.com",
+                "notebooklm.google.com",
+                "geminicode.app"
             ],
             "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio", "chatgpt"],
             "domain": ["gemini.google.com"],
