@@ -634,20 +634,17 @@ def generate_singbox_config():
                     # 私有IP（192.168.x.x, 10.x.x.x, 172.16-31.x.x等）必须直连
                     # 原理：这些是内网地址，走代理没有意义，且可能导致代理节点连接本地服务失败
                 },
-                {
-                    "rule_set": ["geosite-cn", "geoip-cn"],
-                    "outbound": "direct"
-                    # 中国大陆网站和IP → 直连，不消耗代理流量
-                    # 原理：国内网站在国内访问延迟低，不需要绕行VPS
-                    # 注意：geosite-cn（域名匹配）和geoip-cn（IP匹配）是"或"关系，
-                    # 只要满足任一条件就走direct，确保国内流量100%直连
-                },
-                # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，走ePS-Auto正常代理）- 必须放在AI规则之前！
+                # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，走ePS-Auto正常代理）- 必须放在geosite-cn和AI规则之前！
                 # 【Bug #25 路由顺序教训】：
                 # sing-box路由规则是按数组顺序匹配的，第一条匹配到的规则生效！
                 # 如果AI规则在前，x.com/twitter.com/grok.com会先被AI规则匹配（因为它们也是AI相关），
                 # 导致走ai-residential → AI-SOCKS5，但用户其实希望这些网站走普通代理（ePS-Auto）
                 # 正确做法：排除规则必须放在AI规则之前，确保X/groK先被拦截，走ePS-Auto
+                #
+                # 【Bug #29 致命教训 - geosite-cn 拦截 Google 子域名】：
+                # 之前geosite-cn规则在AI规则之前（规则#3），而geosite-cn包含google.com及所有子域名！
+                # gemini.google.com 被 geosite-cn 先匹配，走了 direct 直连，根本没轮到 AI 规则！
+                # 修复：AI规则和排除规则必须放在 geosite-cn 之前，确保 Google AI 子域名被精确匹配。
                 #
                 # 【设计意图】：
                 # X/推特/groK虽然是AI相关（x.ai是Elon Musk的AI，grok是xAI产品），
@@ -675,6 +672,10 @@ def generate_singbox_config():
                     "outbound": "ePS-Auto"
                 },
                 # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
+                # 【Bug #29 致命教训 - geosite-cn 拦截】：
+                # AI规则必须在 geosite-cn 之前！否则 gemini.google.com 等 Google 子域名
+                # 会被 geosite-cn（包含所有 google.* 域名）先匹配，走了 direct 直连！
+                #
                 # 【设计意图】：
                 # OpenAI/Anthropic/Google AI等网站对数据中心IP有严格封锁，
                 # 必须使用住宅IP（residential IP）才能正常访问。
@@ -750,7 +751,18 @@ def generate_singbox_config():
                         "gemini.google.com"
                     ],
                     "outbound": "ai-residential"
-                }
+                },
+                {
+                    "rule_set": ["geosite-cn", "geoip-cn"],
+                    "outbound": "direct"
+                    # 中国大陆网站和IP → 直连，不消耗代理流量
+                    # 原理：国内网站在国内访问延迟低，不需要绕行VPS
+                    # 注意：geosite-cn（域名匹配）和geoip-cn（IP匹配）是"或"关系，
+                    # 只要满足任一条件就走direct，确保国内流量100%直连
+                    # ⚠️ 必须在 AI规则和X/groK排除规则 之后！
+                    # 【Bug #29教训】：geosite-cn包含google.com及所有子域名，
+                    # 如果放在AI规则之前，Gemini等Google AI子域名会被先匹配走direct！
+                },
             ],
             "rule_set": [
                 {
@@ -791,9 +803,9 @@ def generate_singbox_config():
             # 【匹配流程总结】：
             # 1. DNS流量 → dns-out（内部处理）
             # 2. 私有IP → direct（直连）
-            # 3. 中国大陆网站/IP → direct（直连）
-            # 4. X/推特/groK → ePS-Auto（普通代理，排除AI-SOCKS5）
-            # 5. AI网站 → ai-residential → AI-SOCKS5（住宅代理，故障时切direct）
+            # 3. X/推特/groK → ePS-Auto（普通代理，排除AI-SOCKS5）
+            # 4. AI网站 → ai-residential → AI-SOCKS5（住宅代理，故障时切direct）
+            # 5. 中国大陆网站/IP → direct（直连）
             # 6. 其他所有网站 → ePS-Auto（兜底，用户自选节点）
         },
         "experimental": {
