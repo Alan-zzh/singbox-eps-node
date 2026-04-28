@@ -1,6 +1,6 @@
 # AI-SOCKS5 路由避坑指南
 
-**版本**: v1.1  
+**版本**: v1.2  
 **创建日期**: 2026-04-25  
 **更新日期**: 2026-04-26  
 **适用范围**: Singbox EPS Node 项目的 AI-SOCKS5 自动路由功能
@@ -128,8 +128,40 @@ AI-SOCKS5 是一个**幕后路由出站**，不是用户可见的代理节点。
 6. 其他所有网站 → ePS-Auto（兜底，用户自选节点）
 ```
 
-**关键：X/推特/groK 排除规则必须放在 AI 规则之前！**  
+**关键：X/推特/groK 排除规则 + AI 规则必须放在 geosite-cn 之前！**  
 sing-box 按数组顺序匹配，第一条命中的规则生效。
+
+### Bug #9（致命）：geosite-cn 规则在 AI 规则之前，Gemini 被拦截走直连
+**现象**: 用户访问 Gemini 报 "IP 54.250.149.157 ≠ 206.163.4.241"，即使客户端已更新订阅、AI 规则已包含所有 Gemini 域名  
+**根因**: 路由规则顺序错误！`geosite-cn`（中国地理站点规则集，包含 google.com 及所有子域名）在 AI 规则之前：
+
+```
+旧顺序（错误）:
+  #1 dns-out
+  #2 direct (私有IP)
+  #3 direct (geosite-cn + geoip-cn) ← geosite-cn 包含 google.com 及所有子域名！
+  #4 ePS-Auto (X/推特/groK 排除)
+  #5 ai-residential (AI 规则) ← 永远不会被 Gemini 匹配到，因为 #3 先匹配了
+```
+
+gemini.google.com 作为 google.com 的子域名，被 `geosite-cn` 先匹配，走了 direct 直连（VPS IP: 54.250.149.157），根本没轮到 AI 规则！
+
+**修复**: 把 X/推特/groK 排除规则和 AI 规则移到 geosite-cn 之前：
+
+```
+新顺序（正确）:
+  #1 dns-out
+  #2 direct (私有IP)
+  #3 ePS-Auto (X/推特/groK 排除) ← 移到 geosite-cn 之前
+  #4 ai-residential (AI 规则) ← 移到 geosite-cn 之前
+  #5 direct (geosite-cn + geoip-cn) ← 放在最后
+```
+
+**教训**:
+1. **路由规则顺序就是生死线！** 精确规则必须在通用规则之前
+2. `geosite-cn` 是超大域名集合，包含 google.com、facebook.com 等所有主流网站
+3. 任何基于精确域名的特殊路由（如 AI-SOCKS5）都必须放在 geosite-cn 之前
+4. sing-box 不会"智能合并"规则，而是严格按数组顺序逐条匹配
 
 ---
 

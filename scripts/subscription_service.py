@@ -87,6 +87,112 @@ except ImportError:
 
 logger = get_logger('subscription_service')
 
+# ============================================================
+# SOCKS5 代理池 + 健康检测 + 自动容错切换
+# 每次生成订阅时检测所有代理，自动剔除不可用的
+# 如果全部不可用，AI路由降级为普通代理（ePS-Auto）
+# ============================================================
+SOCKS5_POOL = []  # 可用代理列表，每个元素为dict: {server, port, user, pass}
+
+def parse_socks5_pool():
+    """解析代理池配置，返回代理列表"""
+    pool_str = os.getenv('AI_SOCKS5_POOL', '')
+    if not pool_str:
+        # 兼容旧配置：单个代理
+        if AI_SOCKS5_SERVER and AI_SOCKS5_PORT:
+            return [{
+                'server': AI_SOCKS5_SERVER,
+                'port': int(AI_SOCKS5_PORT),
+                'user': AI_SOCKS5_USER or '',
+                'pass': AI_SOCKS5_PASS or ''
+            }]
+        return []
+    result = []
+    for item in pool_str.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split('|')
+        if len(parts) >= 4:
+            result.append({
+                'server': parts[0].strip(),
+                'port': int(parts[1].strip()),
+                'user': parts[2].strip(),
+                'pass': parts[3].strip()
+            })
+    return result
+
+def check_single_socks5(proxy):
+    """检测单个SOCKS5代理是否能正常连接Google
+    返回True表示正常，False表示不可用
+    """
+    import socket as sock_mod
+    try:
+        proxy_host = proxy['server']
+        proxy_port = proxy['port']
+        target_host = "www.google.com"
+        target_port = 443
+        # SOCKS5握手协议
+        s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((proxy_host, proxy_port))
+        # 步骤1: 认证协商
+        s.send(bytes([0x05, 0x02, 0x00, 0x02]))
+        resp = s.recv(2)
+        if len(resp) < 2:
+            s.close()
+            return False
+        # 步骤2: 用户名密码认证
+        if resp[1] == 0x02:
+            if proxy['user'] and proxy['pass']:
+                user_bytes = proxy['user'].encode()
+                pass_bytes = proxy['pass'].encode()
+                auth_pkt = bytes([0x01, len(user_bytes)]) + user_bytes + bytes([len(pass_bytes)]) + pass_bytes
+                s.send(auth_pkt)
+                auth_resp = s.recv(2)
+                if len(auth_resp) < 2 or auth_resp[1] != 0x00:
+                    s.close()
+                    return False
+            else:
+                s.close()
+                return False
+        # 步骤3: 连接目标
+        target_ip = sock_mod.gethostbyname(target_host)
+        host_bytes = bytes([int(x) for x in target_ip.split('.')])
+        conn_pkt = bytes([0x05, 0x01, 0x00, 0x01]) + host_bytes + target_port.to_bytes(2, 'big')
+        s.send(conn_pkt)
+        conn_resp = s.recv(10)
+        s.close()
+        if len(conn_resp) >= 2 and conn_resp[1] == 0x00:
+            return True
+        return False
+    except Exception:
+        return False
+
+def check_socks5_pool():
+    """检测代理池中所有代理，返回可用列表"""
+    global SOCKS5_POOL
+    pool = parse_socks5_pool()
+    if not pool:
+        SOCKS5_POOL = []
+        logger.warning("未配置SOCKS5代理，AI流量将走普通代理")
+        return []
+    available = []
+    for proxy in pool:
+        addr = f"{proxy['server']}:{proxy['port']}"
+        if check_single_socks5(proxy):
+            available.append(proxy)
+            logger.info(f"SOCKS5健康检测通过: {addr}")
+        else:
+            logger.warning(f"SOCKS5健康检测失败: {addr}，已剔除")
+    SOCKS5_POOL = available
+    if not available:
+        logger.warning("所有SOCKS5代理均不可用，AI流量将降级为普通代理")
+    return available
+
+# 启动时检测代理池
+check_socks5_pool()
+
 # ⚠️ 以下变量从环境变量读取，不从config.py导入（config.py不导出这些值）
 # SERVER_IP和CF_DOMAIN优先使用config.py的值（已从.env读取+自动检测）
 # 如果config.py导入失败，降级使用os.getenv
@@ -399,12 +505,6 @@ def generate_singbox_config():
             ],
             "rules": [
                 {
-                    "outbound": "any",
-                    "server": "dns_direct"
-                    # 最高优先级：只要流量走了任何出站（无论代理还是直连），DNS都用国内服务器
-                    # 这是sing-box的内置规则，确保已分类流量的DNS解析走正确路径
-                },
-                {
                     "rule_set": "geosite-cn",
                     "server": "dns_direct"
                     # 中国大陆网站 → 用阿里DoH解析，返回真实国内CDN IP
@@ -416,6 +516,14 @@ def generate_singbox_config():
                     # 非中国大陆网站 → 用Google DNS(tls)解析
                     # 注意：虽然tag叫dns_proxy，但detour是direct，DNS查询本身还是直连
                     # 只是解析结果会被标记为"需要代理"，后续路由规则决定走哪个出站
+                },
+                {
+                    "outbound": "any",
+                    "server": "dns_proxy"
+                    # 兜底规则：未匹配任何规则的域名（如highvcc.vip等小众海外网站）
+                    # 用Google DNS解析，确保海外网站能正常访问
+                    # 【Bug #30 教训】：之前这条规则用dns_direct，导致海外网站通过国内DNS解析
+                    # 可能拿到错误的IP或无法解析，必须用dns_proxy
                 }
             ],
             "rule_set": [
@@ -475,12 +583,12 @@ def generate_singbox_config():
         ] + ([{
                 # ai-residential: 幕后路由出站，AI网站流量自动走此出站
                 # 用户在客户端看不到这个选项，路由规则自动匹配AI域名后走SOCKS5
-                # 故障转移：AI-SOCKS5不可用时自动fallback到direct
+                # 故障转移：所有SOCKS5不可用时自动fallback到direct
                 "type": "selector",
                 "tag": "ai-residential",
-                "outbounds": ["AI-SOCKS5", "direct"],
-                "default": "AI-SOCKS5"
-            }] if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else []) + [
+                "outbounds": [f"AI-SOCKS5-{i+1}" for i in range(len(SOCKS5_POOL))] + ["direct"],
+                "default": "AI-SOCKS5-1"
+            }] if SOCKS5_POOL else []) + [
             {
                 "type": "direct",
                 "tag": "direct"
@@ -608,16 +716,17 @@ def generate_singbox_config():
                 "up_mbps": 100,
                 "down_mbps": 100
             },
-            # AI-SOCKS5 - 从环境变量读取，禁止硬编码凭据
-            {
+            # AI-SOCKS5代理池 - 多代理自动容错切换
+            # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
+        ] + ([{
                 "type": "socks",
-                "tag": "AI-SOCKS5",
-                "server": AI_SOCKS5_SERVER,
-                "server_port": AI_SOCKS5_PORT,
+                "tag": f"AI-SOCKS5-{i+1}",
+                "server": proxy['server'],
+                "server_port": proxy['port'],
                 "version": "5",
-                "username": AI_SOCKS5_USER,
-                "password": AI_SOCKS5_PASS
-            } if AI_SOCKS5_SERVER and AI_SOCKS5_PORT else None
+                "username": proxy['user'],
+                "password": proxy['pass']
+            } for i, proxy in enumerate(SOCKS5_POOL)]) + [
         ],
         "route": {
             "rules": [
@@ -688,24 +797,24 @@ def generate_singbox_config():
                 # 已移除这3个通用域名，只保留AI专用子域名(gemini.google.com等)。
                 #
                 # 【故障转移机制 - Bug #26教训】：
-                # ai-residential selector的outbounds包含["AI-SOCKS5", "direct"]
-                # 当AI-SOCKS5不可用（如住宅代理服务宕机、网络中断）时，
-                # sing-box会自动fallback到direct（从VPS直连出去）
+                # ai-residential selector的outbounds包含["AI-SOCKS5-1", "AI-SOCKS5-2", ..., "direct"]
+                # 当某个SOCKS5代理不可用时，sing-box会自动尝试下一个代理
+                # 如果所有SOCKS5代理均不可用，最终fallback到direct（从VPS直连出去）
                 # 虽然直连可能被AI网站封锁，但至少不会断网，用户仍能看到错误页面
                 # 而不是无限转圈或连接超时
                 #
                 # 【为什么selector而不是直接写outbound】：
                 # selector类型允许后续手动切换（如通过Clash API），
-                # 如果AI-SOCKS5长期故障，管理员可以手动切到direct
+                # 如果某个SOCKS5长期故障，管理员可以手动切到其他代理或direct
                 # 如果是urltest或loadbalance类型，则无法手动干预
                 #
                 # 【Bug #26 故障转移教训】：
                 # 之前ai-residential的outbounds只有["AI-SOCKS5"]，没有direct备选
                 # 当AI-SOCKS5宕机时，所有AI网站流量全部中断，用户无法访问
                 # 修复后加入direct作为第二选项，确保至少不断网
-                # 出站标签ai-residential → AI-SOCKS5节点（故障转移：不可用时自动切direct）
-                # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
-                # 故障转移：AI-SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
+                # 出站标签ai-residential → SOCKS5代理池（故障转移：不可用时自动切direct）
+                # 触发条件：配置了AI_SOCKS5_POOL环境变量
+                # 故障转移：所有SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
                 {
                     "domain_suffix": [
                         "openai.com",
@@ -751,6 +860,58 @@ def generate_singbox_config():
                         "gemini.google.com"
                     ],
                     "outbound": "ai-residential"
+                },
+                # 非 AI 的 Google 域名排除规则：防止 geosite-cn 误匹配走 direct
+                # 【Bug #31 教训】：geosite-cn 包含 google.com 及所有子域名
+                # www.google.com、google.com 等会被 geosite-cn 先匹配走 direct 直连
+                # 但服务器在海外，国内用户通过代理访问时，这些域名应该走代理而非直连
+                # 注意：AI 子域名（gemini.google.com 等）已在上面规则中匹配，不会走到这里
+                {
+                    "domain_suffix": [
+                        "google.com",
+                        "googleapis.com",
+                        "gstatic.com",
+                        "googleusercontent.com",
+                        "googlevideo.com",
+                        "ggpht.com",
+                        "blogger.com",
+                        "blogblog.com",
+                        "blogspot.com",
+                        "ampproject.org",
+                        "android.com",
+                        "chrome.com",
+                        "chromium.org",
+                        "g.co",
+                        "goo.gl",
+                        "google.org",
+                        "googleanalytics.com",
+                        "googleapps.com",
+                        "googlecode.com",
+                        "googledrive.com",
+                        "googleearth.com",
+                        "googlemail.com",
+                        "googlemaps.com",
+                        "googlesource.com",
+                        "googlestore.com",
+                        "googletagmanager.com",
+                        "googletagservices.com",
+                        "googleweblight.com",
+                        "googlezip.net",
+                        "gvt1.com",
+                        "gvt2.com",
+                        "gvt3.com",
+                        "withgoogle.com",
+                        "youtube.com",
+                        "youtu.be",
+                        "ytimg.com",
+                        "google.cn",
+                        "google.com.hk",
+                        "google.com.tw"
+                    ],
+                    "domain_keyword": [
+                        "google"
+                    ],
+                    "outbound": "ePS-Auto"
                 },
                 {
                     "rule_set": ["geosite-cn", "geoip-cn"],

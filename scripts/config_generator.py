@@ -49,6 +49,25 @@ ai_socks5_server = env_vars.get('AI_SOCKS5_SERVER', '')
 ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
 ai_socks5_user = env_vars.get('AI_SOCKS5_USER', '')
 ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
+ai_socks5_pool = env_vars.get('AI_SOCKS5_POOL', '')
+
+# 解析SOCKS5代理池
+def parse_socks5_pool():
+    if not ai_socks5_pool:
+        if ai_socks5_server and ai_socks5_port:
+            return [{'server': ai_socks5_server, 'port': ai_socks5_port, 'user': ai_socks5_user, 'pass': ai_socks5_pass}]
+        return []
+    result = []
+    for item in ai_socks5_pool.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split('|')
+        if len(parts) >= 4:
+            result.append({'server': parts[0].strip(), 'port': parts[1].strip(), 'user': parts[2].strip(), 'pass': parts[3].strip()})
+    return result
+
+socks5_pool = parse_socks5_pool()
 
 # ⚠️ SSL证书路径：优先fullchain.pem（Let's Encrypt/Cloudflare正式证书），降级cert.pem（自签名）
 # cert_manager.py生成cert.pem+key.pem，acme.sh生成fullchain.pem+key.pem
@@ -203,11 +222,11 @@ config = {
         {"type": "direct", "tag": "direct"},
         {"type": "block", "tag": "block"}
     ] + ([{
-        # ⚠️ ai-residential selector：AI网站流量自动路由到住宅代理
+        # ai-residential selector：AI网站流量自动路由到住宅代理池
         # 【故障转移机制 - Bug #26教训】：
-        # outbounds包含["AI-SOCKS5", "direct"]，AI-SOCKS5为默认首选
-        # 当AI-SOCKS5不可用（住宅代理服务宕机、凭据过期、网络中断）时，
-        # sing-box自动fallback到direct，从VPS直连出去
+        # outbounds包含["AI-SOCKS5-1", "AI-SOCKS5-2", ..., "direct"]
+        # 当某个SOCKS5代理不可用时，sing-box自动尝试下一个代理
+        # 如果所有SOCKS5代理均不可用，最终fallback到direct，从VPS直连出去
         # 虽然直连可能被AI网站封锁，但至少不会无限转圈，用户能看到错误页面
         #
         # 【为什么selector而不是urltest】：
@@ -218,23 +237,23 @@ config = {
         # 之前outbounds只有["AI-SOCKS5"]，没有direct备选
         # 住宅代理宕机时所有AI网站流量全部中断，修复后加入direct作为第二选项
         #
-        # ⚠️ AI-SOCKS5是幕后路由出站，不是用户可见节点
+        # AI-SOCKS5是幕后路由出站，不是用户可见节点
         # 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
         # 用户在客户端节点列表中看不到AI-SOCKS5，AI网站流量自动走此出站
-        # 故障转移：AI-SOCKS5不可用时自动fallback到direct
+        # 故障转移：所有SOCKS5不可用时自动fallback到direct
         "type": "selector",
         "tag": "ai-residential",
-        "outbounds": ["AI-SOCKS5", "direct"],
-        "default": "AI-SOCKS5"
-    }, {
+        "outbounds": [f"AI-SOCKS5-{i+1}" for i in range(len(socks5_pool))] + ["direct"],
+        "default": "AI-SOCKS5-1"
+    }] + [{
         "type": "socks",
-        "tag": "AI-SOCKS5",
-        "server": ai_socks5_server,
-        "server_port": int(ai_socks5_port),
+        "tag": f"AI-SOCKS5-{i+1}",
+        "server": proxy['server'],
+        "server_port": int(proxy['port']),
         "version": "5",
-        "username": ai_socks5_user,
-        "password": ai_socks5_pass
-    }] if ai_socks5_server and ai_socks5_port else []),
+        "username": proxy['user'],
+        "password": proxy['pass']
+    } for i, proxy in enumerate(socks5_pool)] if socks5_pool else []),
     "route": {
         "rules": [
             # 【路由规则匹配顺序说明】：
@@ -303,7 +322,7 @@ config = {
             "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio", "chatgpt"],
             "domain": ["gemini.google.com"],
             "outbound": "ai-residential"
-        }] if ai_socks5_server and ai_socks5_port else []),
+        }] if socks5_pool else []),
         "final": "direct"
         # ⚠️ final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
         # 服务端final是direct（VPS在海外，直连即可访问全球网站）
