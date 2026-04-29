@@ -422,6 +422,31 @@
      - expire=0：永不过期（0表示无限期）
 - **预防**: 订阅响应必须包含subscription-userinfo头，否则客户端无法显示流量统计
 
+### Bug #53: 流量统计只显示几KB，用户实际跑的100GB流量没统计
+- **版本**: v3.0.4 → v3.1.1
+- **日期**: 2026-04-29
+- **现象**: 用户跑了一百多个GB流量，但登录首页和订阅看到的流量统计只有几KB
+- **根因分析（三轮排查）**:
+  - **第一轮（错误方案）**: 改用sing-box Clash API (`127.0.0.1:9090/proxies`) 获取流量 → 失败，因为服务端config_generator.py没有experimental.clash_api配置
+  - **第二轮（错误方案）**: 在服务端config_generator.py添加experimental.clash_api → 仍然失败，因为Clash API的/proxies端点不返回download/upload字段，只返回type/name/udp。/connections是SSE流式端点，/traffic也是流式。sing-box 1.10.0编译标签只有with_clash_api，没有with_v2ray_api，所以gRPC StatsService也不可用
+  - **第三轮（正确方案）**: Clash API不返回持久流量统计，重启后计数器归零。sing-box本身不持久化流量统计
+- **最终修复**: 改用iptables内核级计数器（与S-UI和机场面板相同做法）
+  1. `setup_iptables_traffic_counters()` - 在INPUT链中为每个sing-box入站端口(443/8443/2053/2083)添加统计规则，幂等操作
+  2. `get_iptables_traffic_bytes()` - 解析`iptables -L INPUT -v -n -x`输出，提取每条规则的bytes计数器
+  3. `check_and_reset_month()` - 首次升级时初始化iptables_baseline基准值，每月14号更新基准值
+  4. `get_traffic_stats()` - 返回iptables当前计数器值-基准值=当月流量
+  5. 移除旧的update_traffic()（只统计订阅文件大小）和Clash API获取逻辑
+- **部署验证**:
+  - iptables规则已添加: `iptables -L INPUT -v -n -x` 显示4个端口均有计数器
+  - `/api/traffic` 返回正确的当月流量值
+  - `subscription-userinfo` 响应头包含正确的download值
+- **教训**:
+  - 流量统计必须从内核/网络层（iptables/netfilter）获取真实传输数据
+  - Clash API在sing-box中仅用于客户端管理和配置，不提供持久化流量统计
+  - sing-box编译标签决定API能力：with_clash_api≠with_v2ray_api，后者才有StatsService
+  - 任何方案都必须先在目标环境验证，不能假设API端点行为
+- **预防**: 统计代理流量使用iptables内核计数器，持久化、重启不丢失，与S-UI/机场面板一致
+
 ### 数据源调研记录（v2.0.0重构依据，2026-04-25）
 
 > 以下是Bug #41修复过程中对所有CDN优选IP数据源的调研结果。

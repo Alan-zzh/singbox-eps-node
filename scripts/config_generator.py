@@ -324,7 +324,7 @@ config = {
             "outbound": "ai-residential"
         }] if socks5_pool else []),
         "final": "direct"
-        # ⚠️ final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
+        # final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
         # 服务端final是direct（VPS在海外，直连即可访问全球网站）
         # 客户端final是ePS-Auto（用户自选代理节点），两者不能混淆
     }

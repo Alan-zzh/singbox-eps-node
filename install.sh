@@ -558,15 +558,17 @@ create_systemd_services() {
 [Unit]
 Description=Singbox Proxy Service
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStartPre=/bin/bash -c 'test -f ${BASE_DIR}/config.json || python3 ${BASE_DIR}/scripts/config_generator.py'
+Environment=ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
+Environment=ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true
+WorkingDirectory=${BASE_DIR}
 ExecStart=/usr/local/bin/sing-box run -c ${BASE_DIR}/config.json
 Restart=on-failure
 RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=5
 LimitNOFILE=65535
 
 [Install]

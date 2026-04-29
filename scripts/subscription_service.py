@@ -38,6 +38,7 @@ import urllib.request
 import sqlite3
 import random
 import json
+import subprocess
 from datetime import datetime
 import ssl
 
@@ -241,12 +242,69 @@ def init_db():
         if conn:
             conn.close()
 
-def update_traffic(bytes_count):
-    """更新流量统计（按月统计，每月14号自动归零）
-    - 检查月份是否变化，变化则重置
-    - 检查今天是否14号且本月未重置过，是则重置
-    - 累加字节数
+def setup_iptables_traffic_counters():
+    """配置iptables流量计数器（sing-box各入站端口）
+    这是S-UI和机场面板的标准做法：
+    - 在INPUT链中添加针对sing-box各入站端口的统计规则
+    - iptables计数器是内核级别的，持久化、重启不丢失
+    - 端口：443(VLESS-Reality/HY2), 8443(VLESS-WS), 2053(VLESS-HTTPUpgrade), 2083(Trojan-WS)
+    幂等操作：重复调用不会添加重复规则
     """
+    singbox_ports = [443, 8443, 2053, 2083]
+
+    for port in singbox_ports:
+        # 先检查规则是否已存在（幂等）
+        check_cmd = f'iptables -L INPUT -v -n -x | grep -c "dpt:{port}"'
+        ret, out, err = _run_cmd(check_cmd)
+        if ret == 0 and int(out.strip()) > 0:
+            continue  # 规则已存在，跳过
+
+        # 添加TCP统计规则
+        add_cmd = f'iptables -I INPUT 1 -p tcp --dport {port} -j ACCEPT'
+        _run_cmd(add_cmd)
+
+def _run_cmd(cmd):
+    """执行shell命令，返回(exit_code, stdout, stderr)"""
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        return result.returncode, result.stdout, result.stderr
+    except Exception as e:
+        return 1, '', str(e)
+
+def get_iptables_traffic_bytes():
+    """通过iptables获取sing-box各入站端口的总流量（字节）
+    原理：iptables -L INPUT -v -n -x 返回每条规则的packet/byte计数器
+    取所有sing-box端口规则的bytes总和
+    """
+    singbox_ports = [443, 8443, 2053, 2083]
+    total_bytes = 0
+
+    cmd = 'iptables -L INPUT -v -n -x'
+    ret, out, err = _run_cmd(cmd)
+    if ret != 0:
+        logger.warning(f"iptables命令执行失败: {err}")
+        return -1
+
+    for line in out.split('\n'):
+        if 'dpt:' not in line:
+            continue
+        for port in singbox_ports:
+            if f'dpt:{port}' in line:
+                # 行格式: pkts bytes target prot opt in out source destination
+                # 例: 12345 6789012345 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        byte_count = int(parts[1])
+                        total_bytes += byte_count
+                    except (ValueError, IndexError):
+                        pass
+                break
+
+    return total_bytes
+
+def check_and_reset_month():
+    """检查月份是否变化，是则重置流量统计（保留iptables计数器不清零）"""
     now = datetime.now()
     current_month = now.strftime('%Y-%m')
     today_str = now.strftime('%Y-%m-%d')
@@ -256,15 +314,31 @@ def update_traffic(bytes_count):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-
-        # 读取当前统计值
         cursor.execute("SELECT key, value FROM traffic_stats")
         rows = cursor.fetchall()
         stats = {row[0]: row[1] for row in rows}
 
         stored_month = stats.get('current_month', '')
-        stored_bytes = int(stats.get('current_bytes', '0'))
         last_reset = stats.get('last_reset', '')
+        has_baseline = 'iptables_baseline' in stats
+
+        # 首次升级到iptables方案：需要初始化基准值
+        if not has_baseline:
+            iptables_bytes = get_iptables_traffic_bytes()
+            if iptables_bytes >= 0:
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('iptables_baseline', str(iptables_bytes)))
+                logger.info(f"iptables基准值初始化: {iptables_bytes} bytes")
+                # 同时清除旧的current_bytes（旧版本update_traffic写入的订阅文件大小）
+                cursor.execute("DELETE FROM traffic_stats WHERE key='current_bytes'")
+                conn.commit()
+                return  # 初始化完成，不需要重置月份
+            else:
+                # iptables不可用，创建空基准值
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('iptables_baseline', '0'))
+                conn.commit()
+                return
 
         # 判断是否需要重置：月份变了，或者今天是14号且本月还没重置过
         if stored_month != current_month:
@@ -273,28 +347,52 @@ def update_traffic(bytes_count):
             need_reset = True
 
         if need_reset:
-            stored_bytes = 0
             cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
                            ('current_month', current_month))
             cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
                            ('last_reset', today_str))
-
-        # 累加流量
-        new_bytes = stored_bytes + bytes_count
-        cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
-                       ('current_bytes', str(new_bytes)))
-        conn.commit()
+            # 重置月份时，更新iptables计数器基准值
+            iptables_bytes = get_iptables_traffic_bytes()
+            if iptables_bytes >= 0:
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('iptables_baseline', str(iptables_bytes)))
+                logger.info(f"月份重置: {current_month}, iptables基准值: {iptables_bytes} bytes")
+            conn.commit()
     except Exception as e:
-        logger.error(f"流量统计更新失败: {e}")
+        logger.error(f"流量统计重置检查失败: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def get_last_reset_date():
+    """获取上次重置日期"""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM traffic_stats")
+        rows = cursor.fetchall()
+        stats = {row[0]: row[1] for row in rows}
+        return stats.get('last_reset', '')
+    except Exception:
+        return ''
     finally:
         if conn:
             conn.close()
 
 def get_traffic_stats():
-    """获取当月流量统计数据"""
+    """获取当月流量统计数据（通过iptables内核级计数器，持久化、重启不丢失）"""
     now = datetime.now()
     current_month = now.strftime('%Y-%m')
 
+    # 先从数据库检查是否需要重置月份
+    check_and_reset_month()
+
+    # 从iptables获取sing-box各入站端口的总流量
+    iptables_bytes = get_iptables_traffic_bytes()
+
+    # 从数据库读取iptables基准值（上次重置时的计数器值）
+    baseline_bytes = 0
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -304,35 +402,29 @@ def get_traffic_stats():
         stats = {row[0]: row[1] for row in rows}
 
         stored_month = stats.get('current_month', '')
-        stored_bytes = int(stats.get('current_bytes', '0'))
-        last_reset = stats.get('last_reset', '')
-
-        # 如果月份变了但还没被update_traffic触发重置，返回0
-        if stored_month != current_month:
-            stored_bytes = 0
-            last_reset = ''
-
-        return {
-            'month': current_month,
-            'bytes_used': stored_bytes,
-            'mb_used': round(stored_bytes / (1024 * 1024), 2),
-            'gb_used': round(stored_bytes / (1024 * 1024 * 1024), 2),
-            'reset_day': 14,
-            'last_reset': last_reset
-        }
+        if stored_month == current_month:
+            baseline_bytes = int(stats.get('iptables_baseline', '0'))
     except Exception as e:
-        logger.error(f"流量统计读取失败: {e}")
-        return {
-            'month': current_month,
-            'bytes_used': 0,
-            'mb_used': 0.0,
-            'gb_used': 0.0,
-            'reset_day': 14,
-            'last_reset': ''
-        }
+        logger.error(f"流量统计基准值读取失败: {e}")
     finally:
         if conn:
             conn.close()
+
+    # 当月流量 = iptables当前计数器值 - 基准值
+    if iptables_bytes >= 0:
+        bytes_used = max(iptables_bytes - baseline_bytes, 0)
+    else:
+        # iptables不可用时，降级使用数据库缓存
+        bytes_used = 0
+
+    return {
+        'month': current_month,
+        'bytes_used': bytes_used,
+        'mb_used': round(bytes_used / (1024 * 1024), 2),
+        'gb_used': round(bytes_used / (1024 * 1024 * 1024), 2),
+        'reset_day': 14,
+        'last_reset': get_last_reset_date()
+    }
 
 def format_traffic(bytes_count):
     """格式化流量显示：小于1MB显示KB，小于1GB显示MB，大于1GB显示GB"""
@@ -1073,7 +1165,6 @@ def create_app():
                         logger.warning(f"Failed to fetch external sub {sub_url}: {e}")
         sub_text = '\n'.join(links)
         sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
-        update_traffic(len(sub_b64.encode('utf-8')))
         traffic = get_traffic_stats()
         userinfo = f"upload=0; download={traffic['bytes_used']}; total=-1; expire=0"
         return Response(sub_b64, mimetype='text/plain',
@@ -1087,7 +1178,6 @@ def create_app():
         """
         config = generate_singbox_config()
         config_json = json.dumps(config, indent=2, ensure_ascii=False)
-        update_traffic(len(config_json.encode('utf-8')))
         traffic = get_traffic_stats()
         userinfo = f"upload=0; download={traffic['bytes_used']}; total=-1; expire=0"
         return Response(
@@ -1156,6 +1246,13 @@ def create_app():
 
 if __name__ == '__main__':
     init_db()
+
+    # 初始化iptables流量计数器（sing-box各入站端口）
+    try:
+        setup_iptables_traffic_counters()
+        logger.info("iptables流量计数器初始化完成")
+    except Exception as e:
+        logger.warning(f"iptables流量计数器初始化失败: {e}，将使用备用统计方式")
 
     try:
         from config import verify_port_integrity, save_port_lock

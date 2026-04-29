@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v3.0.1 | **更新**: 2026-04-26
+**版本**: v3.1.1 | **更新**: 2026-04-29
 
 ---
 
@@ -394,12 +394,24 @@
 - X/推特/groK排除: 走直连
 - 幕后路由，用户无需手动选择
 
-### 5. 按月流量统计
-- 每次订阅请求自动累加（/sub和/singbox路由均统计）
+### 5. 按月流量统计（v3.1.1重构）
+- **数据来源**: iptables内核级流量计数器（sing-box各入站端口）
+- **统计维度**: 所有sing-box入站端口(443/8443/2053/2083)的TCP流量总和
+- **实现方式**: 
+  1. `setup_iptables_traffic_counters()` - 启动时在INPUT链添加端口统计规则（幂等）
+  2. `get_iptables_traffic_bytes()` - 解析`iptables -L INPUT -v -n -x`提取bytes计数器
+  3. `check_and_reset_month()` - 首次升级初始化iptables_baseline，每月14号更新基准值
+  4. `get_traffic_stats()` - 返回iptables当前值-基准值=当月流量
 - 每月14号自动归零
 - API: `/api/traffic`（返回JSON）
 - 首页蓝色流量统计区域
-- **subscription-userinfo响应头**（v2.0.0新增，Bug #42修复）：
+- **优势**: 内核级计数器，持久化、重启不丢失，与S-UI/机场面板相同做法
+- **Clash API不可用原因**:
+  - sing-box 1.10.0编译标签只有with_clash_api，没有with_v2ray_api
+  - Clash API /proxies端点不返回download/upload字段
+  - /connections和/traffic是SSE流式端点，不适合简单查询
+  - sing-box重启后内存计数器归零，无法持久化
+- **subscription-userinfo响应头**：
   - /sub和/singbox路由的HTTP响应头包含`subscription-userinfo`
   - 格式：`upload=0; download={bytes_used}; total=-1; expire=0`
   - 客户端（v2rayN/Clash/Shadowrocket等）通过此头显示流量信息

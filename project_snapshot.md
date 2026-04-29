@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v3.0.1 | **更新**: 2026-04-26
+**版本**: v3.1.1 | **更新**: 2026-04-29
 
 ---
 
@@ -26,12 +26,13 @@
 - ✅ 不依赖IP段前缀：完全基于历史表现数据，越用越准
 - ✅ SOCKS5 AI路由：13个AI域名走住宅代理，X/推特/groK排除
 - ✅ 故障转移：AI-SOCKS5不可用时自动fallback到direct
-- ✅ HY2端口跳跃：21000-21200→443，UDP+TCP双协议
+- ✅ HY2端口跳跃：14430-14629→443，UDP+TCP双协议
 - ✅ SSL证书：fullchain.pem优先，降级cert.pem
-- ✅ 按月流量统计：SQLite持久化，每月14号归零
+- ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
 - ✅ BBR+FQ+CAKE三合一加速
 - ✅ 旧面板彻底卸载：S-UI/JSUI/x-ui/marzban/3x-ui
 - ✅ 一键诊断脚本：diagnose.sh 14项检查，覆盖服务/端口/证书/防火墙/DNS/CDN等
+- ✅ sing-box 1.13.9 完全兼容
 
 ### CDN优选IP学习系统（v3.0）
 **工作流：**
@@ -125,6 +126,10 @@
 | #50 | v3.0.1 | systemd ExecStartPre中cd+相对路径解析错误 | 改用绝对路径 |
 | #51 | v3.0.1 | cdn_monitor.py进程泄漏，5个孤儿进程浪费80MB | 加进程锁+删crontab重启 |
 | #52 | v3.0.1 | VPS系统服务浪费60MB+内存 | 禁用multipathd/caddy/ModemManager等 |
+| #53 | v3.1.1 | Clash API不返回流量统计，/proxies端点无download/upload字段 | 改用iptables内核级计数器统计入站端口流量 |
+| #54 | v3.1.0 | sing-box 1.13.9 DNS配置不兼容，启动失败 | DNS配置添加final字段，systemd添加ENABLE_DEPRECATED环境变量 |
+| #55 | v3.1.0 | HY2协议连不上，端口跳跃规则缺失 | install.sh防火墙配置添加UDP+TCP双协议端口跳跃 |
+| #56 | v3.1.0 | 一键安装脚本无法在新服务器完整运行 | 修复所有兼容性问题，验证通过 |
 
 ---
 
@@ -157,3 +162,8 @@
 25. systemd服务文件中所有路径必须使用绝对路径，禁止cd+相对路径组合（Bug #50）
 26. 守护进程必须加进程锁（fcntl.flock），防止多实例运行导致内存泄漏（Bug #51）
 27. VPS部署后必须禁用无用系统服务：multipathd/ModemManager/udisks2/caddy/unattended-upgrades（Bug #52）
+28. sing-box 1.13.9 要求DNS配置必须有final字段，否则启动失败。systemd需设置ENABLE_DEPRECATED_LEGACY_DNS_SERVERS和ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER环境变量（Bug #54）
+29. HY2端口跳跃必须配置iptables UDP+TCP双协议规则，否则QUIC协议无法通过端口跳跃连接（Bug #55）
+30. 新服务器一键安装必须完整验证，不能假设脚本能直接跑通，每个版本升级后必须实测（Bug #56）
+31. 部署脚本执行完成后必须删除所有含密码/凭据的临时文件，禁止在本地或远程留存
+32. Clash API /proxies 端点不返回 download/upload 字段，sing-box 1.10.0 无持久流量统计能力。流量统计必须用 iptables 内核级计数器（sing-box 1.13.9 编译标签只有 with_clash_api，没有 with_v2ray_api，所以 gRPC StatsService 也不可用）
