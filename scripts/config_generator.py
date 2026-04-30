@@ -283,27 +283,38 @@ config = {
             "outbound": "direct"
         }, {
             # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
+            # 【Bug #29 致命教训 - geosite-cn 拦截】：
+            # AI规则必须在 geosite-cn 之前！否则 gemini.google.com 等 Google 子域名
+            # 会被 geosite-cn（包含所有 google.* 域名）先匹配，走了 direct 直连！
+            #
             # 【设计意图】：
             # OpenAI/Anthropic/Google AI等网站对数据中心IP有严格封锁，
-            # 必须使用住宅IP才能正常访问，否则会被403/验证码拦截
-            #
-            # 【故障转移机制 - Bug #26教训】：
-            # ai-residential selector的outbounds包含["AI-SOCKS5", "direct"]
-            # 当AI-SOCKS5不可用时自动fallback到direct
-            # 虽然直连可能被AI网站封锁，但至少不会断网
-            #
-            # 【触发条件】：
-            # 仅当配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量时，
-            # 此规则才会被添加到路由规则中（由上面的条件判断控制）
-            # 故障转移：AI-SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
-            # 出站标签ai-residential → AI-SOCKS5节点（故障转移：不可用时自动切direct）
-            # 触发条件：配置了AI_SOCKS5_SERVER和AI_SOCKS5_PORT环境变量
+            # 必须使用住宅IP（residential IP）才能正常访问。
+            # AI-SOCKS5提供住宅代理出口，确保AI网站不会被403/验证码拦截。
             #
             # 【Bug #28 教训 - 延迟测高根因】：
             # 之前包含了google.com/googleapis.com/gstatic.com这3个通用域名，
             # 导致用户v2rayN延迟测试(www.google.com/generate_204)走了AI-SOCKS5住宅代理，
             # 延迟从正常的63ms(ping)+TLS开销飙升到360ms(SOCKS5住宅代理延迟)。
             # 必须只保留AI专用子域名，不能包含通用google域名！
+            #
+            # 【故障转移机制 - Bug #26教训】：
+            # ai-residential selector的outbounds包含["AI-SOCKS5-1", "AI-SOCKS5-2", ..., "direct"]
+            # 当某个SOCKS5代理不可用时，sing-box自动尝试下一个代理
+            # 如果所有SOCKS5代理均不可用，最终fallback到direct（从VPS直连出去）
+            # 虽然直连可能被AI网站封锁，但至少不会断网，用户仍能看到错误页面
+            #
+            # 【为什么selector而不是直接写outbound】：
+            # selector类型允许后续手动切换（如通过Clash API），
+            # 如果某个SOCKS5长期故障，管理员可以手动切到其他代理或direct
+            #
+            # 【Bug #26 故障转移教训】：
+            # 之前ai-residential的outbounds只有["AI-SOCKS5"]，没有direct备选
+            # 当AI-SOCKS5宕机时，所有AI网站流量全部中断，用户无法访问
+            # 修复后加入direct作为第二选项，确保至少不断网
+            # 出站标签ai-residential → SOCKS5代理池（故障转移：不可用时自动切direct）
+            # 触发条件：配置了AI_SOCKS5_POOL环境变量
+            # 故障转移：所有SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
             "domain_suffix": [
                 "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
                 "gemini.google.com", "bard.google.com", "ai.google",
@@ -322,6 +333,55 @@ config = {
             "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio", "chatgpt"],
             "domain": ["gemini.google.com"],
             "outbound": "ai-residential"
+        }, {
+            # 非 AI 的 Google 域名排除规则：防止 geosite-cn 误匹配走 direct
+            # 【Bug #31 教训】：geosite-cn 包含 google.com 及所有子域名
+            # www.google.com、google.com 等会被 geosite-cn 先匹配走 direct 直连
+            # 但服务器在海外，国内用户通过代理访问时，这些域名应该走代理而非直连
+            # 注意：AI 子域名（gemini.google.com 等）已在上面规则中匹配，不会走到这里
+            "domain_suffix": [
+                "google.com",
+                "googleapis.com",
+                "gstatic.com",
+                "googleusercontent.com",
+                "googlevideo.com",
+                "ggpht.com",
+                "blogger.com",
+                "blogblog.com",
+                "blogspot.com",
+                "ampproject.org",
+                "android.com",
+                "chrome.com",
+                "chromium.org",
+                "g.co",
+                "goo.gl",
+                "google.org",
+                "googleanalytics.com",
+                "googleapps.com",
+                "googlecode.com",
+                "googledrive.com",
+                "googleearth.com",
+                "googlemail.com",
+                "googlemaps.com",
+                "googlesource.com",
+                "googlestore.com",
+                "googletagmanager.com",
+                "googletagservices.com",
+                "googleweblight.com",
+                "googlezip.net",
+                "gvt1.com",
+                "gvt2.com",
+                "gvt3.com",
+                "withgoogle.com",
+                "youtube.com",
+                "youtu.be",
+                "ytimg.com",
+                "google.cn",
+                "google.com.hk",
+                "google.com.tw"
+            ],
+            "domain_keyword": ["google"],
+            "outbound": "direct"
         }] if socks5_pool else []),
         "final": "direct"
         # final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
