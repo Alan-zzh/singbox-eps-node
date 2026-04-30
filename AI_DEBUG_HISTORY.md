@@ -786,3 +786,130 @@
 - **现象**: Trojan-WS链接在某些客户端无法使用
 - **根因**: 缺少allowInsecure=1参数
 - **修复**: 添加 insecure=1 和 allowInsecure=1 参数
+
+### Bug #54: config_generator.py 路由规则不完整，缺少 Google 通用域名排除规则
+- **版本**: v3.1.1 → v3.1.2
+- **日期**: 2026-04-30
+- **现象**: 用户访问 Gemini 时显示 IP 不一致（54.250.149.157 ≠ 206.163.4.241），AI 流量没有走 SOCKS5 代理
+- **根因分析**:
+  1. **服务器 config.json 只有 2 条路由规则**：X/推特/groK 排除规则 + AI 域名规则
+  2. **订阅服务 subscription_service.py 生成了 6 条规则**：包含 Google 通用域名排除规则 + geosite-cn 规则
+  3. **config_generator.py 缺少 Google 通用域名排除规则**（39 个域名）
+  4. Gemini 访问时会调用 `accounts.google.com`、`oauth2.googleapis.com` 等 Google API 域名
+  5. 这些域名没有被 AI 规则匹配到，走了 `final: direct` 直连，导致 IP 不一致
+- **关键发现**:
+  - SOCKS5 代理池全部健康检测通过（6 个代理均可连接 Google）
+  - AI 规则包含 29 个域名，覆盖了主要的 AI 网站
+  - 但缺少 Google 通用域名规则，导致部分 Google 子域名走了直连
+  - 服务端 config.json 和订阅服务生成的配置不一致，是长期存在的"暗病"
+- **修复**:
+  1. config_generator.py 添加完整的 3 条路由规则：
+     - 规则 1: X/推特/groK → direct（排除规则，6 个 domain_suffix）
+     - 规则 2: AI 域名 → ai-residential（29 个 domain_suffix + 7 个 domain_keyword）
+     - 规则 3: Google 通用域名 → direct（39 个 domain_suffix + 1 个 domain_keyword）
+  2. 重新生成服务器 config.json 并重启 singbox 服务
+  3. 验证新配置：3 条规则均正确，关键域名全部包含
+- **预防**:
+  - config_generator.py 和 subscription_service.py 的路由规则必须完全一致
+  - 修改 subscription_service.py 时必须同步修改 config_generator.py（规则 12）
+  - 服务端配置生成后必须验证路由规则数量和完整性
+  - AI 规则只包含 AI 专用子域名，不包含通用 google 域名（Bug #28 教训）
+
+---
+
+## 操作避坑指南（新增）
+
+### 1. 修改路由规则时必须同步的文件
+**涉及文件**:
+- `scripts/subscription_service.py` - 订阅服务（客户端配置）
+- `scripts/config_generator.py` - 配置生成器（服务端配置）
+
+**操作步骤**:
+1. 先修改 subscription_service.py 的路由规则
+2. 立即同步修改 config_generator.py 的对应规则
+3. 在服务器上重新生成 config.json：`python3 scripts/config_generator.py`
+4. 重启 singbox 服务：`systemctl restart singbox`
+5. 验证路由规则：检查 config.json 中的 route.rules 数量和域名列表
+
+**可能出现问题**:
+- 只改一个文件忘了另一个 → 服务端和客户端配置不一致 → 部分流量走错路由
+- 修改后没重新生成 config.json → 服务器还在用旧配置
+- 重新生成后没重启服务 → 新配置不生效
+
+### 2. 添加新域名到 AI 规则时的注意事项
+**必须检查**:
+1. 新域名是否已在 subscription_service.py 的 AI 规则中
+2. 新域名是否已在 config_generator.py 的 AI 规则中
+3. 新域名是否会被其他规则先匹配（如 geosite-cn、Google 通用域名规则）
+4. 新域名的出站是否正确（ai-residential 还是 ePS-Auto 还是 direct）
+
+**常见错误**:
+- 添加了 `gemini.google.com` 但没添加 `generativelanguage.googleapis.com` → Gemini 部分功能走错路由
+- 添加了 `googleapis.com` 到 AI 规则 → v2rayN 延迟测试走 SOCKS5，延迟飙升
+- 规则顺序错误 → geosite-cn 先匹配，AI 域名走了 direct
+
+### 3. 服务重启必须覆盖的所有服务
+**相关服务**:
+- `singbox` - 主代理服务
+- `singbox-sub` - 订阅服务
+- `singbox-cdn` - CDN 优选 IP 监控服务
+
+**重启命令**:
+```bash
+systemctl restart singbox singbox-sub singbox-cdn
+```
+
+**可能出现问题**:
+- 只重启 singbox 忘了 singbox-sub → 订阅服务还在用旧配置
+- 只重启 singbox 忘了 singbox-cdn → CDN 监控还在用旧证书
+- 证书续签后必须重启所有三个服务
+
+### 4. GitHub 推送失败的处理
+**常见原因**:
+- 本地网络无法访问 GitHub（连接被重置/超时）
+- 服务器网络也无法访问 GitHub（需要认证）
+
+**解决方案**:
+- 等待网络恢复后重试
+- 或使用代理推送（如果配置了代理）
+- 本地 commit 后等网络恢复再 push
+
+### 5. 配置验证的标准流程
+**验证步骤**:
+1. 检查 config.json 的路由规则数量和内容
+2. 检查 SOCKS5 代理池是否全部健康
+3. 检查 DNS 配置是否正确
+4. 检查服务状态：`systemctl status singbox`
+5. 测试关键域名是否走正确的出站
+
+**验证命令**:
+```bash
+# 检查路由规则
+python3 -c "import json; c=json.load(open('config.json')); print(len(c['route']['rules']))"
+
+# 检查服务状态
+systemctl status singbox --no-pager | head -10
+
+# 检查 SOCKS5 代理
+python3 -c "from subscription_service import SOCKS5_POOL; print(len(SOCKS5_POOL))"
+```
+
+### 6. 域名匹配优先级规则
+**sing-box 路由规则匹配顺序**:
+1. 按数组顺序从上到下匹配，第一条命中的规则生效
+2. domain（精确匹配）> domain_suffix（后缀匹配）> domain_keyword（关键词匹配）
+3. 规则顺序至关重要，优先级高的必须放在前面
+
+**正确顺序**:
+1. DNS 规则
+2. 私有 IP 规则
+3. X/推特/groK 排除规则（走 direct/ePS-Auto）
+4. AI 域名规则（走 ai-residential）
+5. Google 通用域名规则（走 direct/ePS-Auto）
+6. geosite-cn/geoip-cn 规则（走 direct）
+7. final 规则（兜底）
+
+**错误顺序示例**:
+- geosite-cn 在 AI 规则之前 → gemini.google.com 被 geosite-cn 匹配走 direct
+- AI 规则在 X/推特/groK 排除规则之前 → x.com 被 AI 规则匹配走 SOCKS5
+- Google 通用域名规则在 AI 规则之前 → generativelanguage.googleapis.com 被 Google 规则匹配走 direct
