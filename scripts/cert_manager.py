@@ -2,12 +2,18 @@
 """
 Singbox 证书管理服务
 Author: Alan
-Version: v2.0.0
-Date: 2026-04-20
+Version: v3.1.3
+Date: 2026-05-01
 功能：
   - 支持 Cloudflare API 申请长期证书
   - 支持自签证书（备用）
   - 自动续签
+
+v3.1.3修复：
+  - ImportError降级块补全DATA_DIR（防NameError）
+  - restart_singbox改用subprocess替代os.system（超时保护+异常捕获）
+  - iptables规则管理改用subprocess替代os.system/popen（安全+可追溯）
+  - setup_hysteria2_port_hopping优化：批量执行+超时保护
 """
 
 import os
@@ -22,7 +28,7 @@ from urllib.error import URLError
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import CERT_DIR, CF_DOMAIN, CERT_VALIDITY_DAYS, SERVER_IP, BASE_DIR
+    from config import CERT_DIR, CF_DOMAIN, CERT_VALIDITY_DAYS, SERVER_IP, BASE_DIR, DATA_DIR
     from logger import get_logger
 except ImportError:
     def get_logger(name):
@@ -32,6 +38,7 @@ except ImportError:
 
     CERT_DIR = '/root/singbox-eps-node/cert'
     BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
+    DATA_DIR = os.path.join(BASE_DIR, 'data')
     CF_DOMAIN = ''
     CERT_VALIDITY_DAYS = 365
     SERVER_IP = ''
@@ -200,9 +207,11 @@ def check_cert_expiry():
 
 def restart_singbox():
     """重启Singbox和订阅服务"""
-    os.system('systemctl restart singbox')
-    os.system('systemctl restart singbox-sub')
-    os.system('systemctl restart singbox-cdn')
+    for svc in ['singbox', 'singbox-sub', 'singbox-cdn']:
+        try:
+            subprocess.run(['systemctl', 'restart', svc], timeout=30, capture_output=True)
+        except Exception as e:
+            logger.warning(f"重启 {svc} 失败: {e}")
     logger.info("[OK] Singbox 与订阅服务已重启")
 
 def renew_cert():
@@ -221,11 +230,11 @@ def setup_iptables_persistent():
     logger.info(">>> 设置 iptables 持久化...")
 
     try:
-        subprocess.run(['which', 'iptables-persistent'], capture_output=True)
-    except Exception:
+        subprocess.run(['which', 'iptables-persistent'], capture_output=True, check=True)
+    except (Exception, subprocess.CalledProcessError):
         logger.info("安装 iptables-persistent...")
-        os.system('export DEBIAN_FRONTEND=noninteractive && apt-get update -y')
-        os.system('export DEBIAN_FRONTEND=noninteractive && apt-get install -y iptables-persistent')
+        subprocess.run(['bash', '-c', 'export DEBIAN_FRONTEND=noninteractive && apt-get update -y && apt-get install -y iptables-persistent'],
+                       capture_output=True, text=True, timeout=120)
 
     logger.info("[OK] iptables-persistent 已安装")
 
@@ -243,26 +252,38 @@ def setup_hysteria2_port_hopping():
     """
     logger.info(">>> 设置 Hysteria2 端口跳跃规则 (21000-21200 → 443, UDP+TCP)...")
 
-    if os.popen('iptables-save | grep "DNAT.*4433"').read():
-        os.popen('iptables-save | grep -v "DNAT.*4433" | iptables-restore')
-        logger.info("[INFO] 旧规则(→4433)已清理")
+    try:
+        old_rules = subprocess.run(['iptables-save'], capture_output=True, text=True, timeout=10)
+        if 'DNAT' in old_rules.stdout:
+            new_rules = []
+            for line in old_rules.stdout.split('\n'):
+                if 'DNAT' in line and ':443' in line:
+                    continue
+                if 'DNAT' in line and '4433' in line:
+                    continue
+                new_rules.append(line)
+            subprocess.run(['iptables-restore'], input='\n'.join(new_rules), text=True, timeout=10)
+            logger.info("[INFO] 旧端口跳跃规则已清理")
+    except Exception as e:
+        logger.warning(f"清理旧规则失败: {e}")
 
-    if os.popen('iptables-save | grep "DNAT.*:443"').read():
-        os.popen('iptables-save | grep -v "DNAT.*:443" | iptables-restore')
-        logger.info("[INFO] 旧规则(→443)已清理")
-
+    batch_lines = []
     for port in range(21000, 21201):
-        os.system(f'iptables -t nat -A PREROUTING -p udp --dport {port} -j DNAT --to-destination :443')
-        os.system(f'iptables -t nat -A PREROUTING -p tcp --dport {port} -j DNAT --to-destination :443')
+        batch_lines.append(f'iptables -t nat -A PREROUTING -p udp --dport {port} -j DNAT --to-destination :443')
+        batch_lines.append(f'iptables -t nat -A PREROUTING -p tcp --dport {port} -j DNAT --to-destination :443')
+
+    subprocess.run(['bash', '-c', '\n'.join(batch_lines)], capture_output=True, text=True, timeout=60)
 
     logger.info("[OK] 端口跳跃规则已设置 (21000-21200 → 443, UDP+TCP双协议保障)")
 
     setup_iptables_persistent()
 
     logger.info(">>> 保存 iptables 规则...")
-    os.system('debconf-set-selections <<< "iptables-persistent iptables-persistent/autosave_v4 boolean true"')
-    os.system('debconf-set-selections <<< "iptables-persistent iptables-persistent/autosave_v6 boolean true"')
-    os.system('netfilter-persistent save')
+    subprocess.run(['bash', '-c', 'debconf-set-selections <<< "iptables-persistent iptables-persistent/autosave_v4 boolean true"'],
+                   capture_output=True, text=True, timeout=10)
+    subprocess.run(['bash', '-c', 'debconf-set-selections <<< "iptables-persistent iptables-persistent/autosave_v6 boolean true"'],
+                   capture_output=True, text=True, timeout=10)
+    subprocess.run(['netfilter-persistent', 'save'], capture_output=True, text=True, timeout=30)
     logger.info("[OK] iptables 规则已持久化")
 
 if __name__ == "__main__":

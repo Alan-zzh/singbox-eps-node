@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================
 # singbox-eps-node 服务健康检查与自动修复脚本
-# 版本: v2.0.0
-# 日期: 2026-04-21
+# 版本: v3.1.2
+# 日期: 2026-05-01
 # 用途: 启动前检查、定期健康检查、故障自动恢复
 # 部署: 放置在 /root/singbox-eps-node/scripts/health_check.sh
 # Cron: */5 * * * * /root/singbox-eps-node/scripts/health_check.sh >> /root/singbox-eps-node/logs/health_check.log 2>&1
@@ -17,6 +17,45 @@ mkdir -p "$LOG_DIR"
 
 log() {
     echo "[$TIMESTAMP] $1" | tee -a "$LOG_FILE"
+}
+
+# ============================================================
+# 0. config.json自愈检查（最关键，必须在服务检查之前）
+# ⚠️ Bug #48教训：config.json被删导致singbox无限重启FATAL
+# 必须在check_services之前执行，否则重启singbox也是白搭
+# ============================================================
+check_config_json() {
+    log "--- config.json自愈检查 ---"
+    if [ -f "$BASE_DIR/config.json" ]; then
+        SIZE=$(stat -c%s "$BASE_DIR/config.json" 2>/dev/null || echo "0")
+        if [ "$SIZE" -gt 100 ]; then
+            # v3.1.2: 增加JSON语法校验，防止损坏的config.json导致singbox FATAL
+            SYNTAX_OK=$(python3 -c "import json; json.load(open('$BASE_DIR/config.json'))" 2>/dev/null && echo "ok" || echo "fail")
+            if [ "$SYNTAX_OK" = "ok" ]; then
+                log "  config.json: ✅ 存在且语法正确 (${SIZE}字节)"
+                return 0
+            else
+                log "  config.json: ❌ 语法损坏，自动重新生成..."
+                cd "$BASE_DIR" && python3 scripts/config_generator.py >> "$LOG_FILE" 2>&1
+                if [ -f "$BASE_DIR/config.json" ]; then
+                    log "  config.json: ✅ 已恢复"
+                    systemctl restart singbox 2>/dev/null || true
+                else
+                    log "  config.json: ❌ 自动生成失败，需要人工介入"
+                fi
+            fi
+        fi
+    else
+        log "  config.json: ❌ 不存在，自动重新生成..."
+        cd "$BASE_DIR" && python3 scripts/config_generator.py >> "$LOG_FILE" 2>&1
+        if [ -f "$BASE_DIR/config.json" ]; then
+            SIZE=$(stat -c%s "$BASE_DIR/config.json" 2>/dev/null || echo "0")
+            log "  config.json: ✅ 已恢复 (${SIZE}字节)"
+            systemctl restart singbox 2>/dev/null || true
+        else
+            log "  config.json: ❌ 自动生成失败，需要人工介入"
+        fi
+    fi
 }
 
 # ============================================================
@@ -42,48 +81,21 @@ else:
 # ============================================================
 check_services() {
     log "--- 服务状态检查 ---"
-    
-    # singbox主服务
-    if systemctl is-active --quiet singbox; then
-        log "  singbox: ✅ 运行中"
-    else
-        log "  singbox: ❌ 未运行，尝试重启..."
-        systemctl restart singbox
-        sleep 3
-        if systemctl is-active --quiet singbox; then
-            log "  singbox: ✅ 重启成功"
-        else
-            log "  singbox: ❌ 重启失败，需要人工介入"
-        fi
-    fi
 
-    # 订阅服务
-    if systemctl is-active --quiet singbox-sub; then
-        log "  singbox-sub: ✅ 运行中"
-    else
-        log "  singbox-sub: ❌ 未运行，尝试重启..."
-        systemctl restart singbox-sub
-        sleep 3
-        if systemctl is-active --quiet singbox-sub; then
-            log "  singbox-sub: ✅ 重启成功"
+    for svc in singbox singbox-sub singbox-cdn; do
+        if systemctl is-active --quiet "$svc"; then
+            log "  $svc: ✅ 运行中"
         else
-            log "  singbox-sub: ❌ 重启失败，需要人工介入"
+            log "  $svc: ❌ 未运行，尝试重启..."
+            systemctl restart "$svc"
+            sleep 3
+            if systemctl is-active --quiet "$svc"; then
+                log "  $svc: ✅ 重启成功"
+            else
+                log "  $svc: ❌ 重启失败，需要人工介入"
+            fi
         fi
-    fi
-
-    # CDN监控
-    if systemctl is-active --quiet singbox-cdn; then
-        log "  singbox-cdn: ✅ 运行中"
-    else
-        log "  singbox-cdn: ❌ 未运行，尝试重启..."
-        systemctl restart singbox-cdn
-        sleep 3
-        if systemctl is-active --quiet singbox-cdn; then
-            log "  singbox-cdn: ✅ 重启成功"
-        else
-            log "  singbox-cdn: ❌ 重启失败，需要人工介入"
-        fi
-    fi
+    done
 }
 
 # ============================================================
@@ -113,17 +125,18 @@ check_ports() {
 check_subscription() {
     log "--- 订阅接口检查 ---"
 
-    COUNTRY=$(grep "^COUNTRY_CODE=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "US")
+    COUNTRY=$(grep "^COUNTRY_CODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "US")
+    # v3.1.2: 端口从config.py读取，不硬编码2087
+    SUB_PORT=$(python3 -c "import sys; sys.path.insert(0,'$BASE_DIR/scripts'); from config import SUB_PORT; print(SUB_PORT)" 2>/dev/null || echo "2087")
 
-    # 本地进程检查（不验证证书，因为localhost域名不匹配）
-    RESPONSE=$(curl -sk --connect-timeout 5 "https://localhost:2087/sub/${COUNTRY}" 2>&1)
+    RESPONSE=$(curl -sk --connect-timeout 5 "https://localhost:${SUB_PORT}/sub/${COUNTRY}" 2>&1)
     if [ -n "$RESPONSE" ] && [ ${#RESPONSE} -gt 50 ]; then
         log "  订阅接口(本地): ✅ 正常 (返回${#RESPONSE}字节)"
     else
         log "  订阅接口(本地): ❌ 异常，尝试重启订阅服务..."
         systemctl restart singbox-sub
         sleep 5
-        RESPONSE2=$(curl -sk --connect-timeout 5 "https://localhost:2087/sub/${COUNTRY}" 2>&1)
+        RESPONSE2=$(curl -sk --connect-timeout 5 "https://localhost:${SUB_PORT}/sub/${COUNTRY}" 2>&1)
         if [ -n "$RESPONSE2" ] && [ ${#RESPONSE2} -gt 50 ]; then
             log "  订阅接口(本地): ✅ 重启后恢复 (返回${#RESPONSE2}字节)"
         else
@@ -131,10 +144,9 @@ check_subscription() {
         fi
     fi
 
-    # 域名访问检查（验证SSL证书是否匹配，不使用-k，模拟真实客户端）
     CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
     if [ -n "$CF_DOMAIN" ]; then
-        DOMAIN_RESPONSE=$(curl -s --connect-timeout 5 "https://${CF_DOMAIN}:2087/sub/${COUNTRY}" 2>&1)
+        DOMAIN_RESPONSE=$(curl -s --connect-timeout 5 "https://${CF_DOMAIN}:${SUB_PORT}/sub/${COUNTRY}" 2>&1)
         CURL_EXIT=$?
         if [ $CURL_EXIT -eq 0 ] && [ -n "$DOMAIN_RESPONSE" ] && [ ${#DOMAIN_RESPONSE} -gt 50 ]; then
             log "  订阅接口(域名${CF_DOMAIN}): ✅ 证书匹配，正常访问"
@@ -207,28 +219,43 @@ check_disk() {
 }
 
 # ============================================================
-# 0. config.json自愈检查（最关键，必须在服务检查之前）
-# ⚠️ Bug #48教训：config.json被删导致singbox无限重启FATAL
-# 必须在check_services之前执行，否则重启singbox也是白搭
+# 8. Swap检查（Bug #39教训：414MB小内存VPS必须配Swap）
 # ============================================================
-check_config_json() {
-    log "--- config.json自愈检查 ---"
-    if [ -f "$BASE_DIR/config.json" ]; then
-        SIZE=$(stat -c%s "$BASE_DIR/config.json" 2>/dev/null || echo "0")
-        if [ "$SIZE" -gt 100 ]; then
-            log "  config.json: ✅ 存在 (${SIZE}字节)"
-            return 0
-        fi
+check_swap() {
+    log "--- Swap检查 ---"
+    SWAP_TOTAL=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    SWAP_USED=$(free -m 2>/dev/null | awk '/^Swap:/{print $3}')
+    if [ -z "$SWAP_TOTAL" ]; then
+        log "  Swap: ⚠️ 无法读取Swap信息"
+        return
     fi
-    log "  config.json: ❌ 不存在或为空，自动重新生成..."
-    cd "$BASE_DIR" && python3 scripts/config_generator.py >> "$LOG_FILE" 2>&1
-    if [ -f "$BASE_DIR/config.json" ]; then
-        SIZE=$(stat -c%s "$BASE_DIR/config.json" 2>/dev/null || echo "0")
-        log "  config.json: ✅ 已恢复 (${SIZE}字节)"
-        # config.json恢复后需要重启singbox才能生效
-        systemctl restart singbox 2>/dev/null || true
+    if [ "$SWAP_TOTAL" -eq 0 ]; then
+        log "  Swap: ❌ 未配置Swap！小内存VPS必须配Swap防止OOM killer杀进程"
+    elif [ "$SWAP_TOTAL" -lt 1024 ]; then
+        log "  Swap: ⚠️ Swap仅${SWAP_TOTAL}MB，建议至少2GB"
     else
-        log "  config.json: ❌ 自动生成失败，需要人工介入"
+        log "  Swap: ✅ ${SWAP_USED}MB/${SWAP_TOTAL}MB"
+    fi
+}
+
+# ============================================================
+# 9. iptables流量计数器检查（v3.1.1新增）
+# ============================================================
+check_iptables_traffic() {
+    log "--- iptables流量计数器检查 ---"
+    # 检查singbox入站端口的iptables计数器是否存在
+    MISSING_PORTS=""
+    for port in 443 8443 2053 2083; do
+        COUNT=$(iptables -L INPUT -v -n -x 2>/dev/null | grep -c "dpt:$port " || echo "0")
+        if [ "$COUNT" -ge 1 ]; then
+            log "  流量计数器 $port: ✅ 存在"
+        else
+            log "  流量计数器 $port: ❌ 缺失"
+            MISSING_PORTS="$MISSING_PORTS $port"
+        fi
+    done
+    if [ -n "$MISSING_PORTS" ]; then
+        log "  ⚠️ 缺失端口的流量统计不可用，建议运行 subscription_service.py 初始化计数器"
     fi
 }
 
@@ -247,6 +274,8 @@ check_subscription
 check_firewall
 check_cert
 check_disk
+check_swap
+check_iptables_traffic
 
 log "=========================================="
 log "健康检查完成"

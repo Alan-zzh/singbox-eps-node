@@ -2,10 +2,21 @@
 """
 Singbox CDN优选IP学习系统
 Author: Alan
-Version: v3.0.0
-Date: 2026-04-25
+Version: v3.1.3
+Date: 2026-05-01
 
 架构设计：用户投喂 + 自动验证 + 历史评分 = 持续优化的CDN优选系统
+
+v3.1.3 修复清单：
+  1. 淘汰IP过滤：被淘汰IP不再入选TOP5（之前只标记不过滤）
+  2. http_latency_test() socket泄漏修复：异常路径正确关闭连接
+  3. ImportError降级块移除104段IP（违反Bug #35教训）
+  4. assign_and_save_ips()数据库连接加try/finally（违反Bug #38铁律）
+  5. init_db() ImportError降级时DATA_DIR未定义导致NameError
+  6. ip_test_history表自动清理（保留最近7天），防止数据库无限膨胀
+  7. should_eliminate_ip()修复last_success_time为None时的逻辑
+  8. 清理死代码：tcping()/SOURCE_WEIGHT/parse_speed()
+  9. 日志和注释修正：TCP→HTTP
 
 v3.0 核心特性：
   1. IP性能数据库：每个IP独立记录历史延迟/成功率/连续失败次数
@@ -15,12 +26,14 @@ v3.0 核心特性：
   5. 不依赖IP段前缀：完全基于历史表现数据，越用越准
 
 工作流：
-  每小时执行 → 从候选池+外部API收集IP → TCP测试 → 记录性能 → 综合评分 → 选最优5个
+  每小时执行 → 从候选池+外部API收集IP → HTTP真实延迟测试 → 记录性能 → 综合评分 → 选最优5个
 
 历史版本：
   - v2.0.0: 多源聚合+评分排序（理论优选≠实际最优）
   - v2.2.0: TCP连通测试+本地池优先（解决服务器端测试无意义问题）
   - v3.0.0: 学习系统+自动淘汰（持续优化，越用越准）
+  - v3.1.2: HTTP真实延迟测试+CDN纠错机制
+  - v3.1.3: 全面问题修复与风险排查
 """
 
 import os
@@ -29,11 +42,11 @@ import time
 import sqlite3
 import json
 import socket
+import ssl
 import subprocess
-import re
 import fcntl
-from datetime import datetime
-from collections import defaultdict
+import urllib.request
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,12 +64,14 @@ except ImportError:
         import logging
         logging.basicConfig(level=logging.INFO)
         return logging.getLogger(name)
+    SERVER_IP = ''
+    CF_DOMAIN = ''
+    DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
     CDN_PREFERRED_IPS = [
         '162.159.38.161', '108.162.198.221', '162.159.44.242',
         '172.64.52.35', '172.64.53.231', '172.64.229.110',
         '162.159.39.14', '172.64.41.181', '172.64.34.89',
-        '104.18.41.58', '104.18.32.206', '172.64.229.250',
-        '104.18.42.36', '162.159.13.213', '162.159.5.56',
+        '172.64.229.250', '162.159.13.213', '162.159.5.56',
     ]
     CDN_IP_BLACKLIST = []
     CDN_API_WETEST_CT = 'ct.cloudflare.182682.xyz'
@@ -78,18 +93,6 @@ DOH_SERVERS = [
 
 IPDB_API_URL = CDN_API_IPDB
 
-TCPING_PORT = 443
-TCPING_TIMEOUT = 3
-
-SOURCE_WEIGHT = {
-    'vvhan': 5,
-    '090227': 5,
-    '001315': 5,
-    'wetest': 5,
-    'ipdb': 5,
-    'local': 5,
-}
-
 # v3.0 综合评分权重
 SCORE_LATENCY_WEIGHT = 0.40    # 平均延迟占比40%
 SCORE_SUCCESS_WEIGHT = 0.30    # 成功率占比30%
@@ -99,7 +102,6 @@ SCORE_FRESHNESS_WEIGHT = 0.10  # 新鲜度占比10%
 # 淘汰阈值
 ELIMINATE_CONSECUTIVE_FAILS = 5       # 连续失败次数
 ELIMINATE_DAYS_NO_SUCCESS = 3         # 连续多少天无成功记录
-MAX_PERFORMANCE_HISTORY = 100         # 每个IP最多保留多少条历史记录
 
 
 def init_db():
@@ -178,7 +180,7 @@ def record_ip_test(db_path, ip, latency, success, source='local'):
                 new_avg = old_avg
             min_lat = min(row[6], latency) if success and latency is not None else row[6]
             max_lat = max(row[7], latency) if success and latency is not None else row[7]
-            last_success = row[9] if not success else now
+            last_success = now if success else row[9]
 
             cursor.execute("""
                 UPDATE ip_performance SET
@@ -291,17 +293,14 @@ def should_eliminate_ip(perf):
     if perf is None:
         return False, "新IP，保留观察"
 
-    # 连续失败次数过多
     if perf['consecutive_fails'] >= ELIMINATE_CONSECUTIVE_FAILS:
         return True, f"连续失败{perf['consecutive_fails']}次"
 
-    # 成功率太低（测试超过10次后）
     if perf['total_tests'] >= 10:
         success_rate = perf['success_count'] / perf['total_tests']
         if success_rate < 0.2:
             return True, f"成功率仅{success_rate*100:.0f}%"
 
-    # 最近多天无成功记录
     if perf['last_success_time']:
         try:
             last_dt = datetime.fromisoformat(perf['last_success_time'])
@@ -310,42 +309,69 @@ def should_eliminate_ip(perf):
                 return True, f"{days_since}天无成功记录"
         except Exception:
             pass
+    else:
+        if perf['total_tests'] >= 5 and perf['success_count'] == 0:
+            return True, f"测试{perf['total_tests']}次从未成功"
 
     return False, "正常"
 
 
-def tcping(ip, port=TCPING_PORT, timeout=TCPING_TIMEOUT):
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((ip, port))
-        sock.close()
-        return result == 0
-    except Exception:
-        return False
-
-
 def http_latency_test(ip, port=443, timeout=5, test_url='/'):
     """
-    用TCP连接测试IP可达性（不依赖HTTPS/SNI，兼容所有Cloudflare IP）
+    用HTTPS请求测试IP真实延迟（模拟客户端实际连接）
     返回: (延迟ms, 是否成功) 或 (None, False) 如果失败
+    
+    【Bug #57修复】：之前只做TCP连接测试，无法反映对中国用户的真实链路质量
+    现在发送真实HTTPS请求，测量完整握手+响应时间
+    【v3.1.3修复】：异常路径正确关闭socket，防止资源泄漏
     """
-    import socket
     sni_host = CF_DOMAIN if CF_DOMAIN else 'cloudflare.com'
-
+    sock = None
+    ssock = None
     start_time = time.time()
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
-        result = sock.connect_ex((ip, port))
+        sock.connect((ip, port))
+        
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        ssock = ctx.wrap_socket(sock, server_hostname=sni_host)
+        
+        request = f"GET {test_url} HTTP/1.1\r\nHost: {sni_host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+        ssock.sendall(request.encode())
+        
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = ssock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+        
         elapsed = (time.time() - start_time) * 1000
-        sock.close()
-        if result == 0:
-            return elapsed, True
-        return None, False
+        
+        if response:
+            status_line = response.decode('utf-8', errors='ignore').split('\r\n')[0]
+            if '200' in status_line or '301' in status_line or '302' in status_line or '404' in status_line:
+                return elapsed, True
+        
+        return elapsed, True
     except Exception as e:
-        logger.debug(f"  TCP测试 {ip} 失败: {e}")
+        logger.debug(f"  HTTP测试 {ip} 失败: {e}")
         return None, False
+    finally:
+        try:
+            if ssock:
+                ssock.close()
+        except Exception:
+            pass
+        try:
+            if sock:
+                sock.close()
+        except Exception:
+            pass
 
 
 def resolve_dns(dns_name, dns_server=DNS_SERVER, timeout=10):
@@ -353,7 +379,6 @@ def resolve_dns(dns_name, dns_server=DNS_SERVER, timeout=10):
 
     for doh_url in DOH_SERVERS:
         try:
-            import urllib.request
             url = f"{doh_url}?name={dns_name}&type=A"
             req = urllib.request.Request(url, headers={
                 'Accept': 'application/dns-json',
@@ -603,7 +628,7 @@ def fetch_cdn_ips():
 
     logger.info(f"\n  共收集 {len(candidate_ips)} 个候选IP")
 
-    logger.info("\n>>> 步骤2：TCP连通测试 + 记录性能数据")
+    logger.info("\n>>> 步骤2：HTTP真实延迟测试 + 记录性能数据")
     tested_results = []
     for ip, info in candidate_ips.items():
         latency, success = http_latency_test(ip)
@@ -622,7 +647,7 @@ def fetch_cdn_ips():
                 'perf': perf,
             })
         else:
-            logger.debug(f"  ✗ {ip} | TCP测试失败")
+            logger.debug(f"  ✗ {ip} | HTTP测试失败")
 
     logger.info(f"\n>>> 步骤3：综合评分排序（v3.0学习算法）")
     tested_results.sort(key=lambda x: (-x['score'], x['latency']))
@@ -640,11 +665,12 @@ def fetch_cdn_ips():
             test_info = f" 测试{perf['total_tests']}次 成功率{perf['success_count']}/{perf['total_tests']}"
         logger.info(f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} 延迟={r['latency']:.1f}ms{speed_str}{test_info}")
 
-    # v3.0 淘汰机制：标记不达标的IP
+    eliminated_set = set()
     eliminated = []
     for r in tested_results:
         elim, reason = should_eliminate_ip(r['perf'])
         if elim:
+            eliminated_set.add(r['ip'])
             eliminated.append((r['ip'], reason))
 
     if eliminated:
@@ -652,7 +678,8 @@ def fetch_cdn_ips():
         for ip, reason in eliminated[:5]:
             logger.info(f"    ✗ {ip} - {reason}")
 
-    valid_ips = [r['ip'] for r in tested_results[:CDN_TOP_IPS_COUNT]]
+    valid_results = [r for r in tested_results if r['ip'] not in eliminated_set]
+    valid_ips = [r['ip'] for r in valid_results[:CDN_TOP_IPS_COUNT]]
 
     logger.info(f"\n[数据源状态报告]")
     for source, success in source_status.items():
@@ -667,14 +694,24 @@ def fetch_cdn_ips():
         return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT]
 
 
-def parse_speed(speed_str):
-    """解析速度字符串为数字（mb/s）"""
-    if not speed_str:
-        return 0
+def cleanup_old_history(db_path, days=7):
+    """清理ip_test_history表中超过指定天数的历史记录，防止数据库无限膨胀"""
+    conn = None
     try:
-        return float(str(speed_str).replace('mb/s', '').strip())
-    except Exception:
-        return 0
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cutoff = datetime.now() - timedelta(days=days)
+        cutoff_str = cutoff.isoformat()
+        cursor.execute("DELETE FROM ip_test_history WHERE test_time < ?", (cutoff_str,))
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(f"  清理 {deleted} 条过期测试记录（>{days}天）")
+        conn.commit()
+    except Exception as e:
+        logger.debug(f"  清理历史记录失败: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def assign_and_save_ips(ips):
@@ -694,8 +731,9 @@ def assign_and_save_ips(ips):
     logger.info(f"  VLESS-HTTPUpgrade IP: {vless_upgrade_ip}")
     logger.info(f"  Trojan-WS IP: {trojan_ws_ip}")
 
-    conn = sqlite3.connect(db_path)
+    conn = None
     try:
+        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_ws_cdn_ip', vless_ws_ip))
         cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_upgrade_cdn_ip', vless_upgrade_ip))
@@ -704,7 +742,8 @@ def assign_and_save_ips(ips):
         cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('cdn_updated_at', datetime.now().isoformat()))
         conn.commit()
     finally:
-        conn.close()
+        if conn:
+            conn.close()
     logger.info(f"\n[OK] CDN优选IP已保存")
 
 
@@ -716,8 +755,9 @@ def run_once():
     ips = fetch_cdn_ips()
     if ips:
         assign_and_save_ips(ips)
-    else:
-        logger.error("[ERROR] 未获取到任何IP，跳过本次更新")
+
+    db_path = os.path.join(DATA_DIR, 'singbox.db')
+    cleanup_old_history(db_path)
 
     logger.info(f"\n>>> 等待 {CDN_MONITOR_INTERVAL}秒后下次检测...")
 

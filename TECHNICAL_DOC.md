@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v3.1.1 | **更新**: 2026-04-29
+**版本**: v3.1.3 | **更新**: 2026-05-01
 
 ---
 
@@ -86,7 +86,9 @@
 - Base64编码订阅（V2rayN/NekoBox等）
 - sing-box JSON完整配置（含路由规则，rule_set格式）
 - CDN优选IP自动分配（每个协议独立IP）
+- CDN纠错机制：get_cdn_ip_for_protocol()连通性检测，连不上自动回退域名（Bug #57）
 - SOCKS5 AI路由规则（写死的域名列表，X/推特/groK排除）
+- SOCKS5代理检测：check_single_socks5()用socket替换sock_mod，finally确保关闭
 - HY2端口跳跃 hop_ports 字段
 - 按月流量统计（SQLite持久化，每月14号自动归零）
 - /api/traffic JSON接口
@@ -98,7 +100,7 @@
 - 所有路径从config.py的BASE_DIR/CERT_DIR拼接
 - 证书缺失时自动调用cert_manager.py生成自签名证书
 
-### cdn_monitor.py — CDN监控（v2.0.0 多源聚合+评分排序）
+### cdn_monitor.py — CDN优选IP学习系统（v3.1.3）
 1. vvhan API（中国实测，含延迟/速度/数据中心，每15分钟更新，可信度最高）
 2. 090227电信API（中国电信实测，纯162.159段）
 3. 001315电信API（中国电信实测，混合段）
@@ -112,9 +114,20 @@
 - 104段不直接丢弃，但降低权重（-10分）
 - 162.159/108.162段加分（+10分），172.64/173.245/198.41段加分（+8分）
 
+v3.1.2-3.1.3修复：
+- HTTP真实延迟测试：http_latency_test()改为HTTPS请求，测量完整握手+响应时间（Bug #57）
+- 淘汰IP过滤：被淘汰IP不再入选TOP5，之前只标记不过滤（Bug #58）
+- socket泄漏修复：http_latency_test()异常路径正确关闭ssock和sock（Bug #59）
+- ImportError降级块：移除104段IP，补全DATA_DIR/SERVER_IP/CF_DOMAIN（Bug #60）
+- 数据库连接：assign_and_save_ips()加try/finally（Bug #61）
+- 淘汰逻辑：should_eliminate_ip()处理last_success_time为None（Bug #62）
+- 历史清理：cleanup_old_history()保留7天，防止数据库膨胀（Bug #63）
+- 死代码清理：tcping()/SOURCE_WEIGHT/parse_speed()/MAX_PERFORMANCE_HISTORY（Bug #64）
+
 ⚠️ Bug #29教训：WeTest.vip返回104.x.x.x段对中国延迟130ms+，评分系统自动降权
 ⚠️ Bug #31教训：~~time.sleep(3600)会卡住，crontab每小时0分重启singbox-cdn兜底保障~~ 已废弃：cdn_monitor.py加进程锁后不再需要crontab重启（Bug #51）
 ⚠️ Bug #41教训：硬过滤IP段导致优质IP被丢弃，必须用评分制替代
+⚠️ Bug #57教训：CDN优选IP测试必须用真实HTTPS请求，不能用纯TCP连接测试
 自动同步：cdn_monitor每小时更新IP写入数据库 → subscription_service每次订阅请求实时读取 → 用户更新订阅即可获取最新IP
 
 ### cert_manager.py — 证书管理+端口跳跃
@@ -126,9 +139,11 @@
 
 ### health_check.sh — 健康检查与自动恢复
 - **config.json自愈**（v3.0.1新增）：config.json不存在时自动运行config_generator.py恢复
+- **JSON语法校验**（v3.1.3新增）：config.json损坏时自动重新生成
 - 端口完整性校验、服务状态检查与自动重启
-- 订阅接口可用性检查、防火墙状态检查
-- 证书有效期检查、磁盘空间检查
+- 订阅接口可用性检查（从config.py读取SUB_PORT，不再硬编码）
+- 防火墙状态检查、证书有效期检查、磁盘空间检查
+- Swap检查（v3.1.3新增）、iptables流量计数器检查（v3.1.3新增）
 
 ### 三层自愈机制（v3.0.1新增）
 | 层级 | 机制 | 说明 |
@@ -140,9 +155,12 @@
 ### cdn_monitor.py — CDN优选IP学习系统
 - 进程锁（v3.0.1新增）：fcntl.flock防止多实例运行导致内存泄漏
 - while True循环自带定时，不需要crontab重启
+- 测试历史自动清理：cleanup_old_history()保留7天（v3.1.3新增）
 
 ### tg_bot.py — Telegram管理机器人
 - 可用命令：/状态 /续签 /订阅 /重启 /优选 /设置住宅 /删除住宅
+- batch_update_env()批量更新.env，避免多次服务重启（v3.1.3新增）
+- 异常信息写日志不返回用户，Token不打印（v3.1.3安全加固）
 
 ---
 
@@ -631,6 +649,8 @@
 | v2.0.0 | 04-25 | CDN优选IP重构：多源聚合+综合评分排序，新增vvhan API，不再硬过滤IP段，订阅添加subscription-userinfo头 |
 | v3.0.0 | 04-25 | CDN学习系统：IP性能数据库+综合评分+自动淘汰+用户投喂 |
 | v3.0.1 | 04-26 | 三层自愈机制+进程锁防泄漏+VPS内存优化(244MB→181MB)+禁用无用服务 |
+| v3.1.2 | 05-01 | CDN纠错机制+HTTP真实延迟测试+config_generator路由规则补全 |
+| v3.1.3 | 05-01 | 全面问题修复：淘汰IP过滤/socket泄漏/DB连接/历史清理/tg_bot安全加固/health_check增强/diagnose 18项 |
 
 ---
 

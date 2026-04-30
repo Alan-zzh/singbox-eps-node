@@ -2,8 +2,8 @@
 """
 统一配置模块
 Author: Alan
-Version: v2.0.0
-Date: 2026-04-23
+Version: v3.1.2
+Date: 2026-05-01
 功能：集中管理所有配置参数
 
 【⚠️ 端口锁定声明 - 严禁修改】
@@ -266,10 +266,15 @@ def _compute_port_checksum():
 def save_port_lock():
     """保存端口锁定文件（持久化存储）"""
     os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        import subprocess
+        locked_at = subprocess.run(['date', '-Iseconds'], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        locked_at = ''
     lock_data = {
         'ports': LOCKED_PORTS,
         'checksum': _compute_port_checksum(),
-        'locked_at': str(os.popen('date -Iseconds 2>/dev/null || date').read().strip()),
+        'locked_at': locked_at,
         'locked_by': 'config.py v1.0.4',
         'warning': '此文件由系统自动生成，严禁手动修改。修改端口必须通过config.py并重新生成此文件。'
     }

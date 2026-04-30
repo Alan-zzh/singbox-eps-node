@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v3.1.1 | **更新**: 2026-04-29
+**版本**: v3.1.3 | **更新**: 2026-05-01
 
 ---
 
@@ -15,15 +15,18 @@
 
 ### 核心功能
 - ✅ 5个代理协议：VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
-- ✅ CDN优选IP：v3.0学习系统（用户投喂+自动验证+历史评分+自动淘汰）
+- ✅ CDN优选IP：v3.1.3学习系统（用户投喂+自动验证+历史评分+自动淘汰+淘汰过滤+历史清理）
 - ✅ CDN每小时自动更新：cdn_monitor.py while循环 + 进程锁防重复
 - ✅ CDN IP自动同步：cdn_monitor写数据库 → subscription_service实时读取 → 用户更新订阅即可
+- ✅ CDN纠错机制：subscription_service.py启动时检测CDN IP连通性，连不上自动回退到域名兜底（v3.1.2新增）
+- ✅ HTTP真实延迟测试：cdn_monitor.py用HTTPS请求测试真实延迟，不再用纯TCP测试（v3.1.2修复）
 - ✅ IP性能数据库：每个IP独立记录历史延迟/成功率/连续失败次数
 - ✅ 综合评分算法：平均延迟40% + 成功率30% + 稳定性20% + 新鲜度10%
-- ✅ 自动淘汰机制：连续5次失败降权，连续3天不达标移出优选池
+- ✅ 自动淘汰机制：连续5次失败降权，连续3天不达标移出优选池（v3.1.3修复：被淘汰IP不再入选TOP5）
 - ✅ 用户投喂通道：config.py的IP池作为候选池，脚本自动验证后入库
 - ✅ 黑名单机制：用户手动标记不好的IP直接跳过
 - ✅ 不依赖IP段前缀：完全基于历史表现数据，越用越准
+- ✅ 测试历史自动清理：ip_test_history表保留7天，防止数据库无限膨胀（v3.1.3新增）
 - ✅ SOCKS5 AI路由：13个AI域名走住宅代理，X/推特/groK排除
 - ✅ 故障转移：AI-SOCKS5不可用时自动fallback到direct
 - ✅ HY2端口跳跃：14430-14629→443，UDP+TCP双协议
@@ -31,7 +34,7 @@
 - ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
 - ✅ BBR+FQ+CAKE三合一加速
 - ✅ 旧面板彻底卸载：S-UI/JSUI/x-ui/marzban/3x-ui
-- ✅ 一键诊断脚本：diagnose.sh 14项检查，覆盖服务/端口/证书/防火墙/DNS/CDN等
+- ✅ 一键诊断脚本：diagnose.sh 18项检查，覆盖服务/端口/证书/防火墙/DNS/CDN/Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程
 - ✅ sing-box 1.13.9 完全兼容
 
 ### CDN优选IP学习系统（v3.0）
@@ -74,7 +77,7 @@
 ### 定时任务
 | 任务 | 频率 | 说明 |
 |------|------|------|
-| health_check.sh | 每5分钟 | config.json自愈+端口/服务/订阅/防火墙/证书/磁盘 |
+| health_check.sh | 每5分钟 | config.json自愈+端口/服务/订阅/防火墙/证书/磁盘/Swap/iptables流量计数器 |
 | cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签 |
 
 ### 三层自愈机制（v3.0.1新增）
@@ -103,6 +106,13 @@
 
 | Bug# | 版本 | 问题 | 修复 |
 |------|------|------|------|
+| #58 | v3.1.3 | 淘汰IP只标记不过滤，被淘汰IP仍可入选TOP5 | 从tested_results中移除被淘汰IP后再取TOP5 |
+| #59 | v3.1.3 | http_latency_test()异常路径socket泄漏 | finally中关闭ssock和sock |
+| #60 | v3.1.3 | ImportError降级块含104段IP+缺少DATA_DIR/SERVER_IP/CF_DOMAIN | 移除104段IP，补全缺失变量 |
+| #61 | v3.1.3 | assign_and_save_ips()数据库连接无try/finally | conn=None兜底+finally防护关闭 |
+| #62 | v3.1.3 | should_eliminate_ip()中last_success_time为None时跳过检查 | 新增"测试N次从未成功"淘汰规则 |
+| #63 | v3.1.3 | ip_test_history表无清理机制，数据库无限膨胀 | 新增cleanup_old_history()保留7天 |
+| #64 | v3.1.3 | 死代码残留：tcping()/SOURCE_WEIGHT/parse_speed()/MAX_PERFORMANCE_HISTORY | 全部清理 |
 | #28 | v1.0.82 | AI规则含google.com导致延迟高 | 移除通用google域名 |
 | #29 | v1.0.82 | CDN返回104段高延迟 | 001315优先+104段严格过滤 |
 | #30 | v1.0.82 | config_generator与sub不同步 | 两个文件必须同步更新 |
@@ -130,6 +140,15 @@
 | #54 | v3.1.0 | sing-box 1.13.9 DNS配置不兼容，启动失败 | DNS配置添加final字段，systemd添加ENABLE_DEPRECATED环境变量 |
 | #55 | v3.1.0 | HY2协议连不上，端口跳跃规则缺失 | install.sh防火墙配置添加UDP+TCP双协议端口跳跃 |
 | #56 | v3.1.0 | 一键安装脚本无法在新服务器完整运行 | 修复所有兼容性问题，验证通过 |
+| #65 | v3.1.3 | tg_bot.py /重启命令漏重启singbox-sub和singbox-cdn | restart_singbox()改为重启全部3个服务 |
+| #66 | v3.1.3 | tg_bot.py 设置住宅触发12次服务重启(4次×3服务) | 新增batch_update_env()批量更新后只重启1次 |
+| #67 | v3.1.3 | tg_bot.py 异常信息暴露给用户(stderr/exception) | 异常写日志，返回通用错误信息 |
+| #68 | v3.1.3 | tg_bot.py 启动日志泄露Bot Token前缀 | 移除Token打印，仅记录启动事件 |
+| #69 | v3.1.3 | health_check.sh 缺少Swap和iptables流量计数器检查 | 新增check_swap()和check_iptables_traffic() |
+| #70 | v3.1.3 | health_check.sh 订阅检查硬编码端口2087 | 改为从config.py读取SUB_PORT |
+| #71 | v3.1.3 | health_check.sh config.json自愈不校验JSON语法 | 增加JSON语法校验，损坏时自动重新生成 |
+| #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
+| #73 | v3.1.3 | diagnose.sh crontab检查仍要求singbox-cdn重启(Bug#51已废弃) | 改为检测到则提示移除 |
 
 ---
 

@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================
 # singbox-eps-node 一键诊断脚本
-# 版本: v2.0.0
-# 日期: 2026-04-25
-# 用途: 排查"连不上/掉线"问题，14项全面检查
+# 版本: v3.1.2
+# 日期: 2026-05-01
+# 用途: 排查"连不上/掉线"问题，18项全面检查
 # 部署: 放置在 /root/singbox-eps-node/scripts/diagnose.sh
 # 用法: bash /root/singbox-eps-node/scripts/diagnose.sh
 # ============================================================
@@ -22,9 +22,6 @@ WARN_COUNT=0
 FAIL_ITEMS=""
 WARN_ITEMS=""
 
-# ============================================================
-# 状态记录函数
-# ============================================================
 mark_pass() {
     PASS_COUNT=$((PASS_COUNT + 1))
     echo "  ✅ $1"
@@ -49,7 +46,7 @@ mark_warn() {
 check_services() {
     echo ""
     echo "=========================================="
-    echo "【1/14】systemd 服务运行状态"
+    echo "【1/18】systemd 服务运行状态"
     echo "=========================================="
 
     for svc in singbox singbox-sub singbox-cdn; do
@@ -68,7 +65,7 @@ check_services() {
 check_port_listening() {
     echo ""
     echo "=========================================="
-    echo "【2/14】端口监听状态"
+    echo "【2/18】端口监听状态"
     echo "=========================================="
 
     for port in 443 8443 2053 2083 2087; do
@@ -92,7 +89,7 @@ check_port_listening() {
 check_ssl_cert() {
     echo ""
     echo "=========================================="
-    echo "【3/14】SSL 证书有效期和文件完整性"
+    echo "【3/18】SSL 证书有效期和文件完整性"
     echo "=========================================="
 
     if [ ! -d "$CERT_DIR" ]; then
@@ -148,7 +145,7 @@ check_ssl_cert() {
 check_port_hopping() {
     echo ""
     echo "=========================================="
-    echo "【4/14】iptables 端口跳跃规则 (21000-21200→443)"
+    echo "【4/18】iptables 端口跳跃规则 (21000-21200→443)"
     echo "=========================================="
 
     UDP_FIRST=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "DNAT.*udp.*dpt:21000.*to:.*:443")
@@ -175,7 +172,7 @@ check_port_hopping() {
 check_firewall_policy() {
     echo ""
     echo "=========================================="
-    echo "【5/14】防火墙默认策略"
+    echo "【5/18】防火墙默认策略"
     echo "=========================================="
 
     POLICY=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -o 'policy [A-Z]*' | awk '{print $2}')
@@ -192,7 +189,7 @@ check_firewall_policy() {
 check_cdn_database() {
     echo ""
     echo "=========================================="
-    echo "【6/14】CDN 优选IP数据库"
+    echo "【6/18】CDN 优选IP数据库"
     echo "=========================================="
 
     if [ ! -f "$DB_FILE" ]; then
@@ -240,7 +237,7 @@ check_cdn_database() {
 check_config_syntax() {
     echo ""
     echo "=========================================="
-    echo "【7/14】singbox config.json 语法校验"
+    echo "【7/18】singbox config.json 语法校验"
     echo "=========================================="
 
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -262,7 +259,7 @@ check_config_syntax() {
 check_env_variables() {
     echo ""
     echo "=========================================="
-    echo "【8/14】.env 关键变量非空检查"
+    echo "【8/18】.env 关键变量非空检查"
     echo "=========================================="
 
     if [ ! -f "$ENV_FILE" ]; then
@@ -283,12 +280,12 @@ check_env_variables() {
 }
 
 # ============================================================
-# 9. 系统资源
+# 9. 系统资源（内存+Swap+磁盘）
 # ============================================================
 check_system_resources() {
     echo ""
     echo "=========================================="
-    echo "【9/14】系统资源"
+    echo "【9/18】系统资源"
     echo "=========================================="
 
     DISK_USAGE=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
@@ -314,6 +311,19 @@ check_system_resources() {
     else
         mark_warn "无法读取内存信息"
     fi
+
+    # v3.1.2: Swap检查（Bug #39教训）
+    SWAP_TOTAL=$(free -m 2>/dev/null | awk '/^Swap:/{print $2}')
+    SWAP_USED=$(free -m 2>/dev/null | awk '/^Swap:/{print $3}')
+    if [ -z "$SWAP_TOTAL" ]; then
+        mark_warn "无法读取Swap信息"
+    elif [ "$SWAP_TOTAL" -eq 0 ]; then
+        mark_fail "Swap: 未配置！小内存VPS必须配Swap防止OOM killer杀进程" "创建2GB Swap: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+    elif [ "$SWAP_TOTAL" -lt 1024 ]; then
+        mark_warn "Swap仅${SWAP_TOTAL}MB，建议至少2GB"
+    else
+        mark_pass "Swap: ${SWAP_USED}MB/${SWAP_TOTAL}MB"
+    fi
 }
 
 # ============================================================
@@ -322,7 +332,7 @@ check_system_resources() {
 check_singbox_logs() {
     echo ""
     echo "=========================================="
-    echo "【10/14】singbox 日志 ERROR/FATAL (最近1小时)"
+    echo "【10/18】singbox 日志 ERROR/FATAL (最近1小时)"
     echo "=========================================="
 
     if [ ! -f "$LOG_FILE" ]; then
@@ -359,7 +369,7 @@ check_singbox_logs() {
 check_dns_resolution() {
     echo ""
     echo "=========================================="
-    echo "【11/14】DNS 解析测试"
+    echo "【11/18】DNS 解析测试"
     echo "=========================================="
 
     if ! command -v dig &>/dev/null; then
@@ -388,7 +398,7 @@ check_dns_resolution() {
 check_crontab() {
     echo ""
     echo "=========================================="
-    echo "【12/14】crontab 定时任务"
+    echo "【12/18】crontab 定时任务"
     echo "=========================================="
 
     CRON_LIST=$(crontab -l 2>/dev/null)
@@ -400,11 +410,10 @@ check_crontab() {
         mark_fail "health_check.sh 定时任务: 未配置" "添加: (crontab -l 2>/dev/null; echo '*/5 * * * * $BASE_DIR/scripts/health_check.sh >> $BASE_DIR/logs/health_check.log 2>&1') | crontab -"
     fi
 
+    # v3.1.2: 修正crontab检查（Bug #51：singbox-cdn重启crontab已废弃）
+    # cdn_monitor.py有进程锁+while循环，不再需要crontab重启
     if echo "$CRON_LIST" | grep -q "singbox-cdn"; then
-        CRON_LINE=$(echo "$CRON_LIST" | grep "singbox-cdn" | head -1)
-        mark_pass "singbox-cdn 重启定时任务: $CRON_LINE"
-    else
-        mark_fail "singbox-cdn 重启定时任务: 未配置 (CDN更新服务可能卡住)" "添加: (crontab -l 2>/dev/null; echo '0 * * * * systemctl restart singbox-cdn') | crontab -"
+        mark_warn "singbox-cdn 重启crontab仍存在（已废弃，cdn_monitor.py有进程锁，建议移除）" "移除: crontab -l | grep -v 'singbox-cdn' | crontab -"
     fi
 }
 
@@ -414,7 +423,7 @@ check_crontab() {
 check_bbr_qdisc() {
     echo ""
     echo "=========================================="
-    echo "【13/14】BBR/FQ/CAKE qdisc 状态"
+    echo "【13/18】BBR/FQ/CAKE qdisc 状态"
     echo "=========================================="
 
     CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
@@ -454,11 +463,12 @@ check_bbr_qdisc() {
 check_subscription_access() {
     echo ""
     echo "=========================================="
-    echo "【14/14】订阅接口可达性"
+    echo "【14/18】订阅接口可达性"
     echo "=========================================="
 
     COUNTRY=$(grep "^COUNTRY_CODE=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 || echo "US")
-    SUB_URL="https://localhost:2087/sub/${COUNTRY}"
+    SUB_PORT=$(python3 -c "import sys; sys.path.insert(0,'$BASE_DIR/scripts'); from config import SUB_PORT; print(SUB_PORT)" 2>/dev/null || echo "2087")
+    SUB_URL="https://localhost:${SUB_PORT}/sub/${COUNTRY}"
 
     HTTP_CODE=$(curl -sk --connect-timeout 5 -o /dev/null -w "%{http_code}" "$SUB_URL" 2>/dev/null)
     if [ "$HTTP_CODE" = "200" ]; then
@@ -471,7 +481,7 @@ check_subscription_access() {
 
     CF_DOMAIN=$(grep "^CF_DOMAIN=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 | xargs)
     if [ -n "$CF_DOMAIN" ]; then
-        DOMAIN_URL="https://${CF_DOMAIN}:2087/sub/${COUNTRY}"
+        DOMAIN_URL="https://${CF_DOMAIN}:${SUB_PORT}/sub/${COUNTRY}"
         DOMAIN_CODE=$(curl -s --connect-timeout 5 -o /dev/null -w "%{http_code}" "$DOMAIN_URL" 2>/dev/null)
         CURL_EXIT=$?
         if [ "$DOMAIN_CODE" = "200" ]; then
@@ -483,6 +493,151 @@ check_subscription_access() {
         fi
     else
         mark_warn "CF_DOMAIN 未配置，跳过域名访问测试"
+    fi
+}
+
+# ============================================================
+# 15. iptables 流量计数器（v3.1.1新增）
+# ============================================================
+check_iptables_traffic() {
+    echo ""
+    echo "=========================================="
+    echo "【15/18】iptables 流量计数器"
+    echo "=========================================="
+
+    MISSING_PORTS=""
+    for port in 443 8443 2053 2083; do
+        COUNT=$(iptables -L INPUT -v -n -x 2>/dev/null | grep -c "dpt:$port " || echo "0")
+        if [ "$COUNT" -ge 1 ]; then
+            BYTES=$(iptables -L INPUT -v -n -x 2>/dev/null | grep "dpt:$port " | awk '{print $2}' | head -1)
+            mark_pass "流量计数器 TCP $port: 存在 (累计: ${BYTES:-0}字节)"
+        else
+            mark_fail "流量计数器 TCP $port: 缺失" "流量统计不可用，检查 subscription_service.py 是否初始化了iptables规则"
+            MISSING_PORTS="$MISSING_PORTS $port"
+        fi
+    done
+
+    if [ -n "$MISSING_PORTS" ]; then
+        echo "     ⚠️ 缺失端口的流量统计不可用，首页和订阅的流量数据将不准确"
+    fi
+}
+
+# ============================================================
+# 16. 旧面板残留检查（Bug #33教训：卸载必须彻底）
+# ============================================================
+check_old_panels() {
+    echo ""
+    echo "=========================================="
+    echo "【16/18】旧面板残留检查"
+    echo "=========================================="
+
+    FOUND_RESIDUAL=false
+
+    for panel_dir in /usr/local/s-ui /usr/local/x-ui /usr/local/3x-ui /opt/s-ui-manager /usr/local/marzban; do
+        if [ -d "$panel_dir" ]; then
+            mark_warn "旧面板目录残留: $panel_dir" "清理: rm -rf $panel_dir"
+            FOUND_RESIDUAL=true
+        fi
+    done
+
+    for panel_svc in s-ui x-ui 3x-ui marzban; do
+        if systemctl list-unit-files "${panel_svc}.service" 2>/dev/null | grep -q "enabled\|disabled"; then
+            mark_warn "旧面板服务残留: ${panel_svc}.service" "清理: systemctl stop $panel_svc && systemctl disable $panel_svc && rm -f /etc/systemd/system/${panel_svc}.service && systemctl daemon-reload"
+            FOUND_RESIDUAL=true
+        fi
+    done
+
+    for panel_proc in "sui" "x-ui" "3x-ui" "marzban"; do
+        if pgrep -f "$panel_proc" &>/dev/null; then
+            mark_warn "旧面板进程残留: $panel_proc (PID: $(pgrep -f $panel_proc | tr '\n' ','))" "清理: pkill -9 $panel_proc"
+            FOUND_RESIDUAL=true
+        fi
+    done
+
+    if [ "$FOUND_RESIDUAL" = false ]; then
+        mark_pass "无旧面板残留"
+    fi
+}
+
+# ============================================================
+# 17. CDN IP 连通性纠错检查（Bug #57：CDN IP连不上需自动回退）
+# ============================================================
+check_cdn_connectivity() {
+    echo ""
+    echo "=========================================="
+    echo "【17/18】CDN IP 连通性纠错检查"
+    echo "=========================================="
+
+    if [ ! -f "$DB_FILE" ]; then
+        mark_warn "CDN数据库不存在，跳过连通性检查"
+        return
+    fi
+
+    if ! command -v sqlite3 &>/dev/null; then
+        mark_warn "sqlite3 命令不可用，跳过CDN连通性检查"
+        return
+    fi
+
+    CF_DOMAIN=$(grep "^CF_DOMAIN=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 | xargs)
+    if [ -z "$CF_DOMAIN" ]; then
+        mark_warn "CF_DOMAIN 未配置，跳过CDN连通性检查"
+        return
+    fi
+
+    CDN_IPS=$(sqlite3 "$DB_FILE" "SELECT value FROM cdn_settings WHERE key LIKE '%cdn_ip%' AND value != '';" 2>/dev/null)
+    if [ -z "$CDN_IPS" ]; then
+        mark_warn "CDN数据库中无优选IP"
+        return
+    fi
+
+    FAIL_IPS=""
+    PASS_IPS=""
+    for ip in $CDN_IPS; do
+        # 3秒超时测试CDN IP连通性
+        HTTP_CODE=$(curl -s --connect-timeout 3 -o /dev/null -w "%{http_code}" "https://${ip}:2087" 2>/dev/null)
+        CURL_EXIT=$?
+        if [ "$CURL_EXIT" -eq 0 ] && [ "$HTTP_CODE" != "000" ]; then
+            PASS_IPS="$PASS_IPS $ip"
+        else
+            FAIL_IPS="$FAIL_IPS $ip"
+        fi
+    done
+
+    if [ -n "$PASS_IPS" ]; then
+        mark_pass "可达CDN IP:$(echo $PASS_IPS | tr ' ' '\n' | wc -l)个"
+    fi
+
+    if [ -n "$FAIL_IPS" ]; then
+        mark_fail "不可达CDN IP:$(echo $FAIL_IPS | tr ' ' '\n' | wc -l)个 ($(echo $FAIL_IPS | tr ' ' ','))" "subscription_service.py会自动回退到域名兜底，用户更新订阅即可恢复"
+    fi
+}
+
+# ============================================================
+# 18. cdn_monitor 孤儿进程检查（Bug #51教训）
+# ============================================================
+check_cdn_orphan() {
+    echo ""
+    echo "=========================================="
+    echo "【18/18】cdn_monitor 孤儿进程检查"
+    echo "=========================================="
+
+    CDN_PIDS=$(pgrep -f "cdn_monitor" 2>/dev/null || true)
+    if [ -z "$CDN_PIDS" ]; then
+        mark_pass "无cdn_monitor进程运行"
+        return
+    fi
+
+    PID_COUNT=$(echo "$CDN_PIDS" | wc -l)
+    if [ "$PID_COUNT" -eq 1 ]; then
+        # 检查是否由systemd管理
+        CGROUP=$(cat /proc/$(echo "$CDN_PIDS" | head -1)/cgroup 2>/dev/null | grep -c "singbox-cdn" || echo "0")
+        if [ "$CGROUP" -ge 1 ]; then
+            mark_pass "cdn_monitor: 1个进程 (systemd管理)"
+        else
+            mark_warn "cdn_monitor: 1个进程 (非systemd管理，可能是手动启动的孤儿进程)" "清理: kill $CDN_PIDS && systemctl restart singbox-cdn"
+        fi
+    else
+        mark_fail "cdn_monitor: 发现${PID_COUNT}个进程 (应只有1个，存在孤儿进程泄漏)" "清理: pkill -9 -f cdn_monitor && systemctl restart singbox-cdn"
     fi
 }
 
@@ -530,6 +685,7 @@ print_summary() {
 # ============================================================
 echo "=========================================="
 echo "  singbox-eps-node 一键诊断"
+echo "  版本: v3.1.2"
 echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  服务器: $(hostname)"
 echo "  内核: $(uname -r)"
@@ -549,5 +705,9 @@ check_dns_resolution
 check_crontab
 check_bbr_qdisc
 check_subscription_access
+check_iptables_traffic
+check_old_panels
+check_cdn_connectivity
+check_cdn_orphan
 
 print_summary

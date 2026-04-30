@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v2.0.0
-Date: 2026-04-23
+Version: v3.1.3
+Date: 2026-05-01
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -28,6 +28,12 @@ Date: 2026-04-23
 - 用户在客户端节点列表中看不到AI-SOCKS5
 - AI网站流量自动走SOCKS5，用户无感，无需手动选择
 - 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
+
+v3.1.3修复：
+  1. check_single_socks5: sock_mod→socket（致命Bug修复）
+  2. check_single_socks5: finally块确保socket关闭（防泄漏）
+  3. test_cdn_ip_connectivity: finally块确保socket关闭（防泄漏）
+  4. 移除冗余的sock_mod导入和import socket
 """
 
 import os
@@ -36,6 +42,7 @@ import base64
 import urllib.parse
 import urllib.request
 import sqlite3
+import socket
 import random
 import json
 import subprocess
@@ -127,23 +134,19 @@ def check_single_socks5(proxy):
     """检测单个SOCKS5代理是否能正常连接Google
     返回True表示正常，False表示不可用
     """
-    import socket as sock_mod
+    s = None
     try:
         proxy_host = proxy['server']
         proxy_port = proxy['port']
         target_host = "www.google.com"
         target_port = 443
-        # SOCKS5握手协议
-        s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(5)
         s.connect((proxy_host, proxy_port))
-        # 步骤1: 认证协商
         s.send(bytes([0x05, 0x02, 0x00, 0x02]))
         resp = s.recv(2)
         if len(resp) < 2:
-            s.close()
             return False
-        # 步骤2: 用户名密码认证
         if resp[1] == 0x02:
             if proxy['user'] and proxy['pass']:
                 user_bytes = proxy['user'].encode()
@@ -152,23 +155,25 @@ def check_single_socks5(proxy):
                 s.send(auth_pkt)
                 auth_resp = s.recv(2)
                 if len(auth_resp) < 2 or auth_resp[1] != 0x00:
-                    s.close()
                     return False
             else:
-                s.close()
                 return False
-        # 步骤3: 连接目标
-        target_ip = sock_mod.gethostbyname(target_host)
+        target_ip = socket.gethostbyname(target_host)
         host_bytes = bytes([int(x) for x in target_ip.split('.')])
         conn_pkt = bytes([0x05, 0x01, 0x00, 0x01]) + host_bytes + target_port.to_bytes(2, 'big')
         s.send(conn_pkt)
         conn_resp = s.recv(10)
-        s.close()
         if len(conn_resp) >= 2 and conn_resp[1] == 0x00:
             return True
         return False
     except Exception:
         return False
+    finally:
+        if s:
+            try:
+                s.close()
+            except Exception:
+                pass
 
 def check_socks5_pool():
     """检测代理池中所有代理，返回可用列表"""
@@ -435,8 +440,34 @@ def format_traffic(bytes_count):
     else:
         return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
 
+def test_cdn_ip_connectivity(ip, port=443, timeout=3):
+    """测试CDN IP连通性（快速TCP测试）
+    【Bug #57修复】：增加纠错机制，CDN IP连不上时自动回退到域名
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((ip, port))
+        return result == 0
+    except Exception:
+        return False
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
 def get_cdn_ip_for_protocol(protocol_key):
-    """获取指定协议的CDN优选IP"""
+    """获取指定协议的CDN优选IP（带连通性检测兜底）
+    
+    【Bug #57修复】：
+    1. 从数据库读取CDN IP
+    2. 快速测试连通性（3秒超时）
+    3. 连不上就清空数据库记录，自动回退到域名兜底
+    4. 用户更新订阅即可恢复连接
+    """
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -444,12 +475,21 @@ def get_cdn_ip_for_protocol(protocol_key):
         cursor.execute("SELECT value FROM cdn_settings WHERE key=?", (protocol_key,))
         row = cursor.fetchone()
         if row and row[0] and row[0] != SERVER_IP:
-            return row[0]
-    except Exception:
-        pass
+            cdn_ip = row[0]
+            # 快速连通性检测
+            if test_cdn_ip_connectivity(cdn_ip):
+                return cdn_ip
+            else:
+                # CDN IP连不上，清空数据库记录，触发兜底
+                logger.warning(f"CDN IP {cdn_ip} 连通性检测失败，清空记录回退到域名")
+                cursor.execute("DELETE FROM cdn_settings WHERE key=?", (protocol_key,))
+                conn.commit()
+    except Exception as e:
+        logger.debug(f"获取CDN IP失败: {e}")
     finally:
         if conn:
             conn.close()
+    # 兜底：使用域名
     if CF_DOMAIN and CF_DOMAIN.strip():
         return CF_DOMAIN
     return SERVER_IP

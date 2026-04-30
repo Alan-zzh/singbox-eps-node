@@ -2,23 +2,37 @@
 """
 TG机器人总控脚本
 Author: Alan
-Version: v2.0.0
-Date: 2026-04-20
+Version: v3.1.2
+Date: 2026-05-01
 功能：
-  - /status 查看服务器状态
-  - /renew 强制续签证书
-  - /sub 获取订阅链接
-  - /restart 重启Singbox
-  - /cdn 更新CDN IP
+  - /状态 查看服务器状态
+  - /续签 强制续签证书
+  - /订阅 获取订阅链接
+  - /重启 重启Singbox（含singbox-sub和singbox-cdn）
+  - /优选 更新CDN IP
+  - /设置住宅 设置AI住宅IP SOCKS5
+  - /删除住宅 删除AI住宅IP
 """
 
 import os
 import sys
 import json
 import time
+import logging
 import subprocess
 import urllib.request
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from logger import get_logger
+except ImportError:
+    def get_logger(name):
+        import logging
+        logging.basicConfig(level=logging.INFO)
+        return logging.getLogger(name)
+
+logger = get_logger('tg_bot')
 
 BOT_TOKEN = os.getenv('TG_BOT_TOKEN', '')
 ADMIN_CHAT_ID = os.getenv('TG_ADMIN_CHAT_ID', '')
@@ -28,14 +42,14 @@ def load_env():
     if os.path.exists(env_path):
         with open(env_path, 'r') as f:
             for line in f:
+                line = line.strip()
                 if '=' in line and not line.startswith('#'):
-                    k, v = line.strip().split('=', 1)
+                    k, v = line.split('=', 1)
+                    v = v.strip().strip('"').strip("'")
                     os.environ[k] = v
 
 load_env()
 
-# ⚠️ 从config.py读取端口和BASE_DIR，禁止硬编码（历史教训：v1.0.42前默认6969导致服务不可达）
-# SUB_PORT=2087硬编码在config.py中，不在.env中，必须从config.py导入
 sys.path.insert(0, os.path.join(os.getenv('BASE_DIR', '/root/singbox-eps-node'), 'scripts'))
 try:
     from config import BASE_DIR, SUB_PORT as CONFIG_SUB_PORT, CF_DOMAIN as CONFIG_CF_DOMAIN, SERVER_IP as CONFIG_SERVER_IP
@@ -46,9 +60,17 @@ except ImportError:
     CONFIG_SERVER_IP = ''
 
 ENV_FILE = os.path.join(BASE_DIR, '.env')
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger('tg_bot')
+logger.setLevel(logging.INFO)
+fh = logging.FileHandler(os.path.join(LOG_DIR, 'tg_bot.log'), encoding='utf-8')
+fh.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s %(message)s'))
+logger.addHandler(fh)
 
 if not BOT_TOKEN:
-    print("[ERROR] 未配置 TG_BOT_TOKEN，请在 .env 中添加")
+    logger.error("未配置 TG_BOT_TOKEN，请在 .env 中添加")
     sys.exit(1)
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -61,7 +83,7 @@ def send_message(chat_id, text):
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"[ERROR] 发送消息失败: {e}")
+        logger.error("发送消息失败: %s", e)
         return None
 
 def get_server_status():
@@ -69,23 +91,15 @@ def get_server_status():
     status.append("📊 <b>服务器状态</b>")
     status.append(f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    try:
-        result = subprocess.run(['systemctl', 'is-active', 'singbox'], capture_output=True, text=True)
-        status.append(f"🟢 Singbox: {'运行中' if result.stdout.strip() == 'active' else '❌ 已停止'}")
-    except Exception:
-        status.append("🔴 Singbox: 未知")
-
-    try:
-        result = subprocess.run(['systemctl', 'is-active', 'singbox-sub'], capture_output=True, text=True)
-        status.append(f"🟢 订阅服务: {'运行中' if result.stdout.strip() == 'active' else '❌ 已停止'}")
-    except Exception:
-        status.append("🔴 订阅服务: 未知")
-
-    try:
-        result = subprocess.run(['systemctl', 'is-active', 'singbox-cdn'], capture_output=True, text=True)
-        status.append(f"🟢 CDN监控: {'运行中' if result.stdout.strip() == 'active' else '❌ 已停止'}")
-    except Exception:
-        status.append("🔴 CDN监控: 未知")
+    for svc, label in [('singbox', 'Singbox'), ('singbox-sub', '订阅服务'), ('singbox-cdn', 'CDN监控')]:
+        try:
+            result = subprocess.run(['systemctl', 'is-active', svc], capture_output=True, text=True)
+            if result.stdout.strip() == 'active':
+                status.append(f"� {label}: 运行中")
+            else:
+                status.append(f"❌ {label}: 已停止")
+        except Exception:
+            status.append(f"🔴 {label}: 未知")
 
     try:
         with open('/proc/loadavg', 'r') as f:
@@ -108,25 +122,29 @@ def get_server_status():
 
 def renew_cert():
     try:
-        os.chdir(BASE_DIR)
-        result = subprocess.run(['python3', 'scripts/cert_manager.py', '--renew'], capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            ['python3', os.path.join(BASE_DIR, 'scripts/cert_manager.py'), '--renew'],
+            capture_output=True, text=True, timeout=60, cwd=BASE_DIR
+        )
         if result.returncode == 0:
             return "✅ 证书续签完成"
         else:
-            return f"❌ 证书续签失败:\n{result.stderr[:500]}"
+            logger.error("证书续签失败: %s", result.stderr[:500])
+            return "❌ 证书续签失败，请查看日志"
     except Exception as e:
-        return f"❌ 异常: {e}"
+        logger.error("证书续签异常: %s", e)
+        return "❌ 证书续签异常，请查看日志"
 
 def restart_singbox():
     try:
-        subprocess.run(['systemctl', 'restart', 'singbox'], timeout=30)
-        return "✅ Singbox 已重启"
+        subprocess.run(['systemctl', 'restart', 'singbox', 'singbox-sub', 'singbox-cdn'], timeout=30)
+        return "✅ Singbox 及相关服务已重启（singbox + singbox-sub + singbox-cdn）"
     except Exception as e:
-        return f"❌ 重启失败: {e}"
+        logger.error("重启失败: %s", e)
+        return "❌ 重启失败，请查看日志"
 
 def update_cdn():
     try:
-        os.chdir(BASE_DIR)
         sys.path.insert(0, os.path.join(BASE_DIR, 'scripts'))
         from cdn_monitor import fetch_cdn_ips, assign_and_save_ips, init_db
         init_db()
@@ -137,18 +155,16 @@ def update_cdn():
         else:
             return "❌ CDN IP 更新失败：未获取到任何IP"
     except Exception as e:
-        return f"❌ 异常: {e}"
+        logger.error("CDN更新异常: %s", e)
+        return "❌ CDN更新异常，请查看日志"
 
 def get_sub_link():
-    # ⚠️ 端口从config.py读取，禁止硬编码6969（历史教训：v1.0.42前默认6969导致服务不可达）
-    # 域名优先使用config.py的值（从.env读取+自动检测），不重复读环境变量
     addr = CONFIG_CF_DOMAIN if CONFIG_CF_DOMAIN else CONFIG_SERVER_IP or os.getenv('SERVER_IP', '')
     sub_port = CONFIG_SUB_PORT
     country = os.getenv('COUNTRY_CODE', 'US')
     return f"🔗 订阅链接:\nhttps://{addr}:{sub_port}/sub/{country}"
 
 def set_bot_commands():
-    """设置 Telegram 内置命令菜单"""
     url = f"{API_URL}/setMyCommands"
     commands = [
         {"command": "状态", "description": "查看服务器运行状态（CPU/内存/服务）"},
@@ -166,50 +182,69 @@ def set_bot_commands():
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode())
             if result.get('ok'):
-                print("✅ Telegram 命令菜单已设置")
+                logger.info("Telegram 命令菜单已设置")
     except Exception as e:
-        print(f"[WARN] 设置命令菜单失败: {e}")
+        logger.warning("设置命令菜单失败: %s", e)
 
-def update_env_and_restart(key, value):
-    """更新.env并重启Singbox和订阅服务
-    ⚠️ SOCKS5配置变更后，subscription_service.py也需要重启才能生效
-    （它从环境变量读取AI_SOCKS5_*，不重启则生成的sing-box JSON不包含新配置）
+def batch_update_env(updates):
+    """批量更新.env中的多个键值对，只重启一次服务
+    updates: dict of {key: value}
     """
-    env_path = os.path.join(BASE_DIR, '.env')
     lines = []
-    found = False
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                if line.startswith(key + '='):
-                    lines.append(f"{key}={value}\n")
-                    found = True
-                else:
-                    lines.append(line)
-    if not found:
-        lines.append(f"{key}={value}\n")
-    with open(env_path, 'w') as f:
-        f.writelines(lines)
-    os.environ[key] = value
-    subprocess.run(['python3', os.path.join(BASE_DIR, 'scripts/config_generator.py')], capture_output=True)
-    subprocess.run(['systemctl', 'restart', 'singbox'], capture_output=True)
-    subprocess.run(['systemctl', 'restart', 'singbox-sub'], capture_output=True)
-    subprocess.run(['systemctl', 'restart', 'singbox-cdn'], capture_output=True)
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, 'r') as f:
+            lines = f.readlines()
+
+    updated_keys = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if '=' in stripped and not stripped.startswith('#'):
+            k = stripped.split('=', 1)[0].strip()
+            if k in updates:
+                new_lines.append(f"{k}={updates[k]}\n")
+                updated_keys.add(k)
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    for k, v in updates.items():
+        if k not in updated_keys:
+            new_lines.append(f"{k}={v}\n")
+
+    with open(ENV_FILE, 'w') as f:
+        f.writelines(new_lines)
+
+    for k, v in updates.items():
+        os.environ[k] = v
+
+    subprocess.run(['python3', os.path.join(BASE_DIR, 'scripts/config_generator.py')], capture_output=True, cwd=BASE_DIR)
+    subprocess.run(['systemctl', 'restart', 'singbox', 'singbox-sub', 'singbox-cdn'], capture_output=True)
 
 def handle_ai_socks5(action, params=None):
-    """处理AI SOCKS5设置"""
     if action == 'set':
         server, port, user, pwd = params
-        update_env_and_restart('AI_SOCKS5_SERVER', server)
-        update_env_and_restart('AI_SOCKS5_PORT', port)
-        update_env_and_restart('AI_SOCKS5_USER', user)
-        update_env_and_restart('AI_SOCKS5_PASS', pwd)
+        if not server or not port or not user or not pwd:
+            return "❌ 参数不完整，请提供服务器、端口、用户名、密码"
+        try:
+            int(port)
+        except ValueError:
+            return "❌ 端口必须是数字"
+        batch_update_env({
+            'AI_SOCKS5_SERVER': server,
+            'AI_SOCKS5_PORT': port,
+            'AI_SOCKS5_USER': user,
+            'AI_SOCKS5_PASS': pwd,
+        })
         return f"✅ AI住宅IP已设置\n🌐 服务器: {server}:{port}\n👤 用户: {user}\n🔄 Singbox已重启，AI流量将走住宅IP"
     elif action == 'del':
-        update_env_and_restart('AI_SOCKS5_SERVER', '')
-        update_env_and_restart('AI_SOCKS5_PORT', '')
-        update_env_and_restart('AI_SOCKS5_USER', '')
-        update_env_and_restart('AI_SOCKS5_PASS', '')
+        batch_update_env({
+            'AI_SOCKS5_SERVER': '',
+            'AI_SOCKS5_PORT': '',
+            'AI_SOCKS5_USER': '',
+            'AI_SOCKS5_PASS': '',
+        })
         return "✅ AI住宅IP已删除\n🔄 Singbox已重启，AI流量将走普通代理"
 
 def handle_message(update):
@@ -247,7 +282,7 @@ def handle_message(update):
     elif text == '/订阅':
         send_message(chat_id, get_sub_link())
     elif text == '/重启':
-        send_message(chat_id, "⏳ 正在重启 Singbox...")
+        send_message(chat_id, "⏳ 正在重启 Singbox 及相关服务...")
         send_message(chat_id, restart_singbox())
     elif text == '/优选':
         send_message(chat_id, "⏳ 正在更新 CDN IP...")
@@ -283,8 +318,8 @@ def handle_message(update):
         send_message(chat_id, "❓ 未知命令，请发送 /帮助 查看说明")
 
 def main():
-    print(f"🤖 TG机器人启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📡 使用 Token: {BOT_TOKEN[:10]}...")
+    logger.info(f"TG机器人启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"使用 Token: {BOT_TOKEN[:5]}...{BOT_TOKEN[-5:] if len(BOT_TOKEN) > 10 else '***'}")
 
     set_bot_commands()
 
@@ -300,7 +335,7 @@ def main():
                         if 'message' in update:
                             handle_message(update)
         except Exception as e:
-            print(f"[ERROR] 轮询失败: {e}")
+            logger.error("轮询失败: %s", e)
             time.sleep(5)
 
 if __name__ == '__main__':

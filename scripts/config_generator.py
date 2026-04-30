@@ -2,8 +2,8 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v2.0.0
-Date: 2026-04-23
+Version: v3.1.2
+Date: 2026-05-01
 功能：生成完整的 Singbox 配置
 ⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码
 """
@@ -18,10 +18,11 @@ import string
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import BASE_DIR, CERT_DIR
+    from config import BASE_DIR, CERT_DIR, DATA_DIR
 except ImportError:
     BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CERT_DIR = os.path.join(BASE_DIR, 'cert')
+    DATA_DIR = os.path.join(BASE_DIR, 'data')
 
 # 读取环境变量
 env_vars = {}
@@ -82,9 +83,14 @@ if not os.path.exists(_cert_chain) or not os.path.exists(_cert_key):
     import subprocess
     cert_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cert_manager.py')
     if os.path.exists(cert_script):
-        subprocess.run([sys.executable, cert_script], capture_output=True, timeout=60)
-    if not os.path.exists(_cert_key):
-        _cert_key = os.path.join(CERT_DIR, 'key.pem')
+        subprocess.run([sys.executable, cert_script], capture_output=True, text=True, timeout=120)
+        # 重新检测证书路径（cert_manager可能生成fullchain.pem或cert.pem）
+        _cert_chain2 = os.path.join(CERT_DIR, 'fullchain.pem')
+        if os.path.exists(_cert_chain2):
+            _cert_chain = _cert_chain2
+        _cert_key2 = os.path.join(CERT_DIR, 'key.pem')
+        if os.path.exists(_cert_key2):
+            _cert_key = _cert_key2
 
 # ⚠️ SOCKS5入站：仅当用户名和密码均非空时才启用，避免空凭据导致无认证暴露
 socks5_inbound = [{

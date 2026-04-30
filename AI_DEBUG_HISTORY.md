@@ -894,6 +894,70 @@ systemctl status singbox --no-pager | head -10
 python3 -c "from subscription_service import SOCKS5_POOL; print(len(SOCKS5_POOL))"
 ```
 
+### Bug #57: CDN优选IP连不上但没有纠错机制，用户无法通过更新订阅恢复
+- **版本**: v3.1.1 → v3.1.2
+- **日期**: 2026-05-01
+- **现象**: 用户反馈CDN线路（VLESS-WS-CDN、VLESS-HTTPUpgrade-CDN、Trojan-WS-CDN）全部连不上，延迟显示-1（超时）。cdn_monitor.py每小时运行但优选IP对中国用户延迟高，服务器端TCP测试都是1-2ms无法区分真实链路质量
+- **根因分析（两层问题）**:
+  - **根因1**: cdn_monitor.py的http_latency_test()函数名是HTTP但实际只做TCP连接测试（Bug #43修复后又退化）。在日本服务器上测试所有CF IP都是1-2ms，无法反映对中国用户的真实延迟
+  - **根因2**: subscription_service.py的get_cdn_ip_for_protocol()从数据库读取CDN IP，即使IP连不上也不会触发兜底。只有数据库为空时才回退到域名，导致坏IP一直使用
+- **修复**:
+  1. cdn_monitor.py: http_latency_test()改为真实HTTPS请求测试，发送HTTP GET请求测量完整握手+响应时间
+  2. subscription_service.py: get_cdn_ip_for_protocol()增加连通性检测，3秒超时测试CDN IP，连不上就清空数据库记录，自动回退到域名兜底
+  3. 用户更新订阅即可恢复连接（域名走CDN，证书匹配）
+- **预防**: 
+  - CDN优选IP测试必须用真实HTTPS请求，不能用纯TCP连接测试
+  - 订阅服务必须有纠错机制：CDN IP连不上时自动回退到域名
+  - 数据库里的坏IP必须能被自动清理，不能让用户手动处理
+
+### Bug #58: 淘汰IP只标记不过滤，被淘汰IP仍可入选TOP5
+- **版本**: v3.1.3
+- **日期**: 2026-05-01
+- **现象**: cdn_monitor.py的should_eliminate_ip()标记了不达标IP，但fetch_cdn_ips()中只打日志不过滤，被淘汰的IP仍然出现在valid_ips中
+- **根因**: fetch_cdn_ips()第674-686行，eliminated列表只用于日志输出，valid_ips直接从tested_results取TOP5，没有排除eliminated中的IP
+- **修复**: 新增eliminated_set，从tested_results中过滤掉被淘汰的IP后再取TOP5
+- **预防**: 淘汰机制必须同时标记和过滤，否则淘汰形同虚设
+
+### Bug #59: http_latency_test()异常路径socket泄漏
+- **版本**: v3.1.3
+- **日期**: 2026-05-01
+- **现象**: http_latency_test()在SSL握手或HTTP请求异常时，socket和ssl_socket不会关闭，长期运行导致文件描述符泄漏
+- **根因**: 原代码只在正常路径调用ssock.close()，except分支直接返回，socket未关闭
+- **修复**: 用finally块确保ssock和sock在所有路径下都关闭
+- **预防**: 所有涉及socket/文件/数据库连接的代码必须在finally中关闭资源
+
+### Bug #60: ImportError降级块含104段IP+缺少必需变量
+- **版本**: v3.1.3
+- **日期**: 2026-05-01
+- **现象**: ImportError降级块中CDN_PREFERRED_IPS包含104.18.41.58/104.18.32.206/104.18.42.36三个104段IP，违反Bug #35教训；且缺少DATA_DIR/SERVER_IP/CF_DOMAIN定义，init_db()和http_latency_test()会NameError崩溃
+- **根因**: 降级块只复制了部分变量，没有同步更新；104段IP是v1.0.85修复前的残留
+- **修复**: 移除104段IP，补全DATA_DIR/SERVER_IP/CF_DOMAIN定义
+- **预防**: ImportError降级块必须定义所有必需变量，否则降级后服务无法启动（铁律16）
+
+### Bug #61: assign_and_save_ips()数据库连接无try/finally
+- **版本**: v3.1.3
+- **日期**: 2026-05-01
+- **现象**: assign_and_save_ips()中conn=sqlite3.connect()在try外面，如果连接成功但后续操作异常，conn不会关闭
+- **根因**: 违反Bug #38铁律"数据库连接必须在finally中关闭"
+- **修复**: conn=None兜底，sqlite3.connect()移入try块，finally中if conn防护关闭
+- **预防**: 所有数据库连接必须遵循conn=None→try中connect→finally中if conn:close()模式
+
+### Bug #62: should_eliminate_ip()中last_success_time为None时跳过检查
+- **版本**: v3.1.3
+- **日期**: 2026-05-01
+- **现象**: IP首次测试失败后last_success_time为None，should_eliminate_ip()的"多天无成功记录"检查被跳过，导致从未成功的IP不会被淘汰
+- **根因**: if perf['last_success_time']为False时直接跳过，没有处理"从未成功"的情况
+- **修复**: 新增else分支：如果last_success_time为None且测试>=5次且成功次数=0，则淘汰
+- **预防**: 条件分支必须覆盖所有情况，None和空值不能简单跳过
+
+### Bug #63: ip_test_history表无清理机制，数据库无限膨胀
+- **版本**: v3.1.3
+- **日期**: 2026-05-01
+- **现象**: ip_test_history表每次测试都INSERT，每小时约100条记录，一个月约72000条，长期运行后数据库膨胀
+- **根因**: MAX_PERFORMANCE_HISTORY常量定义了但从未使用，没有实现清理逻辑
+- **修复**: 新增cleanup_old_history()函数，每次run_once()后清理7天前的历史记录
+- **预防**: 有增长的数据表必须有清理机制，定义了常量就要实现对应功能
+
 ### 6. 域名匹配优先级规则
 **sing-box 路由规则匹配顺序**:
 1. 按数组顺序从上到下匹配，第一条命中的规则生效
