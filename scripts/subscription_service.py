@@ -249,7 +249,7 @@ def init_db():
 
 def setup_iptables_traffic_counters():
     """配置iptables流量计数器（sing-box各入站端口）
-    这是S-UI和机场面板的标准做法：
+    机场面板标准做法：
     - 在INPUT链中添加针对sing-box各入站端口的统计规则
     - iptables计数器是内核级别的，持久化、重启不丢失
     - 端口：443(VLESS-Reality/HY2), 8443(VLESS-WS), 2053(VLESS-HTTPUpgrade), 2083(Trojan-WS)

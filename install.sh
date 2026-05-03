@@ -84,31 +84,20 @@ install_dependencies() {
 
 uninstall_old_panels() {
     log_step "检查并卸载旧面板..."
-    # ⚠️ S-UI彻底卸载：停止服务+删除服务文件+删除目录+杀残留进程
-    # Bug #33教训：只stop/disable不够，S-UI的cdn_monitor进程会自动重启
-    for panel in s-ui x-ui marzban 3x-ui js-ui jsui; do
+    for panel in x-ui marzban 3x-ui; do
         if systemctl is-active --quiet "$panel" 2>/dev/null; then
             log_warn "检测到 $panel 正在运行，正在卸载..."
             systemctl stop "$panel" 2>/dev/null || true
             systemctl disable "$panel" 2>/dev/null || true
         fi
-        # 清理所有相关systemd服务文件
         rm -f /etc/systemd/system/"$panel".service
-        rm -f /etc/systemd/system/"$panel"-cdn.service
-        rm -f /etc/systemd/system/"$panel"-cdn-monitor.service
-        rm -f /etc/systemd/system/"$panel"-sub.service
         rm -f /etc/systemd/system/multi-user.target.wants/"$panel".service
-        rm -f /etc/systemd/system/multi-user.target.wants/"$panel"-cdn-monitor.service
     done
-    # S-UI/JSUI特殊处理：删除安装目录和残留进程
-    # Bug #33教训：只stop/disable不够，S-UI的cdn_monitor进程会自动重启
-    # JSUI也可能有残留进程在/opt/js-ui-manager或/usr/local/js-ui
-    rm -rf /opt/s-ui-manager /usr/local/s-ui /opt/js-ui-manager /usr/local/js-ui
-    pkill -f '/opt/s-ui-manager' 2>/dev/null || true
-    pkill -f '/usr/local/s-ui' 2>/dev/null || true
-    pkill -f '/opt/js-ui-manager' 2>/dev/null || true
-    pkill -f '/usr/local/js-ui' 2>/dev/null || true
-    pkill -f 'cdn_monitor.py.*s-ui' 2>/dev/null || true
+    for panel_dir in /usr/local/x-ui /usr/local/3x-ui /usr/local/marzban; do
+        if [ -d "$panel_dir" ]; then
+            rm -rf "$panel_dir"
+        fi
+    done
     systemctl daemon-reload
     log_info "旧面板卸载完成"
 }

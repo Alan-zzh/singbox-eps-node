@@ -523,7 +523,7 @@ check_iptables_traffic() {
 }
 
 # ============================================================
-# 16. 旧面板残留检查（Bug #33教训：卸载必须彻底）
+# 16. 旧面板残留检查
 # ============================================================
 check_old_panels() {
     echo ""
@@ -533,21 +533,21 @@ check_old_panels() {
 
     FOUND_RESIDUAL=false
 
-    for panel_dir in /usr/local/s-ui /usr/local/x-ui /usr/local/3x-ui /opt/s-ui-manager /usr/local/marzban; do
+    for panel_dir in /usr/local/x-ui /usr/local/3x-ui /usr/local/marzban; do
         if [ -d "$panel_dir" ]; then
             mark_warn "旧面板目录残留: $panel_dir" "清理: rm -rf $panel_dir"
             FOUND_RESIDUAL=true
         fi
     done
 
-    for panel_svc in s-ui x-ui 3x-ui marzban; do
+    for panel_svc in x-ui 3x-ui marzban; do
         if systemctl list-unit-files "${panel_svc}.service" 2>/dev/null | grep -q "enabled\|disabled"; then
             mark_warn "旧面板服务残留: ${panel_svc}.service" "清理: systemctl stop $panel_svc && systemctl disable $panel_svc && rm -f /etc/systemd/system/${panel_svc}.service && systemctl daemon-reload"
             FOUND_RESIDUAL=true
         fi
     done
 
-    for panel_proc in "sui" "x-ui" "3x-ui" "marzban"; do
+    for panel_proc in "x-ui" "3x-ui" "marzban"; do
         if pgrep -f "$panel_proc" &>/dev/null; then
             mark_warn "旧面板进程残留: $panel_proc (PID: $(pgrep -f $panel_proc | tr '\n' ','))" "清理: pkill -9 $panel_proc"
             FOUND_RESIDUAL=true

@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v3.1.3 | **更新**: 2026-05-01
+**版本**: v3.1.4 | **更新**: 2026-05-01
 
 ---
 
@@ -33,7 +33,7 @@
 - ✅ SSL证书：fullchain.pem优先，降级cert.pem
 - ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
 - ✅ BBR+FQ+CAKE三合一加速
-- ✅ 旧面板彻底卸载：S-UI/JSUI/x-ui/marzban/3x-ui
+- ✅ 旧面板彻底卸载：x-ui/marzban/3x-ui
 - ✅ 一键诊断脚本：diagnose.sh 18项检查，覆盖服务/端口/证书/防火墙/DNS/CDN/Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程
 - ✅ sing-box 1.13.9 完全兼容
 

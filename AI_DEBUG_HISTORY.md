@@ -328,7 +328,7 @@
 - **根因**: 修复Bug #31时只在运行中的服务器上手动执行了crontab命令，忘记同步更新install.sh的安装脚本
 - **修复**:
   1. install.sh的setup_health_check_cron()添加：每小时0分自动重启singbox-cdn
-  2. 同时清理JSUI残留进程和目录
+  2. 同时清理旧面板残留进程和目录
   3. 统一所有文件版本号为v1.0.84
 - **预防**: 修复服务器问题时，必须同步更新install.sh安装脚本，确保新服务器安装也能获得同样的修复
 
@@ -430,7 +430,7 @@
   - **第一轮（错误方案）**: 改用sing-box Clash API (`127.0.0.1:9090/proxies`) 获取流量 → 失败，因为服务端config_generator.py没有experimental.clash_api配置
   - **第二轮（错误方案）**: 在服务端config_generator.py添加experimental.clash_api → 仍然失败，因为Clash API的/proxies端点不返回download/upload字段，只返回type/name/udp。/connections是SSE流式端点，/traffic也是流式。sing-box 1.10.0编译标签只有with_clash_api，没有with_v2ray_api，所以gRPC StatsService也不可用
   - **第三轮（正确方案）**: Clash API不返回持久流量统计，重启后计数器归零。sing-box本身不持久化流量统计
-- **最终修复**: 改用iptables内核级计数器（与S-UI和机场面板相同做法）
+- **最终修复**: 改用iptables内核级计数器（与机场面板相同做法）
   1. `setup_iptables_traffic_counters()` - 在INPUT链中为每个sing-box入站端口(443/8443/2053/2083)添加统计规则，幂等操作
   2. `get_iptables_traffic_bytes()` - 解析`iptables -L INPUT -v -n -x`输出，提取每条规则的bytes计数器
   3. `check_and_reset_month()` - 首次升级时初始化iptables_baseline基准值，每月14号更新基准值
@@ -445,7 +445,7 @@
   - Clash API在sing-box中仅用于客户端管理和配置，不提供持久化流量统计
   - sing-box编译标签决定API能力：with_clash_api≠with_v2ray_api，后者才有StatsService
   - 任何方案都必须先在目标环境验证，不能假设API端点行为
-- **预防**: 统计代理流量使用iptables内核计数器，持久化、重启不丢失，与S-UI/机场面板一致
+- **预防**: 统计代理流量使用iptables内核计数器，持久化、重启不丢失，与机场面板一致
 
 ### 数据源调研记录（v2.0.0重构依据，2026-04-25）
 
@@ -608,10 +608,10 @@
 ### Bug #52: VPS系统服务浪费大量内存(60MB+)
 - **版本**: v3.0.1
 - **日期**: 2026-04-26
-- **现象**: 414MB VPS跑个代理就用了244MB内存，S-UI面板同样功能只需约100MB
+- **现象**: 414MB VPS跑个代理就用了244MB内存，同类面板同样功能只需约100MB
 - **根因**: AWS Ubuntu默认安装了大量桌面/VPS不需要的服务：
   - multipathd: 26MB（多路径存储，VPS不需要）
-  - caddy: 15MB（旧S-UI面板反代，已不用）
+  - caddy: 15MB（旧面板反代，已不用）
   - amazon-ssm-agent: 13MB（AWS管理代理）
   - udisksd: 7MB（磁盘管理GUI）
   - ModemManager: 6MB（调制解调器管理）
