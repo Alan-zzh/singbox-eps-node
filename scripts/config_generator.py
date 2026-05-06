@@ -51,6 +51,7 @@ ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
 ai_socks5_user = env_vars.get('AI_SOCKS5_USER', '')
 ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
 ai_socks5_pool = env_vars.get('AI_SOCKS5_POOL', '')
+ai_socks5_routing = env_vars.get('AI_SOCKS5_ROUTING', 'off').lower()
 
 # 解析SOCKS5代理池
 def parse_socks5_pool():
@@ -259,7 +260,7 @@ config = {
         "version": "5",
         "username": proxy['user'],
         "password": proxy['pass']
-    } for i, proxy in enumerate(socks5_pool)] if socks5_pool else []),
+    } for i, proxy in enumerate(socks5_pool)] if socks5_pool and ai_socks5_routing == 'on' else []),
     "route": {
         "rules": [
             # 【路由规则匹配顺序说明】：
@@ -388,7 +389,7 @@ config = {
             ],
             "domain_keyword": ["google"],
             "outbound": "direct"
-        }] if socks5_pool else []),
+        }] if socks5_pool and ai_socks5_routing == 'on' else []),
         "final": "direct"
         # final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
         # 服务端final是direct（VPS在海外，直连即可访问全球网站）

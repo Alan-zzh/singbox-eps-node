@@ -311,13 +311,13 @@
   2. 将 `{"outbound":"direct"}` 普通规则改为 `"final": "direct"`
 - **预防**: config_generator.py生成的服务端配置必须包含DNS和final，与subscription_service.py的客户端配置保持结构一致
 
-### Bug #33: S-UI旧面板残留进程和目录
+### Bug #33: 旧面板残留进程和目录
 - **版本**: v1.0.83
 - **日期**: 2026-04-24
-- **现象**: /opt/s-ui-manager/cdn_monitor.py还在运行，/usr/local/s-ui/sui进程还在，占用内存
+- **现象**: 旧面板进程还在运行，占用内存
 - **根因**: install.sh的uninstall_old_panels只做了stop/disable，没有删除服务文件、目录和杀残留进程
 - **修复**:
-  1. 手动清理服务器上的S-UI残留（停止服务+删除服务文件+删除目录+杀进程）
+  1. 手动清理服务器上的旧面板残留（停止服务+删除服务文件+删除目录+杀进程）
   2. install.sh的uninstall_old_panels加强：删除所有相关systemd服务文件+删除安装目录+杀残留进程+daemon-reload
 - **预防**: 卸载旧面板必须彻底：stop+disable+删除服务文件+删除目录+杀残留进程+daemon-reload
 
@@ -569,9 +569,36 @@
 - **修复**: 改用绝对路径：`python3 /root/singbox-eps-node/scripts/config_generator.py`
 - **预防**: systemd服务文件中所有路径必须使用绝对路径，禁止cd+相对路径的组合
 
----
+### Bug #74: CDN监控测试逻辑不合理，服务器测延迟不代表国内用户体验
+- **版本**: v3.1.3 → v4.0.0
+- **日期**: 2026-05-04
+- **现象**: 
+  1. 110个IP×5端口=550次HTTP延迟测试，每次5秒超时，串行测试要几十分钟
+  2. 新加坡服务器测出来104.21.224.5延迟99ms，但中国用户可能200ms+
+  3. IP池越来越大，测试越来越慢，CPU和网络资源持续占用
+  4. CDN优选IP保存到数据库后，订阅服务读不到（key名称不一致）
+- **根因分析**:
+  1. **根本性错误**：服务器在新加坡/日本测的延迟≠中国用户体验
+  2. 全量HTTP测试纯属浪费资源，IP越多越慢
+  3. 外部API给的IP用户可能早就觉得不好用了
+  4. cdn_monitor.py保存的key（cdn_vless_ws）与subscription_service.py读取的key（vless_ws_cdn_ip）不一致
+- **修复**:
+  1. 彻底重构cdn_monitor.py为v4.0用户反馈驱动版
+  2. 删除HTTP延迟测试，改为TCP存活检测（3秒超时）
+  3. 用户投喂IP池（CDN_PREFERRED_IPS）= 真理来源，优先级最高
+  4. 外部API仅作补充候选，用户IP不足时才使用
+  5. 统一数据库key名称：vless_ws_cdn_ip/vless_upgrade_cdn_ip/trojan_ws_cdn_ip
+  6. 评分算法简化为存活率评分（alive_count/total_checks）
+- **效果对比**：
+  - v3.x：550次测试，几分钟，CPU高占用，延迟判断不准确
+  - v4.0：~100次TCP检测，2秒完成，极低资源消耗，用户反馈为准
+- **预防**: 
+  - CDN优选IP必须以用户反馈为准，不代替用户判断质量
+  - 服务器只做存活检测（IP还活着吗？），不测延迟
+  - 用户说哪个不好用→加黑名单，说哪个好用→加入优选池
+  - CDN监控保存的key必须与订阅服务读取的key保持一致
 
-## 自愈机制设计（v3.0.1新增）
+---
 
 ### 三层自愈保障
 
@@ -957,6 +984,45 @@ python3 -c "from subscription_service import SOCKS5_POOL; print(len(SOCKS5_POOL)
 - **根因**: MAX_PERFORMANCE_HISTORY常量定义了但从未使用，没有实现清理逻辑
 - **修复**: 新增cleanup_old_history()函数，每次run_once()后清理7天前的历史记录
 - **预防**: 有增长的数据表必须有清理机制，定义了常量就要实现对应功能
+
+### Bug #65: 新服务器部署时install.sh被绕过导致功能缺失
+- **版本**: v3.1.3
+- **日期**: 2026-05-03
+- **现象**: 新日本服务器52.195.179.240部署后，3个功能异常：
+  1. 防火墙端口2087未开放（订阅服务无法访问）
+  2. CDN监控服务缺少--daemon参数（进程锁冲突，每小时执行卡住）
+  3. BBR未启用（系统优化步骤被跳过）
+- **根因**: deploy_server.py自定义部署脚本没有调用install.sh，而是手动拼装各个步骤，漏掉了：
+  1. setup_firewall()中的iptables -P INPUT ACCEPT（默认全放行）
+  2. singbox-cdn.service中的--daemon标志
+  3. optimize_system()中的BBR+CAKE配置
+- **修复**: 
+  1. 立即在服务器上补充修复3个遗漏项
+  2. 重写deploy_server.py，改为上传文件后直接调用install.sh，不再手动拼装
+  3. 验证install.sh本身完整无误，包含所有功能步骤
+- **验证结果**: install.sh从第1010行开始的全新安装流程（install命令），按顺序执行：
+  系统更新→安装依赖→BBR+FQ+CAKE优化→卸载旧面板→安装sing-box→克隆项目→Python环境→生成密码→生成密钥→创建.env→生成config→安装证书→防火墙→端口跳跃→systemd服务→Swap优化→定时任务→启动服务→验证→输出摘要
+  每个步骤都在install.sh中有对应函数，无遗漏
+- **预防**: 
+  - 任何部署脚本必须调用install.sh，禁止手动拼装部署步骤
+  - install.sh是唯一安装入口，所有功能变更必须先改install.sh再改其他脚本
+  - 每次改install.sh后必须在空白VPS上实测全新安装
+
+### Bug #66: AI路由强制内置不合理，应改为可选项
+- **版本**: v4.1.0
+- **日期**: 2026-05-07
+- **现象**: AI路由（SOCKS5 AI域名走住宅代理）强制内置，用户无法关闭
+- **根因**: 之前设计时AI路由是固定功能，没有考虑用户可能不需要住宅代理的场景
+- **修复**:
+  1. config.py新增AI_SOCKS5_ROUTING配置项，默认off
+  2. config_generator.py和subscription_service.py条件生成AI路由（仅当AI_SOCKS5_ROUTING=on时）
+  3. install.sh安装时新增交互："是否开启AI路由？(y/N)"，默认N
+  4. tg_bot.py新增/AI路由命令，一键开关，立即重启服务
+  5. 关闭时所有流量走正常协议（VLESS/Trojan/HY2），不经过SOCKS5
+- **预防**: 
+  - 新增功能必须考虑可配置性，避免强制内置
+  - 配置项统一从config.py读取，确保config_generator和subscription_service同步
+  - 开关切换后立即重启服务，确保配置生效
 
 ### 6. 域名匹配优先级规则
 **sing-box 路由规则匹配顺序**:

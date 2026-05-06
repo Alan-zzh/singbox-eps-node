@@ -17,3 +17,5 @@ Thumbs.db
 venv/
 .venv/
 deploy.py
+deploy_server.py
+deploy_*.py

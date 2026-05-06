@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v3.1.4 | **更新**: 2026-05-01
+**版本**: v4.1.0 | **更新**: 2026-05-07
 
 ---
 
@@ -23,7 +23,7 @@
 |------|------|------|
 | singbox | 443, 8443, 2053, 2083 | 代理内核 |
 | singbox-sub | 2087 | HTTPS订阅（走CDN） |
-| singbox-cdn | - | CDN优选IP监控（每小时，进程锁防重复启动） |
+| singbox-cdn | - | CDN优选IP监控（v4.0 用户反馈驱动版，每小时存活检测） |
 
 ### 节点列表
 | 节点 | 地址 | 方式 |
@@ -87,7 +87,7 @@
 - sing-box JSON完整配置（含路由规则，rule_set格式）
 - CDN优选IP自动分配（每个协议独立IP）
 - CDN纠错机制：get_cdn_ip_for_protocol()连通性检测，连不上自动回退域名（Bug #57）
-- SOCKS5 AI路由规则（写死的域名列表，X/推特/groK排除）
+- SOCKS5 AI路由规则（可选项，默认关闭，开启时13个AI域名走住宅代理，X/推特/groK排除）
 - SOCKS5代理检测：check_single_socks5()用socket替换sock_mod，finally确保关闭
 - HY2端口跳跃 hop_ports 字段
 - 按月流量统计（SQLite持久化，每月14号自动归零）
@@ -100,35 +100,35 @@
 - 所有路径从config.py的BASE_DIR/CERT_DIR拼接
 - 证书缺失时自动调用cert_manager.py生成自签名证书
 
-### cdn_monitor.py — CDN优选IP学习系统（v3.1.3）
-1. vvhan API（中国实测，含延迟/速度/数据中心，每15分钟更新，可信度最高）
-2. 090227电信API（中国电信实测，纯162.159段）
-3. 001315电信API（中国电信实测，混合段）
-4. WeTest.vip电信优选DNS（DoH解析，质量不稳定）
-5. IPDB API bestcf（通用优选，大量104段）
-6. 本地实测IP池（兜底）
+### cdn_monitor.py — CDN优选IP学习系统（v4.0 用户反馈驱动版）
 
-评分公式：总分 = 数据源可信度分 + 排名加分 + 交叉验证加分 + IP段参考分
-- 不再按IP段前缀硬过滤，改为综合评分排序
-- 同一IP被多个数据源推荐则大幅加分（交叉验证，每个额外源+15分）
-- 104段不直接丢弃，但降低权重（-10分）
-- 162.159/108.162段加分（+10分），172.64/173.245/198.41段加分（+8分）
+**核心理念：一切以用户反馈为准，服务器只做存活检测**
 
-v3.1.2-3.1.3修复：
-- HTTP真实延迟测试：http_latency_test()改为HTTPS请求，测量完整握手+响应时间（Bug #57）
-- 淘汰IP过滤：被淘汰IP不再入选TOP5，之前只标记不过滤（Bug #58）
-- socket泄漏修复：http_latency_test()异常路径正确关闭ssock和sock（Bug #59）
-- ImportError降级块：移除104段IP，补全DATA_DIR/SERVER_IP/CF_DOMAIN（Bug #60）
-- 数据库连接：assign_and_save_ips()加try/finally（Bug #61）
-- 淘汰逻辑：should_eliminate_ip()处理last_success_time为None（Bug #62）
-- 历史清理：cleanup_old_history()保留7天，防止数据库膨胀（Bug #63）
-- 死代码清理：tcping()/SOURCE_WEIGHT/parse_speed()/MAX_PERFORMANCE_HISTORY（Bug #64）
+**v4.0 根本改变：**
+| 维度 | v3.x（旧） | v4.0（新） |
+|------|-----------|-----------|
+| 测试方式 | 全量HTTP延迟测试（550次+） | TCP存活检测（~100次） |
+| 延迟判断 | 服务器主观测延迟 | 不测延迟，以用户反馈为准 |
+| IP优先级 | 外部API+本地池公平竞争 | 用户IP优先，外部IP备胎 |
+| 速度 | 几分钟 | 2秒完成 |
 
-⚠️ Bug #29教训：WeTest.vip返回104.x.x.x段对中国延迟130ms+，评分系统自动降权
-⚠️ Bug #31教训：~~time.sleep(3600)会卡住，crontab每小时0分重启singbox-cdn兜底保障~~ 已废弃：cdn_monitor.py加进程锁后不再需要crontab重启（Bug #51）
-⚠️ Bug #41教训：硬过滤IP段导致优质IP被丢弃，必须用评分制替代
-⚠️ Bug #57教训：CDN优选IP测试必须用真实HTTPS请求，不能用纯TCP连接测试
-自动同步：cdn_monitor每小时更新IP写入数据库 → subscription_service每次订阅请求实时读取 → 用户更新订阅即可获取最新IP
+**工作流程：**
+1. 用户投喂IP池（config.py的CDN_PREFERRED_IPS）- 真理来源
+2. 外部API补充候选（仅当用户IP不足时）
+3. TCP存活检测（443端口，3秒超时）
+4. 优先选用户IP，不足再补外部IP
+5. 写入数据库（key: vless_ws_cdn_ip/vless_upgrade_cdn_ip/trojan_ws_cdn_ip）
+
+**评分算法：** 存活率评分 = alive_count / total_checks * 100
+
+**v4.0 重构原因：**
+- 服务器在新加坡/日本测的延迟≠中国用户体验
+- 全量HTTP测试浪费资源，IP越多越慢
+- 用户投喂的IP才是用户自己测过觉得好的
+
+⚠️ v3.x评分规则（数据源可信度分+排名加分+交叉验证+IP段参考分）已废弃
+⚠️ HTTP真实延迟测试已废弃，改为TCP存活检测
+自动同步：cdn_monitor每小时更新IP → subscription_service实时读取 → 用户更新订阅即可
 
 ### cert_manager.py — 证书管理+端口跳跃
 - Cloudflare API源证书（15年有效期）
@@ -406,11 +406,17 @@ v3.1.2-3.1.3修复：
   162.159.153.144 | 总分=51 (源=25 排名=16 交叉=0 段=10) | 090227
 ```
 
-### 4. SOCKS5 AI路由
-- 触发: 配置AI_SOCKS5_SERVER后自动生效
-- AI网站走SOCKS5: openai/anthropic/gemini/perplexity/google等
-- X/推特/groK排除: 走直连
-- 幕后路由，用户无需手动选择
+### 4. SOCKS5 AI路由（v4.1.0 可选项）
+- **触发条件**: AI_SOCKS5_ROUTING=on（默认off）
+- **AI网站走SOCKS5**: openai/anthropic/gemini/perplexity/google等
+- **X/推特/groK排除**: 走ePS-Auto正常代理
+- **幕后路由，用户无需手动选择**
+- **配置方式**:
+  - install.sh安装时交互配置
+  - tg_bot.py /AI路由 一键开关
+  - 直接编辑.env文件 AI_SOCKS5_ROUTING=on/off
+- **关闭时**: 所有流量走正常协议（VLESS/Trojan/HY2），不经过SOCKS5
+- **生效时机**: 修改配置后立即重启服务生效
 
 ### 5. 按月流量统计（v3.1.1重构）
 - **数据来源**: iptables内核级流量计数器（sing-box各入站端口）
@@ -613,7 +619,7 @@ v3.1.2-3.1.3修复：
 | 30 | v1.0.82 | config_generator与sub不同步 | 改A忘B | 两个文件必须同步更新 |
 | 31 | v1.0.82 | CDN优选IP更新服务卡住 | time.sleep卡住 | crontab每小时重启singbox-cdn |
 | 32 | v1.0.83 | config_generator缺DNS和final | 从未添加 | 添加DNS+final:direct |
-| 33 | v1.0.83 | S-UI残留进程和目录 | 只stop/disable | 删服务文件+目录+杀进程 |
+| 33 | v1.0.83 | 旧面板残留进程和目录 | 只stop/disable | 删服务文件+目录+杀进程 |
 | 34 | v1.0.84 | CDN重启crontab未写入install.sh | Bug #31修复只在服务器 | install.sh加crontab兜底 |
 | 35 | v1.0.85 | CDN本地池混入104.x.x.x高延迟IP | 本地池未过滤104段 | 移除104段，替换为162.159/172.64段 |
 | 36 | v1.0.85 | cert_manager续签后漏重启singbox-cdn | restart_singbox()漏服务 | 加singbox-cdn重启 |
@@ -651,6 +657,7 @@ v3.1.2-3.1.3修复：
 | v3.0.1 | 04-26 | 三层自愈机制+进程锁防泄漏+VPS内存优化(244MB→181MB)+禁用无用服务 |
 | v3.1.2 | 05-01 | CDN纠错机制+HTTP真实延迟测试+config_generator路由规则补全 |
 | v3.1.3 | 05-01 | 全面问题修复：淘汰IP过滤/socket泄漏/DB连接/历史清理/tg_bot安全加固/health_check增强/diagnose 18项 |
+| v4.0.0 | 05-04 | CDN监控重构为用户反馈驱动版：只测存活、用户IP优先、外部API仅补充、key名称对齐 |
 
 ---
 

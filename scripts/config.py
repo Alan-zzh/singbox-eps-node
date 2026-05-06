@@ -253,6 +253,7 @@ AI_SOCKS5_SERVER = os.getenv('AI_SOCKS5_SERVER', '')
 AI_SOCKS5_PORT = int(os.getenv('AI_SOCKS5_PORT', '0')) if os.getenv('AI_SOCKS5_PORT') else 0
 AI_SOCKS5_USER = os.getenv('AI_SOCKS5_USER', '')
 AI_SOCKS5_PASS = os.getenv('AI_SOCKS5_PASS', '')
+AI_SOCKS5_ROUTING = os.getenv('AI_SOCKS5_ROUTING', 'off').lower()
 
 NODE_PREFIX = f'ePS-{COUNTRY_CODE}'
 

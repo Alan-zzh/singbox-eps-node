@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v3.1.4 | **更新**: 2026-05-01
+**版本**: v4.1.0 | **更新**: 2026-05-07
 
 ---
 
@@ -11,81 +11,88 @@
 |------|------|------|
 | singbox | ✅ | 代理内核，5个入站协议 |
 | singbox-sub | ✅ | HTTPS订阅服务，端口2087 |
-| singbox-cdn | ✅ | CDN优选IP学习系统，每小时自动测试+评分+择优 |
+| singbox-cdn | ✅ | CDN优选IP学习系统（v4.0 用户反馈驱动版） |
 
 ### 核心功能
 - ✅ 5个代理协议：VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
-- ✅ CDN优选IP：v3.1.3学习系统（用户投喂+自动验证+历史评分+自动淘汰+淘汰过滤+历史清理）
+- ✅ CDN优选IP：v4.0 用户反馈驱动版（用户投喂=真理来源 + 存活检测 + 外部API仅补充）
 - ✅ CDN每小时自动更新：cdn_monitor.py while循环 + 进程锁防重复
 - ✅ CDN IP自动同步：cdn_monitor写数据库 → subscription_service实时读取 → 用户更新订阅即可
-- ✅ CDN纠错机制：subscription_service.py启动时检测CDN IP连通性，连不上自动回退到域名兜底（v3.1.2新增）
-- ✅ HTTP真实延迟测试：cdn_monitor.py用HTTPS请求测试真实延迟，不再用纯TCP测试（v3.1.2修复）
-- ✅ IP性能数据库：每个IP独立记录历史延迟/成功率/连续失败次数
-- ✅ 综合评分算法：平均延迟40% + 成功率30% + 稳定性20% + 新鲜度10%
-- ✅ 自动淘汰机制：连续5次失败降权，连续3天不达标移出优选池（v3.1.3修复：被淘汰IP不再入选TOP5）
-- ✅ 用户投喂通道：config.py的IP池作为候选池，脚本自动验证后入库
-- ✅ 黑名单机制：用户手动标记不好的IP直接跳过
-- ✅ 不依赖IP段前缀：完全基于历史表现数据，越用越准
-- ✅ 测试历史自动清理：ip_test_history表保留7天，防止数据库无限膨胀（v3.1.3新增）
-- ✅ SOCKS5 AI路由：13个AI域名走住宅代理，X/推特/groK排除
+- ✅ CDN纠错机制：subscription_service.py启动时检测CDN IP连通性，连不上自动回退到域名兜底
+- ✅ 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
+- ✅ 存活检测：TCP端口连通性测试（3秒超时），不代替用户判断延迟质量
+- ✅ 外部API仅补充候选：当用户IP不足时才使用，不干扰用户优选IP
+- ✅ 黑名单机制：CDN_IP_BLACKLIST永久跳过不需要的IP
+- ✅ IP性能数据库：记录IP存活历史，连续死亡IP建议加入黑名单
+- ✅ SOCKS5 AI路由：可选项（默认关闭），开启时13个AI域名走住宅代理，X/推特/groK排除
+- ✅ AI路由开关：install.sh安装时可配置，tg_bot.py一键切换，立即重启生效
 - ✅ 故障转移：AI-SOCKS5不可用时自动fallback到direct
 - ✅ HY2端口跳跃：14430-14629→443，UDP+TCP双协议
 - ✅ SSL证书：fullchain.pem优先，降级cert.pem
 - ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
 - ✅ BBR+FQ+CAKE三合一加速
 - ✅ 旧面板彻底卸载：x-ui/marzban/3x-ui
-- ✅ 一键诊断脚本：diagnose.sh 18项检查，覆盖服务/端口/证书/防火墙/DNS/CDN/Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程
+- ✅ 一键诊断脚本：diagnose.sh 18项检查
 - ✅ sing-box 1.13.9 完全兼容
 
-### CDN优选IP学习系统（v3.0）
+### CDN优选IP学习系统（v4.0 用户反馈驱动版）
+**核心理念：一切以用户反馈为准，服务器只做存活检测**
+
 **工作流：**
 ```
-用户每天投喂新IP → 加入config.py候选池
-                          ↓
-                    脚本每小时自动执行
-                          ↓
-        所有候选IP TCP连通测试 → 写入性能数据库
-                          ↓
-  综合评分(延迟40%+成功率30%+稳定性20%+新鲜度10%)
-                          ↓
-          自动淘汰不达标IP（连续5次失败/3天无成功）
-                          ↓
-              取评分最高的前5个
-                          ↓
-            更新订阅，用户无感知切换
+用户投喂IP池(config.py) = 真理来源
+          ↓
+    每小时自动执行
+          ↓
+  TCP存活检测（仅3秒，不测延迟）
+          ↓
+  优先选用户IP，不足再补外部IP
+          ↓
+    写入数据库，更新订阅
 ```
 
-**评分算法：**
-| 维度 | 权重 | 说明 |
-|------|------|------|
-| 平均延迟 | 40% | 0-100ms满分，>500ms为0分 |
-| 成功率 | 30% | 成功次数/总测试次数 |
-| 稳定性 | 20% | 连续失败次数扣分（每次-20分） |
-| 新鲜度 | 10% | 最近3天有成功记录得满分，否则递减 |
+**优先级排序：**
+1. 用户投喂IP池（CDN_PREFERRED_IPS）- 真理来源
+2. 外部API候选 - 仅补充不足
+3. 存活检测 - 只测TCP连通性，不测延迟
 
-**淘汰规则：**
-- 连续5次失败 → 降权
-- 成功率<20%（测试>10次后）→ 淘汰
-- 连续3天无成功记录（测试>5次后）→ 淘汰
-- 用户手动加入黑名单 → 直接跳过
+**淘汰机制：**
+- 连续5次死亡 → 建议加入CDN_IP_BLACKLIST
+- 用户手动加入黑名单 → 永久跳过
+- 用户发现新好IP → 加入CDN_PREFERRED_IPS
 
 **数据来源：**
-- 用户投喂候选池（config.py的CDN_PREFERRED_IPS）
-- 外部API补充（vvhan/090227/001315/WeTest/IPDB）
-- 全部统一测试、统一评分、公平竞争
+- 用户投喂候选池（config.py的CDN_PREFERRED_IPS）- 优先级最高
+- 外部API补充（vvhan/090227/001315/WeTest/IPDB）- 仅作备胎
+
+**v4.0 vs v3.x 根本区别：**
+| 维度 | v3.x（旧） | v4.0（新） |
+|------|-----------|-----------|
+| 测试方式 | 全量HTTP延迟测试（550次+） | 仅TCP存活检测（~100次） |
+| 延迟判断 | 服务器主观测延迟 | 不测延迟，以用户反馈为准 |
+| IP优先级 | 外部API+本地池公平竞争 | 用户IP优先，外部IP备胎 |
+| 速度 | 几分钟 | 2秒完成 |
+| 资源消耗 | CPU+网络持续占用 | 极低 |
+| 评分算法 | 综合评分（延迟40%+成功率30%+...） | 存活率评分 |
+
+**为什么v4.0要彻底重构：**
+- 服务器在新加坡/日本测的延迟≠中国用户体验
+- 110个IP×5端口=550次HTTP测试，IP越多越慢越耗资源
+- 外部API给的IP用户可能早就觉得不好用了
+- 用户投喂的IP才是用户自己测过觉得好的
 
 ### 定时任务
 | 任务 | 频率 | 说明 |
 |------|------|------|
-| health_check.sh | 每5分钟 | config.json自愈+端口/服务/订阅/防火墙/证书/磁盘/Swap/iptables流量计数器 |
+| health_check.sh | 每5分钟 | config.json自愈+端口/服务/订阅/防火墙/证书/磁盘/Swap/iptables流量/CDN连通性检查 |
 | cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签 |
 
-### 三层自愈机制（v3.0.1新增）
+### 三层自愈机制
 | 层级 | 机制 | 触发条件 | 恢复动作 |
 |------|------|----------|----------|
 | 第1层 | systemd ExecStartPre | singbox启动时config.json不存在 | 自动运行config_generator.py |
 | 第2层 | health_check.sh | 每5分钟crontab检查 | config.json缺失→自动生成+重启singbox |
-| 第3层 | StartLimitBurst=5 | singbox连续崩溃 | 60秒内最多重启5次 |
+| 第3层 | StartLimitBurst=10 | singbox连续崩溃 | 60秒内最多重启10次 |
 
 ### 路由规则顺序（客户端）
 1. DNS规则
@@ -106,49 +113,16 @@
 
 | Bug# | 版本 | 问题 | 修复 |
 |------|------|------|------|
-| #58 | v3.1.3 | 淘汰IP只标记不过滤，被淘汰IP仍可入选TOP5 | 从tested_results中移除被淘汰IP后再取TOP5 |
-| #59 | v3.1.3 | http_latency_test()异常路径socket泄漏 | finally中关闭ssock和sock |
-| #60 | v3.1.3 | ImportError降级块含104段IP+缺少DATA_DIR/SERVER_IP/CF_DOMAIN | 移除104段IP，补全缺失变量 |
-| #61 | v3.1.3 | assign_and_save_ips()数据库连接无try/finally | conn=None兜底+finally防护关闭 |
-| #62 | v3.1.3 | should_eliminate_ip()中last_success_time为None时跳过检查 | 新增"测试N次从未成功"淘汰规则 |
-| #63 | v3.1.3 | ip_test_history表无清理机制，数据库无限膨胀 | 新增cleanup_old_history()保留7天 |
-| #64 | v3.1.3 | 死代码残留：tcping()/SOURCE_WEIGHT/parse_speed()/MAX_PERFORMANCE_HISTORY | 全部清理 |
-| #28 | v1.0.82 | AI规则含google.com导致延迟高 | 移除通用google域名 |
-| #29 | v1.0.82 | CDN返回104段高延迟 | 001315优先+104段严格过滤 |
-| #30 | v1.0.82 | config_generator与sub不同步 | 两个文件必须同步更新 |
-| #31 | v1.0.82 | CDN更新服务卡住 | crontab每小时重启singbox-cdn |
-| #32 | v1.0.83 | config_generator缺DNS和final | 添加DNS+final:direct |
-| #33 | v1.0.83 | S-UI残留进程和目录 | 删服务文件+目录+杀进程 |
-| #34 | v1.0.84 | CDN重启crontab未写入install.sh | install.sh加crontab兜底 |
-| #35 | v1.0.85 | CDN本地池混入104.x.x.x高延迟IP | 移除104段，替换为162.159/172.64段 |
-| #36 | v1.0.85 | cert_manager续签后漏重启singbox-cdn | restart_singbox()加singbox-cdn |
-| #37 | v1.0.85 | health_check漏检UDP端口(HY2) | 增加UDP 443检查 |
-| #38 | v1.0.85 | cdn_monitor数据库连接泄漏 | init_db()改try/finally |
-| #39 | v1.0.85 | 414MB内存无Swap，OOM killer杀进程 | 创建2GB Swap+禁用fwupd |
-| #40 | v1.0.85 | HUNAN_CT_OPTIMAL_PREFIXES含未验证段 | 移除8.39/8.35，001315也加过滤 |
-| #43 | v2.2.0 | CDN外部API高分IP实际延迟高(50-68ms) | HTTP真实延迟测试为主排序，外部API仅作候选收集 |
-| #44 | v3.0.0 | CDN评分依赖理论值，不反映真实表现 | 重构为学习系统：IP性能数据库+综合评分+自动淘汰+用户投喂 |
-| #45 | v3.0.1 | health_check.sh无执行权限，健康检查完全失效 | install.sh添加chmod +x |
-| #46 | v3.0.1 | fwupd-refresh.timer未禁用，fwupd反复重启触发OOM | mask service+timer |
-| #47 | v3.0.1 | api.vvhan.com DNS失效(NXDOMAIN) | 已有降级处理，无需代码修改 |
-| #48 | v3.0.1 | config.json不存在导致singbox重启46次 | 重新生成+修复health_check权限 |
-| #49 | v3.0.1 | Windows CRLF换行符导致shell脚本无法执行 | sed -i 's/\r$//' 转换 |
-| #50 | v3.0.1 | systemd ExecStartPre中cd+相对路径解析错误 | 改用绝对路径 |
-| #51 | v3.0.1 | cdn_monitor.py进程泄漏，5个孤儿进程浪费80MB | 加进程锁+删crontab重启 |
-| #52 | v3.0.1 | VPS系统服务浪费60MB+内存 | 禁用multipathd/caddy/ModemManager等 |
-| #53 | v3.1.1 | Clash API不返回流量统计，/proxies端点无download/upload字段 | 改用iptables内核级计数器统计入站端口流量 |
-| #54 | v3.1.0 | sing-box 1.13.9 DNS配置不兼容，启动失败 | DNS配置添加final字段，systemd添加ENABLE_DEPRECATED环境变量 |
-| #55 | v3.1.0 | HY2协议连不上，端口跳跃规则缺失 | install.sh防火墙配置添加UDP+TCP双协议端口跳跃 |
-| #56 | v3.1.0 | 一键安装脚本无法在新服务器完整运行 | 修复所有兼容性问题，验证通过 |
-| #65 | v3.1.3 | tg_bot.py /重启命令漏重启singbox-sub和singbox-cdn | restart_singbox()改为重启全部3个服务 |
-| #66 | v3.1.3 | tg_bot.py 设置住宅触发12次服务重启(4次×3服务) | 新增batch_update_env()批量更新后只重启1次 |
-| #67 | v3.1.3 | tg_bot.py 异常信息暴露给用户(stderr/exception) | 异常写日志，返回通用错误信息 |
-| #68 | v3.1.3 | tg_bot.py 启动日志泄露Bot Token前缀 | 移除Token打印，仅记录启动事件 |
-| #69 | v3.1.3 | health_check.sh 缺少Swap和iptables流量计数器检查 | 新增check_swap()和check_iptables_traffic() |
-| #70 | v3.1.3 | health_check.sh 订阅检查硬编码端口2087 | 改为从config.py读取SUB_PORT |
-| #71 | v3.1.3 | health_check.sh config.json自愈不校验JSON语法 | 增加JSON语法校验，损坏时自动重新生成 |
-| #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
+| #74 | v4.0.0 | CDN监控测试逻辑不合理：服务器在新加坡测延迟不代表国内体验，全量测试浪费资源 | 重构为v4.0用户反馈驱动版：只测存活、用户IP优先、外部API仅补充 |
 | #73 | v3.1.3 | diagnose.sh crontab检查仍要求singbox-cdn重启(Bug#51已废弃) | 改为检测到则提示移除 |
+| #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
+| #71 | v3.1.3 | health_check.sh config.json自愈不校验JSON语法 | 增加JSON语法校验，损坏时自动重新生成 |
+| #70 | v3.1.3 | health_check.sh 订阅检查硬编码端口2087 | 改为从config.py读取SUB_PORT |
+| #69 | v3.1.3 | health_check.sh 缺少Swap和iptables流量计数器检查 | 新增check_swap()和check_iptables_traffic() |
+| #68 | v3.1.3 | tg_bot.py 启动日志泄露Bot Token前缀 | 移除Token打印，仅记录启动事件 |
+| #67 | v3.1.3 | tg_bot.py 异常信息暴露给用户(stderr/exception) | 异常写日志，返回通用错误信息 |
+| #66 | v3.1.3 | tg_bot.py 设置住宅触发12次服务重启(4次×3服务) | 新增batch_update_env()批量更新后只重启1次 |
+| #65 | v3.1.3 | tg_bot.py /重启命令漏重启singbox-sub和singbox-cdn | restart_singbox()改为重启全部3个服务 |
 
 ---
 
@@ -170,9 +144,9 @@
 14. fwupd服务在小内存VPS上必须mask，它占用144MB会触发OOM（Bug #39）
 15. singbox日志必须配logrotate，否则日志膨胀占满磁盘（运维#1）
 16. HUNAN_CT_OPTIMAL_PREFIXES只包含实测确认的优质段：162.159/172.64/108.162/198.41/173.245，001315 API返回的非优质段IP也必须过滤（Bug #40修正）
-17. CDN优选IP必须以真实HTTP延迟测试为准，外部API仅提供候选IP，不直接给高分（Bug #43）
-18. CDN优选IP不能依赖IP段前缀打分，必须基于历史表现数据（Bug #44）
-19. CDN学习系统必须记录每个IP的性能历史，否则无法做综合评分和自动淘汰（Bug #44）
+17. ~~CDN优选IP必须以真实HTTP延迟测试为准~~ v4.0已废弃：服务器测的延迟≠用户体验，改为只测存活、以用户反馈为准
+18. ~~CDN优选IP不能依赖IP段前缀打分，必须基于历史表现数据~~ v4.0已废弃：改为用户投喂=真理来源
+19. CDN学习系统必须记录每个IP的性能历史，否则无法做存活检测（v4.0简化为存活记录）
 20. 安装脚本添加crontab前必须先chmod +x，Git上传的脚本文件默认无执行权限（Bug #45）
 21. 禁用服务时必须同时禁用其timer，否则timer会重新拉起service。systemctl mask要覆盖service+timer（Bug #46）
 22. 外部API随时可能失效（如vvhan），必须有降级方案。多数据源+本地池冗余设计是正确的（Bug #47）
@@ -186,3 +160,22 @@
 30. 新服务器一键安装必须完整验证，不能假设脚本能直接跑通，每个版本升级后必须实测（Bug #56）
 31. 部署脚本执行完成后必须删除所有含密码/凭据的临时文件，禁止在本地或远程留存
 32. Clash API /proxies 端点不返回 download/upload 字段，sing-box 1.10.0 无持久流量统计能力。流量统计必须用 iptables 内核级计数器（sing-box 1.13.9 编译标签只有 with_clash_api，没有 with_v2ray_api，所以 gRPC StatsService 也不可用）
+33. CDN监控保存的数据库key必须与订阅服务读取的key一致：vless_ws_cdn_ip/vless_upgrade_cdn_ip/trojan_ws_cdn_ip（Bug #74）
+34. CDN优选IP必须以用户反馈为准，服务器在新加坡/日本测的延迟不代表中国用户体验（v4.0重构依据）
+35. 部署时不能用自定义脚本替代install.sh，install.sh是唯一安装入口，所有功能变更必须先改install.sh（Bug #65教训）
+
+---
+
+## 部署记录
+
+### 新加坡服务器（13.212.37.11）
+- 域名：sg.290372913.xyz
+- 部署时间：2026-05-04
+- 版本：v4.0.0
+- 状态：正常运行
+
+### 日本服务器（52.195.179.240）
+- 域名：jp.290372913.xyz
+- 部署时间：2026-05-03
+- 版本：v3.1.3
+- 状态：正常运行

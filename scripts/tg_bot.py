@@ -174,6 +174,7 @@ def set_bot_commands():
         {"command": "优选", "description": "更新 CDN 优选 IP 地址"},
         {"command": "设置住宅", "description": "设置 AI 住宅IP SOCKS5（链式代理）"},
         {"command": "删除住宅", "description": "删除 AI 住宅IP，恢复普通代理"},
+        {"command": "AI路由", "description": "开启/关闭 AI路由（AI域名走住宅代理）"},
         {"command": "帮助", "description": "显示所有命令详细说明"}
     ]
     data = json.dumps({'commands': commands}).encode()
@@ -236,6 +237,7 @@ def handle_ai_socks5(action, params=None):
             'AI_SOCKS5_PORT': port,
             'AI_SOCKS5_USER': user,
             'AI_SOCKS5_PASS': pwd,
+            'AI_SOCKS5_ROUTING': 'on',
         })
         return f"✅ AI住宅IP已设置\n🌐 服务器: {server}:{port}\n👤 用户: {user}\n🔄 Singbox已重启，AI流量将走住宅IP"
     elif action == 'del':
@@ -244,8 +246,29 @@ def handle_ai_socks5(action, params=None):
             'AI_SOCKS5_PORT': '',
             'AI_SOCKS5_USER': '',
             'AI_SOCKS5_PASS': '',
+            'AI_SOCKS5_ROUTING': 'off',
         })
         return "✅ AI住宅IP已删除\n🔄 Singbox已重启，AI流量将走普通代理"
+
+def handle_ai_routing(action):
+    if action == 'on':
+        current_routing = os.getenv('AI_SOCKS5_ROUTING', 'off')
+        if current_routing == 'on':
+            return "ℹ️ AI路由已经是开启状态"
+        batch_update_env({'AI_SOCKS5_ROUTING': 'on'})
+        return "✅ AI路由已开启\n🔄 Singbox已重启，AI域名将走住宅代理"
+    elif action == 'off':
+        current_routing = os.getenv('AI_SOCKS5_ROUTING', 'off')
+        if current_routing == 'off':
+            return "ℹ️ AI路由已经是关闭状态"
+        batch_update_env({'AI_SOCKS5_ROUTING': 'off'})
+        return "✅ AI路由已关闭\n🔄 Singbox已重启，所有流量走正常协议"
+    elif action == 'status':
+        current_routing = os.getenv('AI_SOCKS5_ROUTING', 'off')
+        if current_routing == 'on':
+            return "🟢 AI路由状态：已开启\nAI域名（ChatGPT/Claude/Gemini等）自动走住宅代理"
+        else:
+            return "🔴 AI路由状态：已关闭\n所有流量走正常协议（VLESS/Trojan/HY2）"
 
 def handle_message(update):
     chat_id = str(update['message']['chat']['id'])
@@ -257,7 +280,9 @@ def handle_message(update):
 
     if text == '/start' or text == '/帮助':
         current_ai = os.getenv('AI_SOCKS5_SERVER', '')
+        current_routing = os.getenv('AI_SOCKS5_ROUTING', 'off')
         ai_status = f"✅ 已配置: {current_ai}" if current_ai else "❌ 未配置"
+        routing_status = "🟢 已开启" if current_routing == 'on' else "🔴 已关闭"
         send_message(chat_id, f"""👋 <b>欢迎使用 Singbox 服务器管理机器人</b>
 
 📖 <b>可用命令</b>（点击即可发送）：
@@ -269,9 +294,11 @@ def handle_message(update):
 /优选 - 🌐 更新 CDN 优选 IP 地址（自动从多源获取最快IP）
 /设置住宅 - 🏠 设置 AI 住宅IP SOCKS5（链式代理，AI流量走住宅IP）
 /删除住宅 - 🗑️ 删除 AI 住宅IP（恢复普通代理模式）
+/AI路由 - 🔀 开启/关闭 AI路由（AI域名走住宅代理）
 /帮助 - ❓ 显示此帮助菜单
 
 🏠 <b>AI住宅IP状态</b>: {ai_status}
+🔀 <b>AI路由状态</b>: {routing_status}
 
 💡 <b>提示</b>：点击命令即可执行，无需手动输入""")
     elif text == '/状态':
@@ -303,6 +330,12 @@ def handle_message(update):
 💡 设置后，所有 AI 网站流量将自动走住宅IP，Singbox 会自动重启""")
     elif text == '/删除住宅':
         send_message(chat_id, handle_ai_socks5('del'))
+    elif text == '/AI路由':
+        current_routing = os.getenv('AI_SOCKS5_ROUTING', 'off')
+        if current_routing == 'on':
+            send_message(chat_id, handle_ai_routing('off'))
+        else:
+            send_message(chat_id, handle_ai_routing('on'))
     elif text.startswith('/设置住宅 '):
         parts = text[7:].strip().split('\n')
         if len(parts) >= 3:

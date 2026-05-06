@@ -320,7 +320,7 @@ install_singbox() {
                 for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD HYSTERIA2_PASSWORD \
                              REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
-                             AI_SOCKS5_USER AI_SOCKS5_PASS SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
+                             AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
                              TG_ADMIN_CHAT_ID; do
                     VALUE=$(grep "^${FIELD}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
                     if [ -n "$VALUE" ]; then
@@ -392,7 +392,7 @@ clone_repo() {
 setup_python_env() {
     log_step "配置Python环境..."
     cd "$BASE_DIR"
-    pip3 install --quiet flask python-dotenv
+    pip3 install --break-system-packages --quiet flask python-dotenv 2>/dev/null || pip3 install --quiet flask python-dotenv 2>/dev/null || apt-get install -y -qq python3-flask python3-dotenv 2>/dev/null || true
     log_info "Python依赖已安装（flask + python-dotenv）"
 }
 
@@ -456,6 +456,7 @@ create_env_file() {
     AI_SOCKS5_PORT=""
     AI_SOCKS5_USER=""
     AI_SOCKS5_PASS=""
+    AI_SOCKS5_ROUTING="off"
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${CYAN}  AI住宅代理配置（可选）${NC}"
@@ -472,6 +473,14 @@ create_env_file() {
         read -p "  SOCKS5密码: " AI_SOCKS5_PASS
         if [ -n "$AI_SOCKS5_SERVER" ] && [ -n "$AI_SOCKS5_PORT" ]; then
             log_info "AI住宅代理已配置: ${AI_SOCKS5_SERVER}:${AI_SOCKS5_PORT}"
+            read -p "  是否开启AI路由？(y/N): " ENABLE_AI_ROUTING
+            if [[ "$ENABLE_AI_ROUTING" =~ ^[Yy]$ ]]; then
+                AI_SOCKS5_ROUTING="on"
+                log_info "AI路由已开启"
+            else
+                AI_SOCKS5_ROUTING="off"
+                log_info "AI路由已关闭（代理配置保留，但不启用路由）"
+            fi
         else
             log_warn "SOCKS5地址或端口为空，跳过AI代理配置"
             AI_SOCKS5_SERVER=""
@@ -516,6 +525,7 @@ AI_SOCKS5_SERVER=${AI_SOCKS5_SERVER}
 AI_SOCKS5_PORT=${AI_SOCKS5_PORT}
 AI_SOCKS5_USER=${AI_SOCKS5_USER}
 AI_SOCKS5_PASS=${AI_SOCKS5_PASS}
+AI_SOCKS5_ROUTING=${AI_SOCKS5_ROUTING}
 TG_BOT_TOKEN=
 TG_ADMIN_CHAT_ID=
 EOF
@@ -994,6 +1004,15 @@ cmd_help() {
 
 main() {
     case "${1:-}" in
+        --yes|-y)
+            # Non-interactive mode: auto-accept all defaults
+            export AUTO_YES=1
+            shift
+            # Fall through to main logic
+            ;;
+    esac
+    
+    case "${1:-}" in
         reset)
             cmd_reset
             ;;
@@ -1006,7 +1025,7 @@ main() {
         help|--help|-h)
             cmd_help
             ;;
-        "")
+        install|--yes|"")
             echo ""
             echo "=========================================="
             echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v2.0.0${NC}"

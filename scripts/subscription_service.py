@@ -88,6 +88,7 @@ except ImportError:
     AI_SOCKS5_PORT = os.getenv('AI_SOCKS5_PORT', '')
     AI_SOCKS5_USER = os.getenv('AI_SOCKS5_USER', '')
     AI_SOCKS5_PASS = os.getenv('AI_SOCKS5_PASS', '')
+    AI_SOCKS5_ROUTING = os.getenv('AI_SOCKS5_ROUTING', 'off').lower()
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     def get_sub_domain():
         """降级：config.py导入失败时，用CF_DOMAIN或SERVER_IP作为订阅地址"""
@@ -720,7 +721,7 @@ def generate_singbox_config():
                 "tag": "ai-residential",
                 "outbounds": [f"AI-SOCKS5-{i+1}" for i in range(len(SOCKS5_POOL))] + ["direct"],
                 "default": "AI-SOCKS5-1"
-            }] if SOCKS5_POOL else []) + [
+            }] if SOCKS5_POOL and AI_SOCKS5_ROUTING == 'on' else []) + [
             {
                 "type": "direct",
                 "tag": "direct"
@@ -858,7 +859,7 @@ def generate_singbox_config():
                 "version": "5",
                 "username": proxy['user'],
                 "password": proxy['pass']
-            } for i, proxy in enumerate(SOCKS5_POOL)]) + [
+            } for i, proxy in enumerate(SOCKS5_POOL)] if SOCKS5_POOL and AI_SOCKS5_ROUTING == 'on' else []) + [
         ],
         "route": {
             "rules": [
@@ -875,6 +876,7 @@ def generate_singbox_config():
                     # 私有IP（192.168.x.x, 10.x.x.x, 172.16-31.x.x等）必须直连
                     # 原理：这些是内网地址，走代理没有意义，且可能导致代理节点连接本地服务失败
                 },
+            ] + ([
                 # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，走ePS-Auto正常代理）- 必须放在geosite-cn和AI规则之前！
                 # 【Bug #25 路由顺序教训】：
                 # sing-box路由规则是按数组顺序匹配的，第一条匹配到的规则生效！
@@ -1045,6 +1047,7 @@ def generate_singbox_config():
                     ],
                     "outbound": "ePS-Auto"
                 },
+            ] if SOCKS5_POOL and AI_SOCKS5_ROUTING == 'on' else []) + [
                 {
                     "rule_set": ["geosite-cn", "geoip-cn"],
                     "outbound": "direct"

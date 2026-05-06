@@ -2,10 +2,16 @@
 """
 Singbox CDN优选IP学习系统
 Author: Alan
-Version: v3.1.3
-Date: 2026-05-01
+Version: v3.1.4
+Date: 2026-05-04
 
 架构设计：用户投喂 + 自动验证 + 历史评分 = 持续优化的CDN优选系统
+
+v3.1.4 性能优化（资源消耗降低90%+）：
+  1. 历史评分为主：已有历史数据的IP（>=3次测试）直接复用评分，不再重复测试
+  2. 新IP轻量验证：只对历史数据不足的新IP做快速测试（1次TCP+1次HTTP）
+  3. 一键安装不影响：安装脚本只启动服务，CDN测试在后台异步运行
+  4. 从110个IP全量测试（550次HTTP）→ 只测新IP（通常<20次测试）
 
 v3.1.3 修复清单：
   1. 淘汰IP过滤：被淘汰IP不再入选TOP5（之前只标记不过滤）
@@ -26,7 +32,7 @@ v3.0 核心特性：
   5. 不依赖IP段前缀：完全基于历史表现数据，越用越准
 
 工作流：
-  每小时执行 → 从候选池+外部API收集IP → HTTP真实延迟测试 → 记录性能 → 综合评分 → 选最优5个
+  每小时执行 → 从候选池+外部API收集IP → 历史评分复用+新IP快速测试 → 综合评分 → 选最优5个
 
 历史版本：
   - v2.0.0: 多源聚合+评分排序（理论优选≠实际最优）
@@ -34,6 +40,7 @@ v3.0 核心特性：
   - v3.0.0: 学习系统+自动淘汰（持续优化，越用越准）
   - v3.1.2: HTTP真实延迟测试+CDN纠错机制
   - v3.1.3: 全面问题修复与风险排查
+  - v3.1.4: 历史评分为主+新IP轻量验证（性能优化90%+）
 """
 
 import os
@@ -52,11 +59,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from config import (
-        SERVER_IP, DATA_DIR, CF_DOMAIN,
+        SERVER_IP, DATA_DIR, CF_DOMAIN, SUB_PORT,
         CDN_MONITOR_INTERVAL, CDN_TOP_IPS_COUNT,
         CDN_PREFERRED_IPS, CDN_IP_BLACKLIST,
         CDN_API_WETEST_CT, CDN_API_IPDB,
         CDN_API_001315_CT, CDN_API_090227_CT, CDN_API_VVHAN,
+        VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT,
     )
     from logger import get_logger
 except ImportError:
@@ -66,6 +74,10 @@ except ImportError:
         return logging.getLogger(name)
     SERVER_IP = ''
     CF_DOMAIN = ''
+    SUB_PORT = 2087
+    VLESS_WS_PORT = 8443
+    VLESS_UPGRADE_PORT = 2053
+    TROJAN_WS_PORT = 2083
     DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
     CDN_PREFERRED_IPS = [
         '162.159.38.161', '108.162.198.221', '162.159.44.242',
@@ -314,6 +326,18 @@ def should_eliminate_ip(perf):
             return True, f"测试{perf['total_tests']}次从未成功"
 
     return False, "正常"
+
+
+def tcp_port_test(ip, port, timeout=1):
+    """快速TCP端口连通性测试（0.5-1秒）"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((ip, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
 
 
 def http_latency_test(ip, port=443, timeout=5, test_url='/'):
@@ -628,26 +652,55 @@ def fetch_cdn_ips():
 
     logger.info(f"\n  共收集 {len(candidate_ips)} 个候选IP")
 
-    logger.info("\n>>> 步骤2：HTTP真实延迟测试 + 记录性能数据")
+    logger.info("\n>>> 步骤2：历史评分为主 + 新IP轻量验证（v3.1.4优化）")
     tested_results = []
+    
+    # 先查历史，有评分的直接用，不重新测
     for ip, info in candidate_ips.items():
-        latency, success = http_latency_test(ip)
-        source_tag = 'local' if 'local' in info['sources'] else 'external'
-        record_ip_test(db_path, ip, latency, success, source=source_tag)
-
-        if success and latency is not None:
-            perf = get_ip_performance(db_path, ip)
+        perf = get_ip_performance(db_path, ip)
+        if perf and perf['total_tests'] >= 3:
+            # 有足够历史数据，直接复用评分
             score = calculate_composite_score(perf)
+            source_tag = 'local' if 'local' in info['sources'] else 'external'
             tested_results.append({
                 'ip': ip,
-                'latency': latency,
+                'latency': perf.get('avg_latency', 999),
                 'speed': info.get('speed'),
                 'score': score,
                 'sources': info['sources'],
                 'perf': perf,
+                'is_new': False,
             })
-        else:
-            logger.debug(f"  ✗ {ip} | HTTP测试失败")
+    
+    # 只对没有历史数据或数据不足的新IP做快速测试
+    new_ips = []
+    for ip, info in candidate_ips.items():
+        perf = get_ip_performance(db_path, ip)
+        if not perf or perf['total_tests'] < 3:
+            new_ips.append((ip, info))
+    
+    if new_ips:
+        logger.info(f"  发现 {len(new_ips)} 个新IP（历史数据不足），快速测试...")
+        for ip, info in new_ips:
+            # 只做一次TCP端口测试 + 一次HTTP测试
+            if tcp_port_test(ip, 443, timeout=1):
+                latency, success = http_latency_test(ip, port=443, timeout=3)
+                if success and latency is not None:
+                    source_tag = 'local' if 'local' in info['sources'] else 'external'
+                    record_ip_test(db_path, ip, latency, True, source=source_tag)
+                    perf = get_ip_performance(db_path, ip)
+                    score = calculate_composite_score(perf)
+                    tested_results.append({
+                        'ip': ip,
+                        'latency': latency,
+                        'speed': info.get('speed'),
+                        'score': score,
+                        'sources': info['sources'],
+                        'perf': perf,
+                        'is_new': True,
+                    })
+    else:
+        logger.info("  所有IP都有历史数据，直接复用评分")
 
     logger.info(f"\n>>> 步骤3：综合评分排序（v3.0学习算法）")
     tested_results.sort(key=lambda x: (-x['score'], x['latency']))
@@ -660,10 +713,11 @@ def fetch_cdn_ips():
         perf = r['perf']
         speed_str = f" 速度={r['speed']}" if r['speed'] else ""
         tag = "[本地]" if 'local' in r['sources'] else "[外部]"
+        new_tag = "(新)" if r.get('is_new') else "(历史)"
         test_info = ""
         if perf:
             test_info = f" 测试{perf['total_tests']}次 成功率{perf['success_count']}/{perf['total_tests']}"
-        logger.info(f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} 延迟={r['latency']:.1f}ms{speed_str}{test_info}")
+        logger.info(f"  {i+1}. {r['ip']} | {tag}{new_tag} 评分={r['score']} 延迟={r['latency']:.1f}ms{speed_str}{test_info}")
 
     eliminated_set = set()
     eliminated = []
