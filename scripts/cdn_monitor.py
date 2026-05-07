@@ -2,10 +2,22 @@
 """
 Singbox CDN优选IP学习系统
 Author: Alan
-Version: v3.1.4
-Date: 2026-05-04
+Version: v4.1.0
+Date: 2026-05-07
 
 架构设计：用户投喂 + 自动验证 + 历史评分 = 持续优化的CDN优选系统
+
+v4.1.0 存活优先模式（用户反馈驱动）：
+  1. 检查数据库现有CDN IP，逐个TCP存活检测
+  2. 存活的IP保留，死亡的IP才替换
+  3. 收集候选IP（用户投喂+外部API）
+  4. 从候选池挑存活IP补上死亡空缺
+  5. 只对新增候选IP做HTTP测试记录评分
+
+v4.0 用户反馈驱动版：
+  1. 用户投喂=真理来源，外部API仅补充
+  2. 只测TCP存活，不测延迟（服务器延迟≠用户体验）
+  3. 用户IP优先，外部IP备胎
 
 v3.1.4 性能优化（资源消耗降低90%+）：
   1. 历史评分为主：已有历史数据的IP（>=3次测试）直接复用评分，不再重复测试
@@ -569,14 +581,73 @@ def fetch_from_ipdb_api():
         return []
 
 
+def get_current_cdn_ips_from_db():
+    """从数据库读取当前正在使用的CDN优选IP"""
+    db_path = os.path.join(DATA_DIR, 'singbox.db')
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM cdn_settings WHERE key='cdn_ips_list'")
+        row = cursor.fetchone()
+        if row and row[0]:
+            ips = [ip.strip() for ip in row[0].split(',') if ip.strip()]
+            logger.info(f"  数据库现有CDN IP: {ips}")
+            return ips
+        return []
+    except Exception as e:
+        logger.debug(f"  读取现有CDN IP失败: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
 def fetch_cdn_ips():
+    """
+    v4.1 存活优先模式：
+    1. 读取数据库现有CDN IP，逐个TCP存活检测
+    2. 存活的IP保留，死亡的IP标记为待替换
+    3. 收集候选IP（用户投喂+外部API）
+    4. 从候选池挑存活IP补上死亡空缺
+    5. 只对新增候选IP做HTTP测试记录评分
+    """
     db_path = init_db()
+    
+    # 步骤1：检查现有CDN IP存活情况
+    logger.info(">>> 步骤1：检查现有CDN IP存活情况")
+    current_ips = get_current_cdn_ips_from_db()
+    alive_ips = []
+    dead_ips = []
+    
+    if current_ips:
+        for ip in current_ips:
+            if ip in CDN_IP_BLACKLIST:
+                logger.info(f"  {ip} 在黑名单中，跳过")
+                dead_ips.append(ip)
+                continue
+            if tcp_port_test(ip, 443, timeout=3):
+                alive_ips.append(ip)
+                logger.info(f"  {ip} ✅ 存活")
+            else:
+                dead_ips.append(ip)
+                logger.info(f"  {ip} ❌ 死亡")
+        logger.info(f"  存活: {len(alive_ips)} 个, 死亡: {len(dead_ips)} 个")
+    else:
+        logger.info("  数据库无现有IP，需要全新优选")
+    
+    # 如果全部存活，不需要更新
+    if current_ips and not dead_ips:
+        logger.info("[OK] 所有CDN IP存活正常，不更新")
+        return current_ips
+    
+    # 步骤2：收集候选IP（用于填补死亡空缺）
+    logger.info("\n>>> 步骤2：收集候选IP")
     candidate_ips = {}
     source_status = {}
-
-    logger.info(">>> 步骤1：收集所有候选IP")
-
-    logger.info("  1.1 用户投喂候选池")
+    
+    # 2.1 用户投喂候选池（优先级最高）
+    logger.info("  2.1 用户投喂候选池")
     if CDN_IP_BLACKLIST:
         logger.info(f"  黑名单过滤: {len(CDN_IP_BLACKLIST)} 个IP将被跳过")
     for ip in CDN_PREFERRED_IPS:
@@ -589,7 +660,7 @@ def fetch_cdn_ips():
             candidate_ips[ip]['sources'].append('local')
     source_status['local'] = len(CDN_PREFERRED_IPS) > 0
 
-    logger.info("  1.2 vvhan API")
+    logger.info("  2.2 vvhan API")
     vvhan_data = fetch_from_vvhan_ct()
     source_status['vvhan'] = bool(vvhan_data)
     if vvhan_data:
@@ -600,7 +671,7 @@ def fetch_cdn_ips():
             else:
                 candidate_ips[ip]['sources'].append('vvhan')
 
-    logger.info("  1.3 090227电信API")
+    logger.info("  2.3 090227电信API")
     ips_090227 = fetch_from_090227_ct()
     source_status['090227'] = bool(ips_090227)
     if ips_090227:
@@ -610,7 +681,7 @@ def fetch_cdn_ips():
             else:
                 candidate_ips[ip]['sources'].append('090227')
 
-    logger.info("  1.4 001315电信API")
+    logger.info("  2.4 001315电信API")
     ips_001315 = fetch_from_001315_ct()
     source_status['001315'] = bool(ips_001315)
     if ips_001315:
@@ -620,7 +691,7 @@ def fetch_cdn_ips():
             else:
                 candidate_ips[ip]['sources'].append('001315')
 
-    logger.info("  1.5 WeTest DNS")
+    logger.info("  2.5 WeTest DNS")
     ips_wetest = fetch_from_wetest_ct()
     source_status['wetest'] = bool(ips_wetest)
     if ips_wetest:
@@ -630,7 +701,7 @@ def fetch_cdn_ips():
             else:
                 candidate_ips[ip]['sources'].append('wetest')
 
-    logger.info("  1.6 IPDB API")
+    logger.info("  2.6 IPDB API")
     ips_ipdb = fetch_from_ipdb_api()
     source_status['ipdb'] = bool(ips_ipdb)
     if ips_ipdb:
@@ -640,7 +711,7 @@ def fetch_cdn_ips():
             else:
                 candidate_ips[ip]['sources'].append('ipdb')
 
-    # v3.0 黑名单全局过滤（所有来源都要过滤）
+    # v4.1 黑名单全局过滤（所有来源都要过滤）
     if CDN_IP_BLACKLIST:
         before_count = len(candidate_ips)
         for bl_ip in CDN_IP_BLACKLIST:
@@ -652,16 +723,20 @@ def fetch_cdn_ips():
 
     logger.info(f"\n  共收集 {len(candidate_ips)} 个候选IP")
 
-    logger.info("\n>>> 步骤2：历史评分为主 + 新IP轻量验证（v3.1.4优化）")
+    # 步骤3：对候选IP做TCP存活测试+评分排序
+    logger.info("\n>>> 步骤3：候选IP存活测试+评分排序")
     tested_results = []
     
-    # 先查历史，有评分的直接用，不重新测
     for ip, info in candidate_ips.items():
+        # 先做TCP存活测试
+        if not tcp_port_test(ip, 443, timeout=3):
+            continue
+        
+        # 存活的IP，查历史评分
         perf = get_ip_performance(db_path, ip)
         if perf and perf['total_tests'] >= 3:
-            # 有足够历史数据，直接复用评分
+            # 有历史数据，直接复用评分
             score = calculate_composite_score(perf)
-            source_tag = 'local' if 'local' in info['sources'] else 'external'
             tested_results.append({
                 'ip': ip,
                 'latency': perf.get('avg_latency', 999),
@@ -671,78 +746,55 @@ def fetch_cdn_ips():
                 'perf': perf,
                 'is_new': False,
             })
-    
-    # 只对没有历史数据或数据不足的新IP做快速测试
-    new_ips = []
-    for ip, info in candidate_ips.items():
-        perf = get_ip_performance(db_path, ip)
-        if not perf or perf['total_tests'] < 3:
-            new_ips.append((ip, info))
-    
-    if new_ips:
-        logger.info(f"  发现 {len(new_ips)} 个新IP（历史数据不足），快速测试...")
-        for ip, info in new_ips:
-            # 只做一次TCP端口测试 + 一次HTTP测试
-            if tcp_port_test(ip, 443, timeout=1):
-                latency, success = http_latency_test(ip, port=443, timeout=3)
-                if success and latency is not None:
-                    source_tag = 'local' if 'local' in info['sources'] else 'external'
-                    record_ip_test(db_path, ip, latency, True, source=source_tag)
-                    perf = get_ip_performance(db_path, ip)
-                    score = calculate_composite_score(perf)
-                    tested_results.append({
-                        'ip': ip,
-                        'latency': latency,
-                        'speed': info.get('speed'),
-                        'score': score,
-                        'sources': info['sources'],
-                        'perf': perf,
-                        'is_new': True,
-                    })
-    else:
-        logger.info("  所有IP都有历史数据，直接复用评分")
+        else:
+            # 新IP，做HTTP测试
+            latency, success = http_latency_test(ip, port=443, timeout=3)
+            if success and latency is not None:
+                source_tag = 'local' if 'local' in info['sources'] else 'external'
+                record_ip_test(db_path, ip, latency, True, source=source_tag)
+                perf = get_ip_performance(db_path, ip)
+                score = calculate_composite_score(perf)
+                tested_results.append({
+                    'ip': ip,
+                    'latency': latency,
+                    'speed': info.get('speed'),
+                    'score': score,
+                    'sources': info['sources'],
+                    'perf': perf,
+                    'is_new': True,
+                })
 
-    logger.info(f"\n>>> 步骤3：综合评分排序（v3.0学习算法）")
+    # 按评分排序（分数越高越好）
     tested_results.sort(key=lambda x: (-x['score'], x['latency']))
 
-    local_count = sum(1 for r in tested_results if 'local' in r['sources'])
-    external_count = len(tested_results) - local_count
-    logger.info(f"  本地池可达 {local_count} 个，外部API可达 {external_count} 个")
-
-    for i, r in enumerate(tested_results[:15]):
-        perf = r['perf']
-        speed_str = f" 速度={r['speed']}" if r['speed'] else ""
+    logger.info(f"  存活候选: {len(tested_results)} 个")
+    for i, r in enumerate(tested_results[:10]):
         tag = "[本地]" if 'local' in r['sources'] else "[外部]"
-        new_tag = "(新)" if r.get('is_new') else "(历史)"
-        test_info = ""
-        if perf:
-            test_info = f" 测试{perf['total_tests']}次 成功率{perf['success_count']}/{perf['total_tests']}"
-        logger.info(f"  {i+1}. {r['ip']} | {tag}{new_tag} 评分={r['score']} 延迟={r['latency']:.1f}ms{speed_str}{test_info}")
+        logger.info(f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} 延迟={r['latency']:.1f}ms")
 
-    eliminated_set = set()
-    eliminated = []
-    for r in tested_results:
-        elim, reason = should_eliminate_ip(r['perf'])
-        if elim:
-            eliminated_set.add(r['ip'])
-            eliminated.append((r['ip'], reason))
-
-    if eliminated:
-        logger.info(f"\n  淘汰 {len(eliminated)} 个不达标IP:")
-        for ip, reason in eliminated[:5]:
-            logger.info(f"    ✗ {ip} - {reason}")
-
-    valid_results = [r for r in tested_results if r['ip'] not in eliminated_set]
-    valid_ips = [r['ip'] for r in valid_results[:CDN_TOP_IPS_COUNT]]
-
+    # 步骤4：只替换死亡的IP
+    logger.info(f"\n>>> 步骤4：填补死亡IP空缺（需要{len(dead_ips)}个）")
+    
+    # 优先保留存活的老IP
+    final_ips = list(alive_ips)
+    
+    # 从候选池挑评分最高的补上
+    needed = CDN_TOP_IPS_COUNT - len(final_ips)
+    if needed > 0:
+        # 过滤掉已经在final_ips里的
+        new_candidates = [r for r in tested_results if r['ip'] not in set(final_ips)]
+        for r in new_candidates[:needed]:
+            final_ips.append(r['ip'])
+            logger.info(f"  新增: {r['ip']} (评分={r['score']})")
+    
     logger.info(f"\n[数据源状态报告]")
     for source, success in source_status.items():
         status = "✓ 成功" if success else "✗ 失败"
         logger.info(f"  {source}: {status}")
 
-    if valid_ips:
-        logger.info(f"\n[OK] 最终优选 {len(valid_ips)} 个IP: {valid_ips}")
-        return valid_ips
+    if final_ips:
+        logger.info(f"\n[OK] 最终优选 {len(final_ips)} 个IP: {final_ips}")
+        return final_ips
     else:
         logger.warning("[WARN] 所有IP测试均失败，使用本地池前5个")
         return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT]

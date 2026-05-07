@@ -1182,6 +1182,7 @@ def create_app():
         return Response(html, mimetype='text/html')
 
     @app.route(f'/sub/{COUNTRY_CODE}')
+    @app.route(f'/sub/{COUNTRY_CODE.lower()}')
     @app.route('/sub')
     def get_subscription():
         """Base64订阅链接（兼容旧客户端）
@@ -1214,6 +1215,7 @@ def create_app():
                         headers={'subscription-userinfo': userinfo})
 
     @app.route(f'/singbox/{COUNTRY_CODE}')
+    @app.route(f'/singbox/{COUNTRY_CODE.lower()}')
     @app.route('/singbox')
     def get_singbox_config():
         """完整sing-box JSON配置（含自动路由规则）
