@@ -593,10 +593,40 @@
   - v3.x：550次测试，几分钟，CPU高占用，延迟判断不准确
   - v4.0：~100次TCP检测，2秒完成，极低资源消耗，用户反馈为准
 - **预防**: 
-  - CDN优选IP必须以用户反馈为准，不代替用户判断质量
+  - **预防**: CDN优选IP必须以用户反馈为准，不代替用户判断质量
   - 服务器只做存活检测（IP还活着吗？），不测延迟
   - 用户说哪个不好用→加黑名单，说哪个好用→加入优选池
   - CDN监控保存的key必须与订阅服务读取的key保持一致
+
+### Bug #75: CDN监控每小时重新选TOP5，即使现有IP都存活也会换
+- **版本**: v4.0.0 → v4.1.0
+- **日期**: 2026-05-07
+- **现象**: 
+  1. v4.0每小时重新收集候选IP+评分排序，选出新的TOP5
+  2. 即使数据库现有5个IP全部存活，也会被替换掉
+  3. 频繁切换IP可能导致用户连接不稳定
+  4. 用户投喂的优质IP（162.159.109.77等）不在CDN_PREFERRED_IPS里，不会被测试
+- **根因分析**:
+  1. v4.0的fetch_cdn_ips()每次都从零开始选TOP5，没有"保留现有存活IP"的逻辑
+  2. 外部API持续收集新IP，评分高的会挤掉现有IP
+  3. 用户反馈好用的IP需要手动加到config.py才会被系统识别
+- **修复**:
+  1. 重构fetch_cdn_ips()为v4.1存活优先模式：
+     - 步骤1：读取数据库现有CDN IP，逐个TCP存活检测
+     - 步骤2：存活的IP保留，死亡的IP标记待替换
+     - 步骤3：收集候选IP（用户投喂+外部API持续收集）
+     - 步骤4：从候选池挑存活IP补上死亡空缺
+     - 步骤5：只对新增候选IP做HTTP测试记录评分
+  2. 新增get_current_cdn_ips_from_db()函数读取现有IP
+  3. 更新CDN_PREFERRED_IPS：添加用户投喂的优质IP（162.159.109.77/162.159.109.87/162.159.105.93/162.159.105.151/172.64.53.146/172.64.48.95）
+  4. 更新CDN_IP_BLACKLIST：添加104.18.185.26（用户反馈拉跨）
+- **效果对比**：
+  - v4.0：每小时重新选TOP5，即使现有IP都存活也会换，可能频繁切换
+  - v4.1：现有IP存活则不换，死亡才替换，更稳定
+- **预防**: 
+  - CDN优选IP更新逻辑应该是"存活不换，死亡才换"
+  - 外部API持续收集作为候选池补充，但不主动挤掉现有IP
+  - 用户反馈好用的IP要及时加入CDN_PREFERRED_IPS
 
 ---
 
@@ -1023,6 +1053,26 @@ python3 -c "from subscription_service import SOCKS5_POOL; print(len(SOCKS5_POOL)
   - 新增功能必须考虑可配置性，避免强制内置
   - 配置项统一从config.py读取，确保config_generator和subscription_service同步
   - 开关切换后立即重启服务，确保配置生效
+
+### Bug #75: .env行内注释被Python当作配置值读取导致ValueError
+- **版本**: v4.1.1
+- **日期**: 2026-05-07
+- **现象**: 日本服务器singbox-sub服务持续崩溃，报错`ValueError: invalid literal for int() with base 10: '# SOCKS5端口'`，singbox也因空密码无法启动
+- **根因**: 
+  1. .env.example中配置项带行内注释（如`AI_SOCKS5_PORT=  # SOCKS5端口`）
+  2. install.sh生成.env时直接复制了注释格式
+  3. config.py读取`os.getenv('AI_SOCKS5_PORT')`时返回`'# SOCKS5端口'`而非空值
+  4. `int('# SOCKS5端口')`直接崩溃
+  5. 同时VLESS_UUID/TROJAN_PASSWORD等核心密码为空，singbox报`invalid private key`和`missing obfs password`
+- **修复**:
+  1. 服务器端：`sed -i 's/[[:space:]]*#.*$//' .env` 清除所有行内注释
+  2. 生成所有协议密码（VLESS UUID、Trojan密码、HY2密码、Reality密钥对）
+  3. 重新生成config.json并重启所有服务
+  4. .env.example注释格式已改为独立行注释（不放在值后面）
+- **预防**: 
+  - .env文件中禁止使用行内注释，注释必须单独成行
+  - install.sh生成.env时确保不携带注释
+  - config.py读取环境变量时必须处理注释干扰
 
 ### 6. 域名匹配优先级规则
 **sing-box 路由规则匹配顺序**:
