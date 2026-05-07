@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.1 | **更新**: 2026-05-07
+**版本**: v4.3.2 | **更新**: 2026-05-08
 
 ---
 
@@ -126,6 +126,10 @@
 | #78 | v4.3.1 | REALITY协议100%握手失败，客户端疯狂重试导致卡顿 | 重新生成REALITY密钥对（日本+新加坡），重启订阅服务 |
 | #79 | v4.3.1 | sing-box 1.12.0+ DNS配置格式过时导致启动失败 | systemd服务添加ENABLE_DEPRECATED_LEGACY_DNS_SERVERS和ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER环境变量 |
 | #80 | v4.3.1 | singbox-cdn服务未运行（日本），CDN数据库不存在 | 启动singbox-cdn，创建CDN数据库 |
+| #81 | v4.3.2 | subscription_service.py的COUNTRY_CODE/SUB_TOKEN/AI_SOCKS5_POOL自己读.env不从config.py导入，违反唯一真相源 | 改为从config.py统一导入，删掉覆盖行 |
+| #82 | v4.3.2 | REALITY_SHORT_ID/DEST/SNI从config.py导入后被os.getenv覆盖，等于白导入 | 删掉覆盖行，直接用config.py导入值 |
+| #83 | v4.3.2 | config.py缺少AI_SOCKS5_POOL变量定义 | 补充AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '') |
+| #84 | v4.3.2 | install.sh硬编码CF API Token，推GitHub会泄露 | 改为环境变量传入+交互式输入 |
 | #74 | v4.0.0 | CDN监控测试逻辑不合理：服务器在新加坡测延迟不代表国内体验，全量测试浪费资源 | 重构为v4.0用户反馈驱动版：只测存活、用户IP优先、外部API仅补充 |
 | #73 | v3.1.3 | diagnose.sh crontab检查仍要求singbox-cdn重启(Bug#51已废弃) | 改为检测到则提示移除 |
 | #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
@@ -178,6 +182,9 @@
 35. 部署时不能用自定义脚本替代install.sh，install.sh是唯一安装入口，所有功能变更必须先改install.sh（Bug #65教训）
 36. AWS云服务器默认MTU 9001（Jumbo Frames），但客户端MTU 1500，数据包分片导致UDP丢包和TCP重传，所有协议卡顿。必须改为MTU 1500 + 优化UDP缓冲区（Bug #76）
 37. 新加坡服务器CF_DOMAIN必须用sg.290372913.xyz，不能用us域名，否则CDN节点SNI错误导致连不上（Bug #77）
+38. subscription_service.py从config.py导入的变量禁止被os.getenv覆盖，否则等于白导入，config.py的值会被丢弃（Bug #82）
+39. config.py必须定义所有被其他文件引用的变量，缺少定义会导致ImportError或NameError（Bug #83）
+40. install.sh禁止硬编码API Token/密码/密钥，必须从环境变量传入或交互式输入，否则推GitHub会泄露（Bug #84）
 
 ---
 

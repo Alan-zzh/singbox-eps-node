@@ -1,6 +1,34 @@
 # AI 调试历史与防Bug规则 (AI Debug History)
 
-## 🆕 最新修复（2026-05-07）
+## 🆕 最新修复（2026-05-08）
+
+### Bug #84: install.sh硬编码CF API Token泄露
+- **问题**: install.sh第33行硬编码Cloudflare API Token，推到GitHub公开仓库会泄露
+- **影响**: 任何人可拿到Token操作你的Cloudflare DNS
+- **修复**: CF_DEFAULT_API_TOKEN改为从环境变量CF_API_TOKEN读取，无值时交互式询问用户输入
+- **验证**: grep确认install.sh中无硬编码Token
+
+### Bug #83: config.py缺少AI_SOCKS5_POOL变量定义
+- **问题**: subscription_service.py和config_generator.py都引用AI_SOCKS5_POOL，但config.py没有定义
+- **影响**: 违反唯一真相源规则，其他文件只能自己读.env
+- **修复**: config.py添加 AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '')
+- **验证**: subscription_service.py从config.py成功导入AI_SOCKS5_POOL
+
+### Bug #82: REALITY_SHORT_ID/DEST/SNI导入后被覆盖
+- **问题**: subscription_service.py从config.py导入了REALITY_SHORT_ID/DEST/SNI，但紧接着用os.getenv覆盖
+- **影响**: config.py的值被丢弃，等于白导入。如果config.py有特殊逻辑（如默认值检测），这些逻辑全部失效
+- **修复**: 删掉3行覆盖代码，直接使用config.py导入的值
+- **验证**: grep确认subscription_service.py中无 os.getenv('REALITY_SHORT_ID') 等覆盖行
+
+### Bug #81: subscription_service.py多个变量不从config.py导入
+- **问题**: COUNTRY_CODE、SUB_TOKEN、AI_SOCKS5_POOL自己用os.getenv读，不从config.py导入
+- **影响**: 违反唯一真相源规则，如果config.py的默认值或读取逻辑变更，subscription_service.py不会同步
+- **修复**: 
+  - COUNTRY_CODE/SUB_TOKEN/AI_SOCKS5_POOL加入config.py导入列表
+  - ImportError降级块也补充这3个变量
+  - parse_socks5_pool()改用导入的AI_SOCKS5_POOL变量
+  - 删掉独立的COUNTRY_CODE定义行
+- **验证**: 语法检查通过，所有变量从config.py统一导入
 
 ### Bug #80: singbox-cdn未运行+CDN数据库缺失
 - **问题**: 日本服务器singbox-cdn服务未运行，CDN数据库文件不存在

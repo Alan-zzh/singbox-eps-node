@@ -61,7 +61,7 @@ try:
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
-        get_sub_domain, BASE_DIR
+        AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR
     )
     from logger import get_logger
 except ImportError:
@@ -89,6 +89,9 @@ except ImportError:
     AI_SOCKS5_USER = os.getenv('AI_SOCKS5_USER', '')
     AI_SOCKS5_PASS = os.getenv('AI_SOCKS5_PASS', '')
     AI_SOCKS5_ROUTING = os.getenv('AI_SOCKS5_ROUTING', 'off').lower()
+    AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '')
+    COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
+    SUB_TOKEN = os.getenv('SUB_TOKEN', '')
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     def get_sub_domain():
         """降级：config.py导入失败时，用CF_DOMAIN或SERVER_IP作为订阅地址"""
@@ -105,7 +108,7 @@ SOCKS5_POOL = []  # 可用代理列表，每个元素为dict: {server, port, use
 
 def parse_socks5_pool():
     """解析代理池配置，返回代理列表"""
-    pool_str = os.getenv('AI_SOCKS5_POOL', '')
+    pool_str = AI_SOCKS5_POOL
     if not pool_str:
         # 兼容旧配置：单个代理
         if AI_SOCKS5_SERVER and AI_SOCKS5_PORT:
@@ -206,7 +209,6 @@ check_socks5_pool()
 SERVER_IP = SERVER_IP if SERVER_IP else os.getenv('SERVER_IP', '')
 CF_DOMAIN = CF_DOMAIN if CF_DOMAIN else os.getenv('CF_DOMAIN', '')
 DB_PATH = DB_FILE if 'DB_FILE' in dir() else os.path.join(DATA_DIR, 'singbox.db')
-COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 USE_DOMAIN = bool(CF_DOMAIN and CF_DOMAIN.strip() != '')
 
 # 协议密码和UUID：这些值只在.env中，config.py不导出，必须从环境变量读取
@@ -218,11 +220,7 @@ VLESS_UPGRADE_PORT = VLESS_UPGRADE_PORT if 'VLESS_UPGRADE_PORT' in dir() else in
 TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
 HYSTERIA2_PASSWORD = os.getenv('HYSTERIA2_PASSWORD', '')
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
-REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID', 'abcd1234')
-REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
-REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
 EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
-SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)

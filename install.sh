@@ -29,8 +29,8 @@ NC='\033[0m'
 BASE_DIR="/root/singbox-eps-node"
 REPO_URL="https://github.com/Alan-zzh/singbox-eps-node"
 
-CF_DEFAULT_DOMAIN="us.290372913.xyz"
-CF_DEFAULT_API_TOKEN="73a1fd81dd0f5087d45572135d5bf783ab26a"
+CF_DEFAULT_DOMAIN="${CF_DOMAIN:-}"
+CF_DEFAULT_API_TOKEN="${CF_API_TOKEN:-}"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -498,6 +498,16 @@ create_env_file() {
         OLD_CF_TOKEN=$(grep "^CF_API_TOKEN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
         [ -n "$OLD_CF_DOMAIN" ] && CF_DOMAIN_INPUT="$OLD_CF_DOMAIN"
         [ -n "$OLD_CF_TOKEN" ] && CF_API_TOKEN_INPUT="$OLD_CF_TOKEN"
+    fi
+    if [ -z "$CF_DOMAIN_INPUT" ] && [ "${AUTO_YES:-0}" != "1" ]; then
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  Cloudflare 域名配置（可选，用于CDN和SSL证书）${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+        if [ -n "$CF_DOMAIN_INPUT" ]; then
+            read -p "  Cloudflare API Token（留空跳过）: " CF_API_TOKEN_INPUT
+        fi
     fi
     log_info "CF_DOMAIN: ${CF_DOMAIN_INPUT}"
     log_info "CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}..."
