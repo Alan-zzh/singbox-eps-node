@@ -2,6 +2,27 @@
 
 ## 🆕 最新修复（2026-05-07）
 
+### Bug #80: singbox-cdn未运行+CDN数据库缺失
+- **问题**: 日本服务器singbox-cdn服务未运行，CDN数据库文件不存在
+- **影响**: CDN优选IP无法自动更新，订阅中CDN节点可能失效
+- **修复**: 启动singbox-cdn服务，创建SQLite数据库和表结构
+- **验证**: systemctl status singbox-cdn显示active
+
+### Bug #79: sing-box 1.12.0+ DNS配置格式不兼容
+- **问题**: sing-box 1.13.9/1.13.11要求新的DNS服务器格式，旧格式启动失败
+- **影响**: singbox无法启动，所有代理服务中断
+- **修复**: systemd服务文件添加ENABLE_DEPRECATED_LEGACY_DNS_SERVERS和ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER环境变量
+- **验证**: sing-box check通过，服务正常启动
+
+### Bug #78: REALITY协议100%握手失败
+- **问题**: REALITY私钥/公钥不匹配，客户端TLS握手全部失败
+- **影响**: REALITY节点完全不可用，客户端疯狂重试导致连接池占满，所有协议卡顿（1秒+延迟）
+- **修复**: 
+  - 重新生成REALITY密钥对（日本+新加坡）
+  - 更新.env和config.json
+  - 重启singbox和订阅服务
+- **验证**: 订阅链接中的pbk=公钥与服务器配置匹配
+
 ### Bug #77: 新加坡CF_DOMAIN配置错误
 - **问题**: 新加坡服务器.env中CF_DOMAIN=us.290372913.xyz（美国域名）
 - **影响**: CDN节点SNI使用美国域名，流量绕道美国，客户端连不上
