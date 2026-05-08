@@ -692,6 +692,37 @@ EOF
     fi
 }
 
+clean_crontab_conflicts() {
+    log_step "清理crontab冲突定时任务..."
+    local old_cron
+    old_cron=$(crontab -l 2>/dev/null || echo "")
+    if echo "$old_cron" | grep -q "restart singbox-cdn"; then
+        echo "$old_cron" | grep -v "restart singbox-cdn" | crontab -
+        log_info "已删除冲突的 singbox-cdn 定时重启任务（由systemd管理，无需crontab）"
+    else
+        log_info "无crontab冲突任务"
+    fi
+}
+
+setup_iptables_traffic_counter() {
+    log_step "配置iptables流量计数器（sing-box各入站端口）..."
+    iptables -F INPUT 2>/dev/null || true
+    iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+    iptables -A INPUT -p udp --dport 443 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
+    iptables -A INPUT -p udp --dport 8443 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 2053 -j ACCEPT
+    iptables -A INPUT -p udp --dport 2053 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 2083 -j ACCEPT
+    iptables -A INPUT -p udp --dport 2083 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 2087 -j ACCEPT
+    iptables -A INPUT -p udp --dport 2087 -j ACCEPT
+    iptables -A INPUT -p udp --dport 21000:21199 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 21000:21199 -j ACCEPT
+    netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/21000-21199）"
+}
+
 start_services() {
     log_step "启动所有服务..."
     if [ ! -f "${BASE_DIR}/config.json" ]; then
@@ -868,6 +899,8 @@ cmd_reset() {
     setup_firewall
     setup_port_hopping
     setup_swap_and_optimize
+    clean_crontab_conflicts
+    setup_iptables_traffic_counter
     setup_health_check_cron
     start_services
     verify_installation
@@ -1059,6 +1092,8 @@ main() {
             setup_port_hopping
             create_systemd_services
             setup_swap_and_optimize
+            clean_crontab_conflicts
+            setup_iptables_traffic_counter
             setup_health_check_cron
             start_services
             verify_installation
