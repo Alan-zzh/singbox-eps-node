@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.2 | **更新**: 2026-05-08
+**版本**: v4.3.3 | **更新**: 2026-05-08
 
 ---
 
@@ -130,6 +130,7 @@
 | #82 | v4.3.2 | REALITY_SHORT_ID/DEST/SNI从config.py导入后被os.getenv覆盖，等于白导入 | 删掉覆盖行，直接用config.py导入值 |
 | #83 | v4.3.2 | config.py缺少AI_SOCKS5_POOL变量定义 | 补充AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '') |
 | #84 | v4.3.2 | install.sh硬编码CF API Token，推GitHub会泄露 | 改为环境变量传入+交互式输入 |
+| #85 | v4.3.3 | singbox-cdn死循环重启1492次：crontab每小时restart + systemd Restart=always + 进程锁冲突 | 删crontab重启条目 + Restart=always→on-failure + 清理锁文件重启 |
 | #74 | v4.0.0 | CDN监控测试逻辑不合理：服务器在新加坡测延迟不代表国内体验，全量测试浪费资源 | 重构为v4.0用户反馈驱动版：只测存活、用户IP优先、外部API仅补充 |
 | #73 | v3.1.3 | diagnose.sh crontab检查仍要求singbox-cdn重启(Bug#51已废弃) | 改为检测到则提示移除 |
 | #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
@@ -185,6 +186,7 @@
 38. subscription_service.py从config.py导入的变量禁止被os.getenv覆盖，否则等于白导入，config.py的值会被丢弃（Bug #82）
 39. config.py必须定义所有被其他文件引用的变量，缺少定义会导致ImportError或NameError（Bug #83）
 40. install.sh禁止硬编码API Token/密码/密钥，必须从环境变量传入或交互式输入，否则推GitHub会泄露（Bug #84）
+41. singbox-cdn的systemd服务必须用Restart=on-failure而非Restart=always，因为cdn_monitor检测到已有实例运行时会正常退出(exit 0)，Restart=always会导致死循环重启。同时crontab中禁止加systemctl restart singbox-cdn（Bug #85）
 
 ---
 

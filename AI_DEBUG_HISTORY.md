@@ -2,6 +2,16 @@
 
 ## 🆕 最新修复（2026-05-08）
 
+### Bug #85: singbox-cdn死循环重启1492次
+- **问题**: crontab每小时执行 `systemctl restart singbox-cdn`，但cdn_monitor --daemon已在运行中。新实例检测到锁文件后正常退出(exit 0)，systemd的Restart=always又把它拉起来，形成死循环
+- **影响**: 每5秒重启一次，累计1492次，浪费CPU和日志空间
+- **修复**: 
+  - 删除crontab中 `0 * * * * /usr/bin/systemctl restart singbox-cdn` 条目
+  - systemd service: Restart=always → Restart=on-failure
+  - pkill旧进程 + 删锁文件 + 重启服务
+  - install.sh同步修改Restart=on-failure
+- **验证**: 等待10秒后NRestarts不再增长，3个服务全部active
+
 ### Bug #84: install.sh硬编码CF API Token泄露
 - **问题**: install.sh第33行硬编码Cloudflare API Token，推到GitHub公开仓库会泄露
 - **影响**: 任何人可拿到Token操作你的Cloudflare DNS
