@@ -2,7 +2,7 @@
 """
 统一配置模块
 Author: Alan
-Version: v3.1.2
+Version: v4.3.5
 Date: 2026-05-01
 功能：集中管理所有配置参数
 
@@ -27,6 +27,11 @@ import os
 import json
 import hashlib
 import subprocess
+
+try:
+    from dotenv import dotenv_values
+except ImportError:
+    dotenv_values = None
 
 # 自动检测当前脚本所在目录作为BASE_DIR
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,17 +63,49 @@ def _detect_server_ip():
 
 def _load_env_value(key, default=''):
     """从.env文件读取指定key的值"""
+    return load_env_file().get(key, default)
+
+
+def _strip_inline_comment(value):
+    """兼容历史遗留的 `KEY=  # 注释` 写法，避免把注释当成值读进去"""
+    value = value.strip()
+    if value.startswith('#'):
+        return ''
+    for marker in (' #', '\t#'):
+        idx = value.find(marker)
+        if idx != -1:
+            value = value[:idx]
+    return value.strip()
+
+
+def load_env_file(path=None):
+    """读取.env文件，优先使用python-dotenv，降级时兼容旧的行内注释格式"""
+    env_path = path or ENV_FILE
+    if not os.path.exists(env_path):
+        return {}
+
+    if dotenv_values is not None:
+        try:
+            parsed = dotenv_values(env_path)
+            return {
+                str(k).strip(): '' if v is None else _strip_inline_comment(str(v))
+                for k, v in parsed.items()
+                if k
+            }
+        except Exception:
+            pass
+
+    values = {}
     try:
-        with open(ENV_FILE, 'r') as f:
+        with open(env_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if '=' in line and not line.startswith('#'):
                     k, v = line.split('=', 1)
-                    if k.strip() == key:
-                        return v.strip()
+                    values[k.strip()] = _strip_inline_comment(v)
     except Exception:
-        pass
-    return default
+        return {}
+    return values
 
 
 SERVER_IP = os.getenv('SERVER_IP', '') or _load_env_value('SERVER_IP', '') or _detect_server_ip()

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # singbox-eps-node 一键诊断脚本
-# 版本: v3.1.2
+# 版本: v4.3.5
 # 日期: 2026-05-01
 # 用途: 排查"连不上/掉线"问题，18项全面检查
 # 部署: 放置在 /root/singbox-eps-node/scripts/diagnose.sh
@@ -15,6 +15,12 @@ ENV_FILE="$BASE_DIR/.env"
 CONFIG_FILE="$BASE_DIR/config.json"
 DB_FILE="$DATA_DIR/singbox.db"
 LOG_FILE="/var/log/singbox.log"
+VERSION_FILE="$BASE_DIR/VERSION.md"
+PROJECT_VERSION="unknown"
+
+if [ -f "$VERSION_FILE" ]; then
+    PROJECT_VERSION=$(tr -d '\r\n' < "$VERSION_FILE")
+fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -97,18 +103,33 @@ check_ssl_cert() {
         return
     fi
 
-    for f in fullchain.pem cert.pem key.pem; do
+    CERT_FOUND=false
+    for f in fullchain.pem cert.pem; do
         if [ -f "$CERT_DIR/$f" ]; then
             SIZE=$(stat -c%s "$CERT_DIR/$f" 2>/dev/null || stat -f%z "$CERT_DIR/$f" 2>/dev/null)
             if [ "$SIZE" -gt 0 ]; then
                 mark_pass "$f: 存在 (${SIZE}字节)"
+                CERT_FOUND=true
             else
                 mark_fail "$f: 文件为空" "重新生成证书: python3 $BASE_DIR/scripts/cert_manager.py"
             fi
-        else
-            mark_warn "$f: 不存在"
         fi
     done
+
+    if [ "$CERT_FOUND" = false ]; then
+        mark_fail "fullchain.pem / cert.pem: 均不存在" "重新生成证书: python3 $BASE_DIR/scripts/cert_manager.py"
+    fi
+
+    if [ -f "$CERT_DIR/key.pem" ]; then
+        SIZE=$(stat -c%s "$CERT_DIR/key.pem" 2>/dev/null || stat -f%z "$CERT_DIR/key.pem" 2>/dev/null)
+        if [ "$SIZE" -gt 0 ]; then
+            mark_pass "key.pem: 存在 (${SIZE}字节)"
+        else
+            mark_fail "key.pem: 文件为空" "重新生成证书: python3 $BASE_DIR/scripts/cert_manager.py"
+        fi
+    else
+        mark_fail "key.pem: 不存在" "重新生成证书: python3 $BASE_DIR/scripts/cert_manager.py"
+    fi
 
     CERT_FILE=""
     for f in "$CERT_DIR/fullchain.pem" "$CERT_DIR/cert.pem"; do
@@ -507,9 +528,10 @@ check_iptables_traffic() {
 
     MISSING_PORTS=""
     for port in 443 8443 2053 2083; do
-        COUNT=$(iptables -L INPUT -v -n -x 2>/dev/null | grep -c "dpt:$port " || echo "0")
+        COUNT=$(iptables -L INPUT -v -n -x 2>/dev/null | grep -Ec "dpt:$port(\\b| )" || true)
+        COUNT=${COUNT:-0}
         if [ "$COUNT" -ge 1 ]; then
-            BYTES=$(iptables -L INPUT -v -n -x 2>/dev/null | grep "dpt:$port " | awk '{print $2}' | head -1)
+            BYTES=$(iptables -L INPUT -v -n -x 2>/dev/null | grep -E "dpt:$port(\\b| )" | awk '{print $2}' | head -1)
             mark_pass "流量计数器 TCP $port: 存在 (累计: ${BYTES:-0}字节)"
         else
             mark_fail "流量计数器 TCP $port: 缺失" "流量统计不可用，检查 subscription_service.py 是否初始化了iptables规则"
@@ -584,17 +606,18 @@ check_cdn_connectivity() {
         return
     fi
 
-    CDN_IPS=$(sqlite3 "$DB_FILE" "SELECT value FROM cdn_settings WHERE key LIKE '%cdn_ip%' AND value != '';" 2>/dev/null)
+    CDN_IPS=$(sqlite3 "$DB_FILE" "SELECT value FROM cdn_settings WHERE key LIKE '%cdn_ip%' AND value != '' UNION SELECT value FROM cdn_settings WHERE key='cdn_ips_list' AND value != '';" 2>/dev/null)
     if [ -z "$CDN_IPS" ]; then
         mark_warn "CDN数据库中无优选IP"
         return
     fi
 
+    UNIQUE_IPS=$(echo "$CDN_IPS" | tr ',' '\n' | sed '/^$/d' | sort -u)
     FAIL_IPS=""
     PASS_IPS=""
-    for ip in $CDN_IPS; do
-        # 3秒超时测试CDN IP连通性
-        HTTP_CODE=$(curl -s --connect-timeout 3 -o /dev/null -w "%{http_code}" "https://${ip}:2087" 2>/dev/null)
+    for ip in $UNIQUE_IPS; do
+        # 必须带域名SNI测试，直接访问 https://IP 会被证书/SNI 误伤，造成假故障。
+        HTTP_CODE=$(curl -s --connect-timeout 3 --resolve "${CF_DOMAIN}:2087:${ip}" -o /dev/null -w "%{http_code}" "https://${CF_DOMAIN}:2087/" 2>/dev/null)
         CURL_EXIT=$?
         if [ "$CURL_EXIT" -eq 0 ] && [ "$HTTP_CODE" != "000" ]; then
             PASS_IPS="$PASS_IPS $ip"
@@ -608,7 +631,7 @@ check_cdn_connectivity() {
     fi
 
     if [ -n "$FAIL_IPS" ]; then
-        mark_fail "不可达CDN IP:$(echo $FAIL_IPS | tr ' ' '\n' | wc -l)个 ($(echo $FAIL_IPS | tr ' ' ','))" "subscription_service.py会自动回退到域名兜底，用户更新订阅即可恢复"
+        mark_fail "不可达CDN IP:$(echo $FAIL_IPS | tr ' ' '\n' | sed '/^$/d' | wc -l)个 ($(echo $FAIL_IPS | tr ' ' ',' | sed 's/^,*//;s/,*$//'))" "subscription_service.py会自动回退到域名兜底，用户更新订阅即可恢复"
     fi
 }
 
@@ -685,7 +708,7 @@ print_summary() {
 # ============================================================
 echo "=========================================="
 echo "  singbox-eps-node 一键诊断"
-echo "  版本: v3.1.2"
+echo "  版本: ${PROJECT_VERSION}"
 echo "  时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  服务器: $(hostname)"
 echo "  内核: $(uname -r)"

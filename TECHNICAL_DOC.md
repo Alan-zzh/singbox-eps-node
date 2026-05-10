@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v4.1.1 | **更新**: 2026-05-07
+**版本**: v4.3.5 | **更新**: 2026-05-10
 
 ---
 
@@ -79,6 +79,7 @@
 - 域名/IP动态判断（`get_sub_domain()`）
 - 端口硬编码锁定 + SHA256校验和防篡改
 - .env文件读取，HY2规避配置，SOCKS5凭据从环境变量读取
+- `.env` 解析优先 `python-dotenv`，降级时兼容历史 `KEY=  # 注释` 遗留格式
 - COUNTRY_CODE从.env读取，NODE_PREFIX动态生成
 
 ### subscription_service.py — 订阅服务
@@ -99,6 +100,14 @@
 - AI SOCKS5出站 + 路由规则
 - 所有路径从config.py的BASE_DIR/CERT_DIR拼接
 - 证书缺失时自动调用cert_manager.py生成自签名证书
+- DNS已迁移到 sing-box 新格式（`type/server`），并显式写 `route.default_domain_resolver`，不再依赖 deprecated 环境变量
+
+### DNS兼容性说明（2026-05-10新增）
+- 旧写法：`address: "tls://8.8.8.8"`、`address: "h3://dns.alidns.com/dns-query"`、`address: "rcode://success"`、`address: "fakeip"`
+- 新写法：显式拆成 `type`、`server`、`path`、`rcode` 等字段
+- 服务端 `config.json` 和订阅服务生成的 sing-box JSON 都必须同步迁移
+- `route.default_domain_resolver` 必须显式存在，不能再靠 systemd 的 `ENABLE_DEPRECATED_LEGACY_DNS_SERVERS` / `ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER` 顶着跑
+- 结论：当前代码已经按新格式生成，后续同步到服务器后，升级 sing-box 1.14 才不会再因为 DNS 兼容问题翻车
 
 ### cdn_monitor.py — CDN优选IP学习系统（v4.0 用户反馈驱动版）
 
@@ -501,6 +510,10 @@
 | AI_SOCKS5_PASS | AI SOCKS5密码 |
 | TG_BOT_TOKEN | Telegram Bot Token |
 | TG_ADMIN_CHAT_ID | 管理员Chat ID |
+
+### `.env` 书写规则
+- 注释必须单独成行，禁止继续写 `KEY=值  # 注释`
+- 当前代码已兼容历史遗留的行内注释格式，但这只是兜底，不是推荐写法
 
 ---
 

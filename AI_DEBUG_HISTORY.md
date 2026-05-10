@@ -1,6 +1,73 @@
 # AI 调试历史与防Bug规则 (AI Debug History)
 
-## 🆕 最新修复（2026-05-08）
+## 🆕 最新修复（2026-05-10）
+
+### Bug #89: 新格式DNS迁移时把 `detour: direct` 误带进来了，导致日本机 singbox 直接起不来
+- **问题**: 这次把 DNS 从旧 `address` 写法迁到 sing-box 新格式时，沿用了旧时代的 `detour: "direct"` 思路。但 sing-box 1.13.11 对新版 DNS server 直接报错：`detour to an empty direct outbound makes no sense`
+- **影响**:
+  - 日本服务器 `singbox` 主服务持续重启，443/8443/2053/2083 全部掉线
+  - `singbox-sub` 仍然能回 200，所以表面像“订阅还活着”，但真正代理节点已经没网
+  - 如果把同样代码继续推到其他服务器，会复制同一个现网故障
+- **修复**:
+  - `scripts/config_generator.py` 删除新版 DNS server 上的 `detour: "direct"`
+  - `scripts/subscription_service.py` 生成的客户端 sing-box JSON 同步删除这两个 DNS server 的 `detour`
+  - 保留 `route.default_domain_resolver` 和 `dns_direct.domain_resolver`，只去掉错误的 `detour`
+- **验证**:
+  - 日本服务器日志明确报错：`start dns/tls[dns_proxy]: detour to an empty direct outbound makes no sense`
+  - 修复后需重新生成 `config.json`、`sing-box check`、重启 3 个服务并复测端口和订阅
+
+### Bug #87: singbox当前正常，但仍靠 deprecated DNS 兼容开关硬撑
+- **问题**: 日本服务器当前 `singbox` 虽然是 active，但去掉 `ENABLE_DEPRECATED_LEGACY_DNS_SERVERS` 后 `sing-box check` 直接失败，说明 `config_generator.py` 仍在生成旧式 DNS server 写法，`subscription_service.py` 生成的客户端 JSON 也还是 `tls://` / `h3://` / `rcode://` / `fakeip` 老格式
+- **影响**:
+  - 眼下不算现网故障，因为 systemd 里有 `ENABLE_DEPRECATED_*` 兜底，用户侧也基本正常
+  - 但这是典型“慢性复发型”暗病，一旦 sing-box 升到 1.14，兼容开关被删，`singbox` 会再次直接起不来
+  - 新部署如果继续沿用 `install.sh` 里的兼容开关，也会把旧坑原样复制到下一台服务器
+- **修复**:
+  - `scripts/config_generator.py` 改成 sing-box 新版 DNS server 格式：`type/server` 取代旧 `address`
+  - 服务端 `route` 显式补上 `default_domain_resolver`
+  - `scripts/subscription_service.py` 生成的客户端 JSON 同步迁移到新版 DNS 格式，并给 `dns_direct` 补 `domain_resolver`
+  - `install.sh` 删除 `ENABLE_DEPRECATED_LEGACY_DNS_SERVERS` 和 `ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER`
+  - 新增 `tests/test_dns_config_migration.py`，防止以后回退到旧格式
+- **验证**:
+  - 远程实测：服务器当前 3 个服务 active，订阅链接 `https://jp.290372913.xyz:2087/sub/JP` 返回 200
+  - 远程实测：去掉 deprecated 环境变量后，旧配置 `sing-box check` 失败，证明这是“已被兜底掩盖的真实代码问题”
+  - 本地测试覆盖新增 DNS 配置迁移检查，避免旧写法回流
+
+### Bug #88: install/diagnose 仍有边界错误和误报，容易把人带沟里
+- **问题**:
+  - `install.sh` 里部分 iptables 规则仍写成 `21000:21199`，和实际端口跳跃范围 `21000:21200` 差了最后一个端口
+  - `diagnose.sh` 用 `grep -c ... || echo 0` 统计流量计数器，没命中时会得到 `0\n0`，导致脚本自己报 `integer expression expected`
+  - `diagnose.sh` 直接访问 `https://IP:2087` 测 CDN IP，会被证书/SNI 机制误伤，把正常 CDN 误判成故障
+  - `diagnose.sh` 把 `fullchain.pem` 不存在单独当警告，但当前项目允许 `cert.pem` 正常兜底，这条提示容易制造噪音
+- **影响**:
+  - 新部署时 21200 这个尾端口可能漏放行，属于低概率但真实存在的边界暗病
+  - 诊断脚本会平白报 4-5 个失败项，误导后续排查方向
+  - 人会以为线上坏了，实际只是诊断逻辑自己不准
+- **修复**:
+  - `install.sh` 统一改成 `21000:21200`
+  - `diagnose.sh` 改正 iptables 计数器匹配逻辑
+  - CDN 连通性检测改成 `--resolve 域名:端口:IP`，带域名 SNI 做真测试
+  - 证书检查改成 `fullchain.pem` / `cert.pem` 二选一即可，不再把正常兜底当警告
+- **验证**:
+  - 远程实测日本服务器实际 INPUT 规则已经是 `21000:21200`
+  - 远程实测旧版 diagnose.sh 会把正常流量计数器和正常 CDN 错判为失败，且伴随 shell 整数比较报错
+
+### Bug #86: `.env.example` 仍带行内注释，手动复制后有复发风险
+- **问题**: 仓库里的 `.env.example` 仍是 `KEY=  # 注释` 格式。虽然 `install.sh` 现在会生成干净 `.env`，但用户手动复制示例文件或人工补配置时，`config.py/config_generator.py` 的旧手写解析逻辑仍可能把注释误读成值
+- **影响**:
+  - `AI_SOCKS5_PORT` 这类数字字段可能再次触发 `ValueError`
+  - `CF_DOMAIN`、`REALITY_PUBLIC_KEY` 等字符串字段可能被读成带注释脏值
+  - 新部署不一定复现，手改配置时更隐蔽，属于“慢性复发型”问题
+- **修复**:
+  - 清理 `.env.example` 的所有行内注释，改为独立注释行
+  - `config.py` 新增统一 `.env` 读取逻辑，优先 `python-dotenv`
+  - `config_generator.py` 改为复用 `config.py` 的统一解析逻辑
+  - 补充最小测试覆盖旧式行内注释兼容场景
+- **验证**:
+  - `pytest -q` 通过新增的 `.env` 兼容解析测试
+  - 本地 grep 确认 `.env.example` 不再包含 `KEY=  # 注释` 形式
+  - 日本服务器当前 `.env` 由 `install.sh` 生成，线上服务状态正常，无需立即改线上
+
 
 ### Bug #85: singbox-cdn死循环重启1492次
 - **问题**: crontab每小时执行 `systemctl restart singbox-cdn`，但cdn_monitor --daemon已在运行中。新实例检测到锁文件后正常退出(exit 0)，systemd的Restart=always又把它拉起来，形成死循环

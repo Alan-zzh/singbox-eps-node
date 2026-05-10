@@ -1,6 +1,38 @@
 # Singbox EPS Node
 
-全自动CDN优选IP管理 + 多协议代理订阅生成系统，一条命令完成部署，客户端导入订阅即可使用。
+**当前版本**: `v4.3.5`
+
+这个项目的目标很简单：
+
+- 一键部署 sing-box 多协议节点
+- 自动生成订阅
+- 自动维护 CDN 优选 IP
+- 出问题时能靠健康检查和诊断脚本尽快自愈或定位
+
+如果你是第一次接手这个项目，先看下面这几个文件，不要直接埋头改代码。
+
+## 接手顺序
+
+1. [project_snapshot.md](project_snapshot.md)
+2. [AI_DEBUG_HISTORY.md](AI_DEBUG_HISTORY.md)
+3. [CHANGELOG.md](CHANGELOG.md)
+4. [VERSION.md](VERSION.md)
+5. [TECHNICAL_DOC.md](TECHNICAL_DOC.md)
+
+## 文档分工
+
+- [README.md](README.md)
+  当前总入口。只放项目概况、安装入口、文档地图、常用命令。
+- [project_snapshot.md](project_snapshot.md)
+  当前版本做成了什么、线上大概是什么状态、最近修了哪些关键问题。
+- [AI_DEBUG_HISTORY.md](AI_DEBUG_HISTORY.md)
+  病历本。记录真实踩坑、复发根因、禁止再犯的教训。
+- [CHANGELOG.md](CHANGELOG.md)
+  正式更新日志，只写“这次版本改了什么”。
+- [VERSION.md](VERSION.md)
+  当前项目版本号，供脚本和接手排查时统一参考。
+- [TECHNICAL_DOC.md](TECHNICAL_DOC.md)
+  全量技术说明，包含架构、协议、配置、部署、诊断、编码铁律。
 
 ## 快速安装
 
@@ -13,57 +45,65 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 ```bash
 bash install.sh              # 全新安装（自动优化系统+交互式配置）
 bash install.sh reinstall    # 重装操作系统（需输入root密码，装完自动重启）
-bash install.sh reset        # 重装singbox应用（保留配置和数据，客户端无需重配）
-bash install.sh optimize     # 一键优化系统（BBR+FQ+CAKE三合一，即时生效）
+bash install.sh reset        # 重装 singbox 应用（保留配置和数据）
+bash install.sh optimize     # 只做系统优化（BBR + FQ-PIE/CAKE）
 ```
 
-## 功能
+## 当前功能
 
-- **5协议全覆盖**: VLESS-Reality / VLESS-WS-CDN / VLESS-HTTPUpgrade-CDN / Trojan-WS-CDN / Hysteria2
-- **CDN优选IP自动获取**: 每小时通过指定DNS解析最优Cloudflare边缘IP
-- **HY2无感端口跳跃**: UDP+TCP双协议保障，端口被封自动切换，不断线
-- **AI流量自动分流**: 配置SOCKS5后，AI网站流量自动走住宅IP，用户无感
-- **双格式订阅**: 根据客户端自动返回Base64或sing-box JSON
-- **Telegram管理机器人**: 远程查看状态、更新CDN、配置AI住宅代理
-- **按月流量统计**: 每月14号自动归零，首页和API可查看
-- **BBR+FQ+CAKE加速**: 海外代理最优方案，即时生效无需重启
-- **健康检查自动恢复**: 每5分钟检测，异常自动重启
+- 5 协议：VLESS-Reality / VLESS-WS / VLESS-HTTPUpgrade / Trojan-WS / Hysteria2
+- HTTPS 订阅：Base64 + sing-box JSON
+- CDN 优选 IP 自动维护
+- 健康检查 + 一键诊断
+- 按月流量统计
+- 可选 AI SOCKS5 分流
+- BBR + FQ-PIE/CAKE 网络优化
 
 ## 节点列表
 
 | 节点 | 协议 | 连接方式 |
 |------|------|----------|
-| {CC}-VLESS-Reality | VLESS | 直连 IP:443 |
-| {CC}-VLESS-WS-CDN | VLESS+WS | CDN优选IP:8443 |
-| {CC}-VLESS-HTTPUpgrade-CDN | VLESS+HTTPUpgrade | CDN优选IP:2053 |
-| {CC}-Trojan-WS-CDN | Trojan+WS | CDN优选IP:2083 |
-| {CC}-Hysteria2 | Hysteria2 | 直连 IP:443，端口跳跃21000-21200 |
+| `{CC}-VLESS-Reality` | VLESS | 直连 `IP:443` |
+| `{CC}-VLESS-WS-CDN` | VLESS + WS | CDN 优选 IP `:8443` |
+| `{CC}-VLESS-HTTPUpgrade-CDN` | VLESS + HTTPUpgrade | CDN 优选 IP `:2053` |
+| `{CC}-Trojan-WS-CDN` | Trojan + WS | CDN 优选 IP `:2083` |
+| `{CC}-Hysteria2` | Hysteria2 | 直连 `IP:443`，端口跳跃 `21000-21200` |
 
 ## 环境变量
 
-安装后编辑 `/root/singbox-eps-node/.env`：
+安装后编辑 `/root/singbox-eps-node/.env`。
+
+推荐先参考 [.env.example](.env.example)。
+
+最常用的几个变量：
 
 | 变量 | 说明 | 必填 |
 |------|------|------|
-| CF_DOMAIN | Cloudflare域名 | ✅ |
-| SERVER_IP | 服务器IP（留空自动检测） | ❌ |
-| CF_API_TOKEN | Cloudflare API Token（证书申请） | ❌ |
-| AI_SOCKS5_SERVER | AI住宅IP SOCKS5地址 | ❌ |
-| AI_SOCKS5_PORT | AI住宅IP SOCKS5端口 | ❌ |
+| `CF_DOMAIN` | Cloudflare 域名 | ✅ |
+| `SERVER_IP` | 服务器公网 IP，留空可自动检测 | ❌ |
+| `CF_API_TOKEN` | Cloudflare API Token，用于证书申请 | ❌ |
+| `AI_SOCKS5_SERVER` | AI 住宅代理地址 | ❌ |
+| `AI_SOCKS5_PORT` | AI 住宅代理端口 | ❌ |
+| `AI_SOCKS5_ROUTING` | `on/off`，默认 `off` | ❌ |
 
-协议密码（VLESS_UUID、TROJAN_PASSWORD等）安装时自动生成，通常无需手动填写。
+协议密码和 UUID 会在安装时自动生成，通常不需要手填。
 
-## 服务管理
+## 常用命令
 
 ```bash
-systemctl restart singbox singbox-sub singbox-cdn  # 重启所有服务
-systemctl status singbox singbox-sub singbox-cdn   # 查看状态
-journalctl -u singbox-sub -f                       # 查看日志
+systemctl restart singbox singbox-sub singbox-cdn
+systemctl status singbox singbox-sub singbox-cdn
+journalctl -u singbox -n 50 --no-pager
+bash /root/singbox-eps-node/scripts/diagnose.sh
 ```
 
-## 技术文档
+## 维护原则
 
-完整技术文档见 [TECHNICAL_DOC.md](TECHNICAL_DOC.md)，包含架构说明、配置管理、编码铁律、Bug修复历史。
+- 改代码前先看 `project_snapshot.md` 和 `AI_DEBUG_HISTORY.md`
+- 修改配置相关逻辑时，优先统一到 `scripts/config.py`
+- 修改完要同步文档，不要只改代码
+- 服务端和订阅端的同类逻辑要一起改，不能只改一边
+- 推 GitHub 前必须确认没有 `.env`、密码、Token、私钥等敏感信息
 
 ## 许可证
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v2.0.0
+# 版本: v4.3.5
 # 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -341,8 +341,8 @@ install_singbox() {
                 rm -rf "$BASE_DIR"
             fi
             crontab -l 2>/dev/null | grep -v "health_check.sh" | grep -v "cert_manager.py" | crontab - 2>/dev/null || true
-            iptables -D INPUT -p udp --dport 21000:21199 -j ACCEPT 2>/dev/null || true
-            iptables -D INPUT -p tcp --dport 21000:21199 -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p udp --dport 21000:21200 -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p tcp --dport 21000:21200 -j ACCEPT 2>/dev/null || true
             netfilter-persistent save 2>/dev/null || true
             log_info "已完全卸载（二进制+配置+数据+证书+服务+定时任务+防火墙规则全部清除）"
             log_info "密码和密钥已备份，安装时将自动恢复"
@@ -572,8 +572,6 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-Environment=ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
-Environment=ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true
 WorkingDirectory=${BASE_DIR}
 ExecStart=/usr/local/bin/sing-box run -c ${BASE_DIR}/config.json
 Restart=on-failure
@@ -717,10 +715,10 @@ setup_iptables_traffic_counter() {
     iptables -A INPUT -p udp --dport 2083 -j ACCEPT
     iptables -A INPUT -p tcp --dport 2087 -j ACCEPT
     iptables -A INPUT -p udp --dport 2087 -j ACCEPT
-    iptables -A INPUT -p udp --dport 21000:21199 -j ACCEPT
-    iptables -A INPUT -p tcp --dport 21000:21199 -j ACCEPT
+    iptables -A INPUT -p udp --dport 21000:21200 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 21000:21200 -j ACCEPT
     netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/21000-21199）"
+    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/21000-21200）"
 }
 
 start_services() {

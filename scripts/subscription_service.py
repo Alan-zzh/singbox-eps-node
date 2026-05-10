@@ -2,7 +2,7 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v3.1.3
+Version: v4.3.5
 Date: 2026-05-01
 功能：
   - 提供Base64订阅链接（包含所有节点）
@@ -599,8 +599,8 @@ def generate_singbox_config():
             "servers": [
                 {
                     "tag": "dns_proxy",
-                    "address": "tls://8.8.8.8",
-                    "detour": "direct"
+                    "type": "tls",
+                    "server": "8.8.8.8"
                     # ⚠️ detour必须是direct，不能是"ePS-Auto"或其他代理出站！
                     # 【Bug #23 DNS代理死循环教训】：
                     # 当detour指向代理出站（如ePS-Auto）时，DNS查询本身要走代理，
@@ -613,22 +613,28 @@ def generate_singbox_config():
                 },
                 {
                     "tag": "dns_direct",
-                    "address": "h3://dns.alidns.com/dns-query",
-                    "detour": "direct"
+                    "type": "h3",
+                    "server": "dns.alidns.com",
+                    "path": "/dns-query",
+                    "domain_resolver": {
+                        "server": "dns_proxy",
+                        "strategy": "prefer_ipv4"
+                    }
                     # 国内DNS（阿里DoH），专门用于解析中国大陆网站域名
                     # detour同样必须是direct，理由同上
                     # 使用h3协议（HTTP/3）可绕过国内对传统DoH(853)的干扰
                 },
                 {
                     "tag": "dns_block",
-                    "address": "rcode://success"
+                    "type": "rcode",
+                    "rcode": "success"
                     # 屏蔽DNS：返回success但不返回任何IP，用于屏蔽广告/恶意域名
                     # 原理：当route.rules中某条规则的outbound是"dns_block"时，
                     # 该域名的DNS查询会被此服务器处理，返回空响应，客户端无法连接
                 },
                 {
                     "tag": "dns_fakeip",
-                    "address": "fakeip"
+                    "type": "fakeip"
                     # FakeIP模式：返回198.18.0.0/15范围内的假IP，真实连接时singbox自动替换
                     # 优势：减少DNS查询延迟，避免DNS污染
                     # 注意：本项目未启用fakeip作为默认DNS，仅在dns.fakeip.enabled=True时生效
@@ -671,6 +677,7 @@ def generate_singbox_config():
                     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
                 }
             ],
+            "strategy": "prefer_ipv4",
             "final": "dns_proxy",
             # DNS final规则：未被前面任何DNS规则匹配的域名，统一用dns_proxy解析
             # 即：非中国大陆网站默认用Google DNS，确保全球网站都能正常解析
@@ -1079,6 +1086,9 @@ def generate_singbox_config():
                 }
             ],
             "auto_detect_interface": True,
+            # sing-box 1.14+ 不再接受缺省域名解析行为，客户端配置里显式指定默认解析器，
+            # 这样 CDN 域名、阿里 DoH 域名、SOCKS5 主机名都不会再依赖 deprecated 开关。
+            "default_domain_resolver": "dns_proxy",
             "final": "ePS-Auto"
             # 【final规则 - 兜底出站】：
             # 未被前面任何路由规则匹配的流量，全部走ePS-Auto

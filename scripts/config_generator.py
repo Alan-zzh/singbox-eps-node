@@ -2,7 +2,7 @@
 """
 Singbox 配置生成器
 Author: Alan
-Version: v3.1.2
+Version: v4.3.5
 Date: 2026-05-01
 功能：生成完整的 Singbox 配置
 ⚠️ 所有路径从config.py的BASE_DIR读取，禁止硬编码
@@ -18,22 +18,25 @@ import string
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import BASE_DIR, CERT_DIR, DATA_DIR
+    from config import BASE_DIR, CERT_DIR, DATA_DIR, load_env_file
 except ImportError:
     BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CERT_DIR = os.path.join(BASE_DIR, 'cert')
     DATA_DIR = os.path.join(BASE_DIR, 'data')
+    load_env_file = None
 
 # 读取环境变量
 env_vars = {}
 env_file = os.path.join(BASE_DIR, '.env')
-if os.path.exists(env_file):
-    with open(env_file, 'r') as f:
+if load_env_file is not None:
+    env_vars = load_env_file(env_file)
+elif os.path.exists(env_file):
+    with open(env_file, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if '=' in line and not line.startswith('#'):
                 key, value = line.split('=', 1)
-                env_vars[key] = value
+                env_vars[key.strip()] = value.split(' #', 1)[0].split('\t#', 1)[0].strip()
 
 vless_uuid = env_vars.get('VLESS_UUID', str(uuid.uuid4()))
 vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
@@ -121,15 +124,16 @@ config = {
         "servers": [
             {
                 "tag": "dns_proxy",
-                "address": "tls://8.8.8.8",
-                "detour": "direct"
+                "type": "tls",
+                "server": "8.8.8.8"
             },
             {
                 "tag": "dns_direct",
-                "address": "223.5.5.5",
-                "detour": "direct"
+                "type": "udp",
+                "server": "223.5.5.5"
             }
-        ]
+        ],
+        "strategy": "prefer_ipv4"
     },
     "inbounds": socks5_inbound + [
         {
@@ -390,6 +394,9 @@ config = {
             "domain_keyword": ["google"],
             "outbound": "direct"
         }] if socks5_pool and ai_socks5_routing == 'on' else []),
+        # sing-box 1.14+ 会移除旧式 DNS 兼容开关，这里显式指定默认解析器，
+        # 避免 REALITY 握手域名等内部域名解析再次依赖 ENABLE_DEPRECATED_* 环境变量。
+        "default_domain_resolver": "dns_proxy",
         "final": "direct"
         # final规则 - 兜底出站：未匹配任何规则的流量走direct（VPS直连）
         # 服务端final是direct（VPS在海外，直连即可访问全球网站）

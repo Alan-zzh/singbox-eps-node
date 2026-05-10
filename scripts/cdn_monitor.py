@@ -2,7 +2,7 @@
 """
 Singbox CDN优选IP学习系统
 Author: Alan
-Version: v4.1.0
+Version: v4.3.5
 Date: 2026-05-07
 
 架构设计：用户投喂 + 自动验证 + 历史评分 = 持续优化的CDN优选系统

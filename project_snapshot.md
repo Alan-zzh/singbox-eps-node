@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.3 | **更新**: 2026-05-08
+**版本**: v4.3.5 | **更新**: 2026-05-10
 
 ---
 
@@ -27,8 +27,10 @@
 - ✅ SOCKS5 AI路由：可选项（默认关闭），开启时13个AI域名走住宅代理，X/推特/groK排除
 - ✅ AI路由开关：install.sh安装时可配置，tg_bot.py一键切换，立即重启生效
 - ✅ 故障转移：AI-SOCKS5不可用时自动fallback到direct
-- ✅ HY2端口跳跃：14430-14629→443，UDP+TCP双协议
+- ✅ HY2端口跳跃：21000-21200→443，UDP+TCP双协议
 - ✅ SSL证书：fullchain.pem优先，降级cert.pem
+- ✅ `.env` 兼容读取：优先 `python-dotenv`，降级时兼容历史行内注释格式
+- ✅ DNS配置已迁移到 sing-box 新格式，不再依赖 `ENABLE_DEPRECATED_*` 兼容开关
 - ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
 - ✅ BBR+FQ+CAKE三合一加速
 - ✅ 旧面板彻底卸载：x-ui/marzban/3x-ui
@@ -131,6 +133,10 @@
 | #83 | v4.3.2 | config.py缺少AI_SOCKS5_POOL变量定义 | 补充AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '') |
 | #84 | v4.3.2 | install.sh硬编码CF API Token，推GitHub会泄露 | 改为环境变量传入+交互式输入 |
 | #85 | v4.3.3 | singbox-cdn死循环重启1492次：crontab每小时restart + systemd Restart=always + 进程锁冲突 | 删crontab重启条目 + Restart=always→on-failure + 清理锁文件重启 |
+| #87 | v4.3.5 | singbox当前虽然能跑，但仍依赖 `ENABLE_DEPRECATED_*` 才能吃旧式DNS配置，未来升到1.14会再次启动失败 | `config_generator.py/subscription_service.py` 全量改成新DNS格式 + `route.default_domain_resolver`，并移除install.sh兼容开关 |
+| #89 | v4.3.5 | 新格式DNS迁移时把 `detour: direct` 误带进新版 DNS server，导致日本机 singbox 起不来 | 删掉新版 DNS server 上错误的 `detour`，保留 `default_domain_resolver/domain_resolver` |
+| #88 | v4.3.5 | install.sh和diagnose.sh仍有隐藏误差：21000-21200尾端口被写成21199，诊断脚本还会把正常CDN和正常流量计数器误判成故障 | 统一修正端口范围 + 改正iptables匹配逻辑 + CDN连通性改成带域名SNI测试 |
+| #86 | v4.3.4 | `.env.example` 残留行内注释，手动复制后可能再次触发 `.env` 解析错值 | 清理示例文件行内注释 + `config.py/config_generator.py` 统一兼容解析旧格式 |
 | #74 | v4.0.0 | CDN监控测试逻辑不合理：服务器在新加坡测延迟不代表国内体验，全量测试浪费资源 | 重构为v4.0用户反馈驱动版：只测存活、用户IP优先、外部API仅补充 |
 | #73 | v3.1.3 | diagnose.sh crontab检查仍要求singbox-cdn重启(Bug#51已废弃) | 改为检测到则提示移除 |
 | #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
@@ -173,7 +179,8 @@
 25. systemd服务文件中所有路径必须使用绝对路径，禁止cd+相对路径组合（Bug #50）
 26. 守护进程必须加进程锁（fcntl.flock），防止多实例运行导致内存泄漏（Bug #51）
 27. VPS部署后必须禁用无用系统服务：multipathd/ModemManager/udisks2/caddy/unattended-upgrades（Bug #52）
-28. sing-box 1.13.9 要求DNS配置必须有final字段，否则启动失败。systemd需设置ENABLE_DEPRECATED_LEGACY_DNS_SERVERS和ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER环境变量（Bug #54）
+28. sing-box 1.13.9 要求DNS配置必须有final字段，否则启动失败。历史上曾靠 systemd 的 deprecated DNS 兼容环境变量兜底，但这只是临时止血，不是长期方案（Bug #54）
+29. sing-box 升级到 1.14 前，必须先把旧式 DNS server 写法迁移到新版 `type/server/path/rcode` 结构，并显式补 `route.default_domain_resolver`。不要再用 `ENABLE_DEPRECATED_*` 顶着跑（Bug #87）
 29. HY2端口跳跃必须配置iptables UDP+TCP双协议规则，否则QUIC协议无法通过端口跳跃连接（Bug #55）
 30. 新服务器一键安装必须完整验证，不能假设脚本能直接跑通，每个版本升级后必须实测（Bug #56）
 31. 部署脚本执行完成后必须删除所有含密码/凭据的临时文件，禁止在本地或远程留存
