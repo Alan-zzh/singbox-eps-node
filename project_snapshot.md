@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.5 | **更新**: 2026-05-10
+**版本**: v4.3.6 | **更新**: 2026-05-18
 
 ---
 
@@ -31,6 +31,7 @@
 - ✅ SSL证书：fullchain.pem优先，降级cert.pem
 - ✅ `.env` 兼容读取：优先 `python-dotenv`，降级时兼容历史行内注释格式
 - ✅ DNS配置已迁移到 sing-box 新格式，不再依赖 `ENABLE_DEPRECATED_*` 兼容开关
+- ✅ sing-box JSON 默认关闭 FakeIP，避免 TUN 模式下 `ping <1ms` 这类假延迟误导判断
 - ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
 - ✅ BBR+FQ+CAKE三合一加速
 - ✅ 旧面板彻底卸载：x-ui/marzban/3x-ui

@@ -2,6 +2,19 @@
 
 ## 🆕 最新修复（2026-05-10）
 
+### Bug #90: sing-box JSON 客户端默认开启 `FakeIP + TUN`，会把延迟判断彻底带偏
+- **问题**: `subscription_service.py` 生成的 sing-box JSON 默认开启了 `dns.fakeip.enabled = true`，同时又默认带 `tun` 入站。这样用户在 v2rayN / sing-box TUN 模式里 ping 某些域名或节点相关目标时，命中的可能是本机分配的 FakeIP，而不是真实远端线路，容易出现 `<1ms` 这种明显不符合跨国链路常识的结果。
+- **影响**:
+  - 用户会误以为“新加坡明明走日本，为什么延迟还不到 1ms”，从而怀疑节点地区、路由、DNS 全部写错
+  - 延迟指标被 FakeIP 污染后，用户很难判断到底是 CDN 差、直连差，还是客户端指标本身失真
+  - TUN 场景下部分应用还可能出现“体感卡，但 ping 很漂亮”的错觉，排查方向会被严重带偏
+- **修复**:
+  - `scripts/subscription_service.py` 生成的客户端 sing-box JSON 改为默认关闭 `dns.fakeip.enabled`
+  - 保留 FakeIP 结构和地址段定义，后续如确有明确需求再单独按场景开启，不再默认对所有用户生效
+- **验证**:
+  - 代码定位：`scripts/subscription_service.py` 的 `generate_singbox_config()` 中原本为 `fakeip.enabled = True`
+  - 修复后，新生成的 sing-box JSON 不再默认分配 FakeIP，本机 `ping` 结果不会再被伪造成本地级延迟
+
 ### Bug #89: 新格式DNS迁移时把 `detour: direct` 误带进来了，导致日本机 singbox 直接起不来
 - **问题**: 这次把 DNS 从旧 `address` 写法迁到 sing-box 新格式时，沿用了旧时代的 `detour: "direct"` 思路。但 sing-box 1.13.11 对新版 DNS server 直接报错：`detour to an empty direct outbound makes no sense`
 - **影响**:

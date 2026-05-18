@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v4.3.6 - 2026-05-18
+
+- CDN优选IP调整：黑名单加入3个慢速IP（8.35.211.141 / 173.245.59.21 / 162.159.35.152），延迟低但实际速度不行
+- CDN优选IP调整：优选池加入11个用户确认可用的优质IP，覆盖162.159/172.64/108.162/104.18段
+- 新加坡和日本服务器CDN IP池同步更新，等待CDN监控下一次自动执行生效
+
 ## v4.3.5 - 2026-05-10
 
 - 修复 `scripts/config_generator.py` 仍生成 legacy DNS server 格式的问题，改为 sing-box 新版 `type/server` 写法
@@ -10,6 +16,7 @@
 - 修复 `install.sh` 里 HY2 端口尾值误写为 `21199` 的边界错误，统一恢复为 `21000-21200`
 - 修复 `scripts/diagnose.sh` 会把正常 iptables 流量计数器和正常 CDN SNI 场景误报成故障的问题
 - 修复新版 DNS 迁移时误保留 `detour: direct` 导致 singbox 1.13.11 启动失败的问题
+- 修复 sing-box JSON 客户端默认开启 `FakeIP + TUN` 会让 `ping` 显示 `<1ms`、误导线路判断的问题，现改为默认关闭 `fakeip.enabled`
 - 统一 README、脚本头部版本号和诊断输出版本，删除重复旧文 `AI_SOCKS5_PITFALL_GUIDE.md`
 
 ## v4.3.4 - 2026-05-10

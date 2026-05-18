@@ -682,7 +682,12 @@ def generate_singbox_config():
             # DNS final规则：未被前面任何DNS规则匹配的域名，统一用dns_proxy解析
             # 即：非中国大陆网站默认用Google DNS，确保全球网站都能正常解析
             "fakeip": {
-                "enabled": True,
+                # 默认关闭 FakeIP。
+                # 原因：本项目的主要客户端是 v2rayN / sing-box TUN 场景，FakeIP 会让
+                # ping/延迟测试经常命中本机分配的假 IP，出现 "<1ms" 这类误导性结果，
+                # 用户会误以为节点或地区判断出了问题。真实线路质量应以实际连接体感
+                # 和外部出口检测为准，而不是本机对 FakeIP 的 ICMP 响应。
+                "enabled": False,
                 "inet4_range": "198.18.0.0/15"
             }
         },
