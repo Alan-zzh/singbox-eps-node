@@ -160,7 +160,7 @@ REALITY_SNI = 'www.apple.com'
 
 CDN_DB_URL = 'https://api.uouin.com/cloudflare.html'
 CDN_MONITOR_INTERVAL = 3600
-CDN_TOP_IPS_COUNT = 5
+CDN_TOP_IPS_COUNT = 15
 
 # 日本→中国整合优选Cloudflare IP池（唯一真相源）
 # ⚠️ 修改此列表必须同步更新cdn_monitor.py的import
@@ -307,6 +307,19 @@ CDN_PREFERRED_IPS = [
     '172.64.53.104',
     '162.159.16.200',
     '172.64.229.195',
+    # 新增 - 用户投喂优质IP（2026-05-21 第六批）
+    '162.159.33.124',
+    '162.159.21.60',
+    '104.18.40.186',
+    '162.159.34.125',
+    '172.64.145.178',
+    '108.162.193.147',
+    '104.18.42.98',
+    '172.64.38.178',
+    '104.18.36.249',
+    '172.64.229.249',
+    '162.159.2.128',
+    '162.159.46.54',
 ]
 
 # v3.0 用户手动标记的黑名单IP（你告诉我哪个不好，我加到这里）
@@ -339,6 +352,13 @@ CDN_API_IPDB = 'https://ipdb.api.030101.xyz/?type=bestcf'
 CDN_API_001315_CT = 'https://cf.001315.xyz/ct'
 CDN_API_090227_CT = 'https://addressesapi.090227.xyz/ct'
 CDN_API_VVHAN = 'https://api.vvhan.com/tool/cf_ip'
+
+# cfnew 思路移植：支持自定义优选源 URL（多个用逗号分隔）
+CDN_CUSTOM_SOURCE_URLS = os.getenv('CDN_CUSTOM_SOURCE_URLS', '').strip()
+# 筛选策略：保留最快N个候选，0表示不限制
+CDN_FASTEST_LIMIT = int(os.getenv('CDN_FASTEST_LIMIT', '10') or '10')
+# 地区筛选（多个用逗号分隔，如 US,JP,SG；当前用于名称标签粗筛）
+CDN_REGION_FILTER = os.getenv('CDN_REGION_FILTER', '').strip()
 
 CERT_VALIDITY_DAYS = 365
 

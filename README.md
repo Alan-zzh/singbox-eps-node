@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.3.6`
+**当前版本**: `v4.3.9`
 
 这个项目的目标很简单：
 
@@ -53,7 +53,8 @@ bash install.sh optimize     # 只做系统优化（BBR + FQ-PIE/CAKE）
 
 - 5 协议：VLESS-Reality / VLESS-WS / VLESS-HTTPUpgrade / Trojan-WS / Hysteria2
 - HTTPS 订阅：Base64 + sing-box JSON
-- CDN 优选 IP 自动维护
+- CDN 优选 IP 自动维护（IP 池 10-15 个/服务器，多 C 段分散）
+- CDN 阻断自动检测与切换（403/1020 拦截检测 + 冷却机制）
 - 健康检查 + 一键诊断
 - 按月流量统计
 - 可选 AI SOCKS5 分流

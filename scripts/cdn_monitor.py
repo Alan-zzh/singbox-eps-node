@@ -64,6 +64,7 @@ import socket
 import ssl
 import subprocess
 import fcntl
+import random
 import urllib.request
 from datetime import datetime, timedelta
 
@@ -77,6 +78,7 @@ try:
         CDN_API_WETEST_CT, CDN_API_IPDB,
         CDN_API_001315_CT, CDN_API_090227_CT, CDN_API_VVHAN,
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT,
+        CDN_CUSTOM_SOURCE_URLS, CDN_FASTEST_LIMIT, CDN_REGION_FILTER,
     )
     from logger import get_logger
 except ImportError:
@@ -105,8 +107,24 @@ except ImportError:
     CDN_API_VVHAN = 'https://api.vvhan.com/tool/cf_ip'
     CDN_MONITOR_INTERVAL = 3600
     CDN_TOP_IPS_COUNT = 5
+    CDN_CUSTOM_SOURCE_URLS = ''
+    CDN_FASTEST_LIMIT = 10
+    CDN_REGION_FILTER = ''
 
 logger = get_logger('cdn_monitor')
+
+# 随机User-Agent列表（降低被CF识别为自动化爬虫的风险）
+RANDOM_USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0',
+]
+
+# 随机请求路径列表
+RANDOM_TEST_PATHS = ['/', '/favicon.ico', '/robots.txt', '/sitemap.xml', '/.well-known/security.txt']
 
 DNS_SERVER = '222.246.129.80'
 DNS_SERVER_BACKUP = '59.51.78.210'
@@ -352,7 +370,7 @@ def tcp_port_test(ip, port, timeout=1):
         return False
 
 
-def http_latency_test(ip, port=443, timeout=5, test_url='/'):
+def http_latency_test(ip, port=443, timeout=5, test_url=None):
     """
     用HTTPS请求测试IP真实延迟（模拟客户端实际连接）
     返回: (延迟ms, 是否成功) 或 (None, False) 如果失败
@@ -360,8 +378,12 @@ def http_latency_test(ip, port=443, timeout=5, test_url='/'):
     【Bug #57修复】：之前只做TCP连接测试，无法反映对中国用户的真实链路质量
     现在发送真实HTTPS请求，测量完整握手+响应时间
     【v3.1.3修复】：异常路径正确关闭socket，防止资源泄漏
+    【v4.3.8优化】：只记录403状态用于换IP参考，不淘汰被拦截IP
     """
     sni_host = CF_DOMAIN if CF_DOMAIN else 'cloudflare.com'
+    if test_url is None:
+        test_url = random.choice(RANDOM_TEST_PATHS)
+    ua = random.choice(RANDOM_USER_AGENTS)
     sock = None
     ssock = None
     start_time = time.time()
@@ -376,7 +398,7 @@ def http_latency_test(ip, port=443, timeout=5, test_url='/'):
         
         ssock = ctx.wrap_socket(sock, server_hostname=sni_host)
         
-        request = f"GET {test_url} HTTP/1.1\r\nHost: {sni_host}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+        request = f"GET {test_url} HTTP/1.1\r\nHost: {sni_host}\r\nUser-Agent: {ua}\r\nConnection: close\r\n\r\n"
         ssock.sendall(request.encode())
         
         response = b""
@@ -387,6 +409,15 @@ def http_latency_test(ip, port=443, timeout=5, test_url='/'):
             response += chunk
         
         elapsed = (time.time() - start_time) * 1000
+        
+        if response:
+            status_line = response.decode('utf-8', errors='ignore').split('\r\n')[0]
+            status_code = status_line.split()[1] if len(status_line.split()) >= 2 else '000'
+            
+            # 403/1020/1010 = Cloudflare拦截，标记为不可用（由cdn_monitor替换）
+            if status_code in ('403', '1020', '1010'):
+                logger.warning(f"  HTTP测试 {ip} 返回{status_code}，Cloudflare拦截，标记为不可用")
+                return elapsed, False
         
         if response:
             status_line = response.decode('utf-8', errors='ignore').split('\r\n')[0]
@@ -557,6 +588,47 @@ def fetch_from_wetest_ct():
     return ips
 
 
+
+
+def fetch_from_custom_source_urls():
+    urls = [item.strip() for item in (CDN_CUSTOM_SOURCE_URLS or '').split(',') if item.strip()]
+    if not urls:
+        return []
+    aggregated = []
+    for url in urls:
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                content = resp.read().decode('utf-8', errors='ignore').strip()
+            local_count = 0
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                ip = line.split('#')[0].strip().split(':')[0].strip()
+                if ip and len(ip.split('.')) == 4 and ip[0].isdigit():
+                    aggregated.append(ip)
+                    local_count += 1
+            logger.info(f"  自定义优选源 {url} 返回 {local_count} 个IP")
+        except Exception as e:
+            logger.warning(f"  自定义优选源获取失败 {url}: {e}")
+    return aggregated
+
+
+def match_region_filter(source_name):
+    filters = [item.strip().upper() for item in (CDN_REGION_FILTER or '').split(',') if item.strip()]
+    if not filters:
+        return True
+    upper_name = (source_name or '').upper()
+    return any(region in upper_name for region in filters)
+
+
+def apply_fastest_limit(results):
+    if not CDN_FASTEST_LIMIT or CDN_FASTEST_LIMIT <= 0:
+        return results
+    return results[:CDN_FASTEST_LIMIT]
+
 def fetch_from_ipdb_api():
     try:
         import urllib.request
@@ -606,19 +678,25 @@ def get_current_cdn_ips_from_db():
 def fetch_cdn_ips():
     """
     v4.1 存活优先模式：
-    1. 读取数据库现有CDN IP，逐个TCP存活检测
-    2. 存活的IP保留，死亡的IP标记为待替换
+    1. 读取数据库现有CDN IP，逐个TCP存活检测+HTTP 403检测
+    2. 存活的IP保留，死亡/被拦截的IP标记为待替换
     3. 收集候选IP（用户投喂+外部API）
     4. 从候选池挑存活IP补上死亡空缺
     5. 只对新增候选IP做HTTP测试记录评分
+    
+    【v4.3.8优化】：
+    - 增加 HTTP 403 检测，被 Cloudflare 拦截的 IP 也标记为待替换
+    - 当池中可用 IP < 3 时，自动从外部 API 补全 IP 池
+    - 用户无需手动添加 IP，系统自动维护池子健康
     """
     db_path = init_db()
     
-    # 步骤1：检查现有CDN IP存活情况
+    # 步骤1：检查现有CDN IP存活情况（TCP + HTTP 403检测）
     logger.info(">>> 步骤1：检查现有CDN IP存活情况")
     current_ips = get_current_cdn_ips_from_db()
     alive_ips = []
     dead_ips = []
+    blocked_ips = []  # 被Cloudflare拦截的IP（403）
     
     if current_ips:
         for ip in current_ips:
@@ -626,22 +704,34 @@ def fetch_cdn_ips():
                 logger.info(f"  {ip} 在黑名单中，跳过")
                 dead_ips.append(ip)
                 continue
-            if tcp_port_test(ip, 443, timeout=3):
+            
+            # TCP测试
+            if not tcp_port_test(ip, 443, timeout=3):
+                dead_ips.append(ip)
+                logger.info(f"  {ip}  TCP死亡")
+                continue
+            
+            # HTTP 403检测（Cloudflare拦截检测），加随机间隔避免被识别为爬虫
+            if current_ips.index(ip) > 0:
+                time.sleep(random.uniform(1, 3))
+            latency, success = http_latency_test(ip, port=443, timeout=3)
+            if not success:
+                blocked_ips.append(ip)
+                logger.info(f"  {ip}  被Cloudflare拦截(403)")
+            else:
                 alive_ips.append(ip)
                 logger.info(f"  {ip} ✅ 存活")
-            else:
-                dead_ips.append(ip)
-                logger.info(f"  {ip} ❌ 死亡")
-        logger.info(f"  存活: {len(alive_ips)} 个, 死亡: {len(dead_ips)} 个")
+        
+        logger.info(f"  存活: {len(alive_ips)} 个, 死亡: {len(dead_ips)} 个, 被拦截: {len(blocked_ips)} 个")
     else:
         logger.info("  数据库无现有IP，需要全新优选")
     
     # 如果全部存活，不需要更新
-    if current_ips and not dead_ips:
+    if current_ips and not dead_ips and not blocked_ips:
         logger.info("[OK] 所有CDN IP存活正常，不更新")
         return current_ips
     
-    # 步骤2：收集候选IP（用于填补死亡空缺）
+    # 步骤2：收集候选IP（用于填补死亡/被拦截空缺）
     logger.info("\n>>> 步骤2：收集候选IP")
     candidate_ips = {}
     source_status = {}
@@ -711,6 +801,16 @@ def fetch_cdn_ips():
             else:
                 candidate_ips[ip]['sources'].append('ipdb')
 
+    logger.info("  2.7 自定义优选源 URL")
+    custom_source_ips = fetch_from_custom_source_urls()
+    source_status['custom_urls'] = bool(custom_source_ips)
+    if custom_source_ips:
+        for ip in custom_source_ips:
+            if ip not in candidate_ips:
+                candidate_ips[ip] = {'sources': ['custom'], 'speed': None}
+            else:
+                candidate_ips[ip]['sources'].append('custom')
+
     # v4.1 黑名单全局过滤（所有来源都要过滤）
     if CDN_IP_BLACKLIST:
         before_count = len(candidate_ips)
@@ -747,7 +847,9 @@ def fetch_cdn_ips():
                 'is_new': False,
             })
         else:
-            # 新IP，做HTTP测试
+            # 新IP，做HTTP测试（加随机间隔）
+            if tested_results:
+                time.sleep(random.uniform(1, 3))
             latency, success = http_latency_test(ip, port=443, timeout=3)
             if success and latency is not None:
                 source_tag = 'local' if 'local' in info['sources'] else 'external'
@@ -766,26 +868,66 @@ def fetch_cdn_ips():
 
     # 按评分排序（分数越高越好）
     tested_results.sort(key=lambda x: (-x['score'], x['latency']))
+    tested_results = [r for r in tested_results if match_region_filter(','.join(r['sources']))]
+    tested_results = apply_fastest_limit(tested_results)
+
+    # C段分散筛选：优先选择与已选IP不在同一C段的候选IP
+    def get_c_segment(ip):
+        """获取IP的C段（前3个八位）"""
+        parts = ip.split('.')
+        return '.'.join(parts[:3]) if len(parts) == 4 else ip
+
+    selected_segments = set()
+    diversified_results = []
+    remaining_results = []
+
+    for r in tested_results:
+        seg = get_c_segment(r['ip'])
+        if seg not in selected_segments:
+            diversified_results.append(r)
+            selected_segments.add(seg)
+        else:
+            remaining_results.append(r)
+
+    # 先放不同C段的，再用同C段的补满
+    tested_results = diversified_results + remaining_results
+
+    # 检查C段覆盖情况
+    covered_segments = set(get_c_segment(r['ip']) for r in tested_results[:15])
+    logger.info(f"  C段覆盖: {len(covered_segments)} 个不同C段 ({', '.join(sorted(covered_segments)[:8])}...)")
 
     logger.info(f"  存活候选: {len(tested_results)} 个")
     for i, r in enumerate(tested_results[:10]):
         tag = "[本地]" if 'local' in r['sources'] else "[外部]"
         logger.info(f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} 延迟={r['latency']:.1f}ms")
 
-    # 步骤4：只替换死亡的IP
-    logger.info(f"\n>>> 步骤4：填补死亡IP空缺（需要{len(dead_ips)}个）")
+    # 步骤4：只替换死亡/被拦截的IP
+    needed = len(dead_ips) + len(blocked_ips)
+    logger.info(f"\n>>> 步骤4：填补死亡/被拦截IP空缺（需要{needed}个）")
     
     # 优先保留存活的老IP
     final_ips = list(alive_ips)
     
     # 从候选池挑评分最高的补上
-    needed = CDN_TOP_IPS_COUNT - len(final_ips)
-    if needed > 0:
+    fill_needed = CDN_TOP_IPS_COUNT - len(final_ips)
+    if fill_needed > 0:
         # 过滤掉已经在final_ips里的
         new_candidates = [r for r in tested_results if r['ip'] not in set(final_ips)]
-        for r in new_candidates[:needed]:
+        for r in new_candidates[:fill_needed]:
             final_ips.append(r['ip'])
             logger.info(f"  新增: {r['ip']} (评分={r['score']})")
+    
+    # 【v4.3.8新增】IP池自动补全：当池中可用IP < 3时，从外部API补全
+    if len(final_ips) < 3 and tested_results:
+        logger.info(f"\n>>> IP池健康检查：池中只有{len(final_ips)}个可用IP，需要补全")
+        # 从候选池中挑选更多IP加入池子（最多补到10个）
+        pool_target = 10
+        pool_needed = pool_target - len(final_ips)
+        if pool_needed > 0:
+            new_candidates = [r for r in tested_results if r['ip'] not in set(final_ips)]
+            for r in new_candidates[:pool_needed]:
+                final_ips.append(r['ip'])
+                logger.info(f"  池子补全: {r['ip']} (评分={r['score']})")
     
     logger.info(f"\n[数据源状态报告]")
     for source, success in source_status.items():
@@ -826,8 +968,13 @@ def assign_and_save_ips(ips):
 
     db_path = os.path.join(DATA_DIR, 'singbox.db')
 
-    selected_ips = ips[:3] if len(ips) >= 3 else ips + [ips[0]] * (3 - len(ips))
-
+    # 从IP池中随机选择3个不重复的IP分配给3个协议
+    if len(ips) >= 3:
+        selected_ips = random.sample(ips, 3)
+    else:
+        selected_ips = list(ips)
+        while len(selected_ips) < 3:
+            selected_ips.append(ips[len(selected_ips) % len(ips)] if ips else '0.0.0.0')
     vless_ws_ip = selected_ips[0]
     vless_upgrade_ip = selected_ips[1]
     trojan_ws_ip = selected_ips[2]
@@ -850,6 +997,10 @@ def assign_and_save_ips(ips):
     finally:
         if conn:
             conn.close()
+    # C段覆盖检查
+    all_segments = set('.'.join(ip.split('.')[:3]) for ip in ips if len(ip.split('.')) == 4)
+    logger.info(f"  IP池C段覆盖: {len(all_segments)} 个 ({', '.join(sorted(all_segments)[:6])})")
+
     logger.info(f"\n[OK] CDN优选IP已保存")
 
 

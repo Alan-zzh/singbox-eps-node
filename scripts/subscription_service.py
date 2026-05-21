@@ -48,6 +48,8 @@ import json
 import subprocess
 from datetime import datetime
 import ssl
+import time
+import re
 
 # ⚠️ 必须先加载.env，再导入config.py（config.py会读取环境变量）
 from dotenv import load_dotenv
@@ -61,7 +63,8 @@ try:
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
-        AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR
+        AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR,
+        CDN_PREFERRED_IPS, CDN_IP_BLACKLIST
     )
     from logger import get_logger
 except ImportError:
@@ -93,11 +96,74 @@ except ImportError:
     COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
     SUB_TOKEN = os.getenv('SUB_TOKEN', '')
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    CDN_PREFERRED_IPS = []
+    CDN_IP_BLACKLIST = []
     def get_sub_domain():
         """降级：config.py导入失败时，用CF_DOMAIN或SERVER_IP作为订阅地址"""
         return CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
 logger = get_logger('subscription_service')
+
+IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
+CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
+
+
+def is_valid_ipv4(ip):
+    if not IP_REGEX.match(ip):
+        return False
+    parts = ip.split('.')
+    return all(0 <= int(part) <= 255 for part in parts)
+
+
+def load_cdn_settings(conn):
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM cdn_settings")
+    rows = cursor.fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def get_cdn_pool_state(conn):
+    settings = load_cdn_settings(conn)
+    current = {key: settings.get(key, '') for key in CDN_PROTOCOL_KEYS}
+    pool_raw = settings.get('cdn_ips_list', '')
+    pool = [ip.strip() for ip in pool_raw.split(',') if ip.strip()]
+    return settings, current, pool
+
+
+def save_cdn_pool(conn, pool):
+    pool_value = ','.join(pool)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES ('cdn_ips_list', ?)", (pool_value,))
+    conn.commit()
+
+
+def add_ips_to_pool(conn, ips):
+    _, _, pool = get_cdn_pool_state(conn)
+    existing = set(pool)
+    added = []
+    for ip in ips:
+        if ip not in existing:
+            pool.append(ip)
+            existing.add(ip)
+            added.append(ip)
+    if added:
+        save_cdn_pool(conn, pool)
+    return added, pool
+
+
+def remove_ips_from_pool(conn, ips):
+    _, current, pool = get_cdn_pool_state(conn)
+    remove_set = set(ips)
+    new_pool = [ip for ip in pool if ip not in remove_set]
+    removed = [ip for ip in pool if ip in remove_set]
+    if removed:
+        save_cdn_pool(conn, new_pool)
+        cursor = conn.cursor()
+        for key, value in current.items():
+            if value in remove_set:
+                cursor.execute("DELETE FROM cdn_settings WHERE key=?", (key,))
+        conn.commit()
+    return removed, new_pool
 
 # ============================================================
 # SOCKS5 代理池 + 健康检测 + 自动容错切换
@@ -439,59 +505,140 @@ def format_traffic(bytes_count):
     else:
         return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
 
+# CDN IP 检测结果缓存：{ip: (result, timestamp)}
+_cdn_ip_cache = {}
+_CDN_IP_CACHE_TTL = 600  # 缓存有效期10分钟
+
 def test_cdn_ip_connectivity(ip, port=443, timeout=3):
-    """测试CDN IP连通性（快速TCP测试）
-    【Bug #57修复】：增加纠错机制，CDN IP连不上时自动回退到域名
+    """测试CDN IP连通性（仅TCP层检测，带缓存）
+    【v4.3.9优化】：移除HTTP层403检测，减少请求特征暴露；增加10分钟缓存避免频繁重测
     """
-    sock = None
+    # 查缓存
+    now = time.time()
+    if ip in _cdn_ip_cache:
+        cached_result, cached_time = _cdn_ip_cache[ip]
+        if now - cached_time < _CDN_IP_CACHE_TTL:
+            return cached_result
+
+    # TCP检测
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         result = sock.connect_ex((ip, port))
-        return result == 0
+        sock.close()
+        ok = result == 0
     except Exception:
-        return False
-    finally:
-        if sock:
-            try:
-                sock.close()
-            except Exception:
-                pass
+        ok = False
+
+    # 写缓存
+    _cdn_ip_cache[ip] = (ok, now)
+    return ok
+
+# 换IP冷却机制：连续失败3次后暂停15分钟
+_ip_switch_fail_count = 0
+_ip_switch_cooldown_until = 0  # 冷却结束时间戳
+_IP_SWITCH_MAX_FAILS = 3
+_IP_SWITCH_COOLDOWN_SECONDS = 900  # 15分钟
 
 def get_cdn_ip_for_protocol(protocol_key):
-    """获取指定协议的CDN优选IP（带连通性检测兜底）
-    
+    """获取指定协议的CDN优选IP（被阻断自动换IP，不切换域名）
+
     【Bug #57修复】：
-    1. 从数据库读取CDN IP
+    1. 从数据库读取CDN IP和cdn_ips_list
     2. 快速测试连通性（3秒超时）
-    3. 连不上就清空数据库记录，自动回退到域名兜底
-    4. 用户更新订阅即可恢复连接
+    3. 连不上就从cdn_ips_list中换一个IP（不切换域名）
+    4. 被拦截的IP不淘汰，保留在池中，过段时间可能恢复
+
+    【v4.3.8优化】：
+    - 被阻断自动从池中换IP，不切换域名
+    - 不淘汰被拦截的IP，只有黑名单IP才永久淘汰
+    - 不每小时自动换IP，只有被阻断时才换
+
+    【v4.3.9优化】：
+    - 换IP冷却机制：连续失败3次后暂停15分钟，避免频繁换IP加剧封禁
+    - 当前IP可用时重置失败计数
     """
+    global _ip_switch_fail_count, _ip_switch_cooldown_until
+
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+
+        # 获取当前CDN IP
         cursor.execute("SELECT value FROM cdn_settings WHERE key=?", (protocol_key,))
         row = cursor.fetchone()
-        if row and row[0] and row[0] != SERVER_IP:
-            cdn_ip = row[0]
-            # 快速连通性检测
-            if test_cdn_ip_connectivity(cdn_ip):
-                return cdn_ip
-            else:
-                # CDN IP连不上，清空数据库记录，触发兜底
-                logger.warning(f"CDN IP {cdn_ip} 连通性检测失败，清空记录回退到域名")
-                cursor.execute("DELETE FROM cdn_settings WHERE key=?", (protocol_key,))
-                conn.commit()
+
+        if not row or not row[0] or row[0] == SERVER_IP:
+            return None  # 没有CDN IP配置
+
+        current_ip = row[0]
+
+        # 冷却机制检查
+        now = time.time()
+        if now < _ip_switch_cooldown_until:
+            # 冷却期内，直接返回当前IP（不检测不换IP）
+            return current_ip
+
+        # 快速连通性检测
+        if test_cdn_ip_connectivity(current_ip):
+            _ip_switch_fail_count = 0  # 重置失败计数
+            return current_ip  # 当前IP正常，直接用
+
+        # 当前IP被阻断，从cdn_ips_list中换一个
+        logger.warning(f"CDN IP {current_ip} 被阻断，从池中换IP")
+
+        # 获取cdn_ips_list
+        cursor.execute("SELECT value FROM cdn_settings WHERE key='cdn_ips_list'")
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            logger.warning(f"cdn_ips_list为空，无法换IP")
+            # 没有候选IP，触发冷却
+            _ip_switch_fail_count += 1
+            if _ip_switch_fail_count >= _IP_SWITCH_MAX_FAILS:
+                _ip_switch_cooldown_until = time.time() + _IP_SWITCH_COOLDOWN_SECONDS
+                logger.warning(f"连续{_ip_switch_fail_count}次换IP失败，进入{_IP_SWITCH_COOLDOWN_SECONDS//60}分钟冷却期")
+                _ip_switch_fail_count = 0
+            return current_ip  # 返回当前IP，不返回None
+
+        all_ips = [ip.strip() for ip in row[0].split(',') if ip.strip()]
+
+        # 过滤黑名单IP
+        try:
+            from config import CDN_IP_BLACKLIST
+            blacklist = set(CDN_IP_BLACKLIST)
+        except ImportError:
+            blacklist = set()
+
+        available_ips = [ip for ip in all_ips if ip not in blacklist and ip != current_ip]
+
+        if not available_ips:
+            logger.warning(f"没有可用的IP可以替换")
+            # 所有候选IP都不可用，触发冷却
+            _ip_switch_fail_count += 1
+            if _ip_switch_fail_count >= _IP_SWITCH_MAX_FAILS:
+                _ip_switch_cooldown_until = time.time() + _IP_SWITCH_COOLDOWN_SECONDS
+                logger.warning(f"连续{_ip_switch_fail_count}次换IP失败，进入{_IP_SWITCH_COOLDOWN_SECONDS//60}分钟冷却期")
+                _ip_switch_fail_count = 0
+            return current_ip  # 返回当前IP，不返回None
+
+        # 随机选一个IP（避免总是选同一个）
+        import random
+        new_ip = random.choice(available_ips)
+
+        # 更新数据库
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", (protocol_key, new_ip))
+        conn.commit()
+
+        logger.info(f"CDN IP已替换: {current_ip} -> {new_ip}")
+        return new_ip
+
     except Exception as e:
         logger.debug(f"获取CDN IP失败: {e}")
+        return None
     finally:
         if conn:
             conn.close()
-    # 兜底：使用域名
-    if CF_DOMAIN and CF_DOMAIN.strip():
-        return CF_DOMAIN
-    return SERVER_IP
 
 def get_sub_address():
     """获取订阅服务地址（域名或IP）- 使用config.py统一逻辑"""
@@ -505,11 +652,20 @@ def generate_all_links():
     vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
     trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
 
-    use_cdn = (vless_ws_addr != SERVER_IP)
+    # 判断是否使用CDN：有CDN IP且不是SERVER_IP
+    use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
     cdn_suffix = "-CDN" if use_cdn else ""
 
     # CDN节点的SNI：优先使用域名，没有域名则使用服务器IP
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+
+    # 如果CDN IP不可用，回退到域名
+    if not vless_ws_addr or vless_ws_addr == SERVER_IP:
+        vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+    if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
+        vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+    if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
+        trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
     # 1. VLESS-Reality (直连)
     params = {
@@ -1258,47 +1414,142 @@ def create_app():
     @app.route('/api/cdn', methods=['GET', 'POST'])
     def cdn_api():
         if request.method == 'POST':
-            data = request.get_json()
+            data = request.get_json() or {}
             protocol = data.get('protocol', '').strip()
             new_ip = data.get('ip', '').strip()
             if not protocol or not new_ip:
                 return jsonify({'error': 'protocol and ip required'}), 400
-            # IP格式验证
-            import re
-            IP_REGEX = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
-            if not IP_REGEX.match(new_ip):
+            if not is_valid_ipv4(new_ip):
                 return jsonify({'error': 'Invalid IP format'}), 400
-            valid_keys = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
-            if protocol not in valid_keys:
+            if protocol not in CDN_PROTOCOL_KEYS:
                 return jsonify({'error': 'Invalid protocol key'}), 400
             conn = None
             try:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", (protocol, new_ip))
-                conn.commit()
-                return jsonify({'message': 'OK', 'protocol': protocol, 'ip': new_ip})
+                added, pool = add_ips_to_pool(conn, [new_ip])
+                return jsonify({
+                    'code': 200,
+                    'data': {
+                        'protocol': protocol,
+                        'ip': new_ip,
+                        'pool_added': added,
+                        'pool_size': len(pool)
+                    },
+                    'msg': 'success'
+                })
             except Exception as e:
                 logger.error(f"CDN API错误: {e}")
-                return jsonify({'error': 'Internal server error'}), 500
+                return jsonify({'code': 500, 'data': {}, 'msg': 'error'}), 500
             finally:
                 if conn:
                     conn.close()
-        else:
-            conn = None
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute("SELECT key, value FROM cdn_settings")
-                rows = cursor.fetchall()
-                result = {row[0]: row[1] for row in rows}
-                return jsonify(result)
-            except Exception as e:
-                logger.error(f"CDN API错误: {e}")
-                return jsonify({'error': 'Internal server error'}), 500
-            finally:
-                if conn:
-                    conn.close()
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            settings, current, pool = get_cdn_pool_state(conn)
+            return jsonify({
+                'code': 200,
+                'data': {
+                    'settings': settings,
+                    'current': current,
+                    'pool': pool,
+                    'pool_size': len(pool),
+                    'blacklist_size': len(CDN_IP_BLACKLIST)
+                },
+                'msg': 'success'
+            })
+        except Exception as e:
+            logger.error(f"CDN API错误: {e}")
+            return jsonify({'code': 500, 'data': {}, 'msg': 'error'}), 500
+        finally:
+            if conn:
+                conn.close()
+
+    @app.route('/api/preferred-ips', methods=['GET', 'POST', 'DELETE'])
+    def preferred_ips_api():
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            if request.method == 'GET':
+                settings, current, pool = get_cdn_pool_state(conn)
+                return jsonify({
+                    'code': 200,
+                    'data': {
+                        'current': current,
+                        'pool': pool,
+                        'pool_size': len(pool),
+                        'static_preferred_count': len(CDN_PREFERRED_IPS),
+                        'blacklist': CDN_IP_BLACKLIST
+                    },
+                    'msg': 'success'
+                })
+
+            data = request.get_json(silent=True)
+            if request.method == 'POST':
+                if isinstance(data, dict):
+                    candidates = [data]
+                elif isinstance(data, list):
+                    candidates = data
+                else:
+                    return jsonify({'code': 400, 'data': {}, 'msg': 'invalid payload'}), 400
+                normalized = []
+                invalid = []
+                for item in candidates:
+                    ip = str(item.get('ip', '')).strip() if isinstance(item, dict) else ''
+                    if is_valid_ipv4(ip):
+                        normalized.append(ip)
+                    else:
+                        invalid.append(ip)
+                if not normalized:
+                    return jsonify({'code': 400, 'data': {'invalid': invalid}, 'msg': 'no valid ips'}), 400
+                added, pool = add_ips_to_pool(conn, normalized)
+                return jsonify({
+                    'code': 200,
+                    'data': {
+                        'added': added,
+                        'invalid': invalid,
+                        'pool_size': len(pool)
+                    },
+                    'msg': 'success'
+                })
+
+            payload = data or {}
+            remove_all = bool(payload.get('all')) if isinstance(payload, dict) else False
+            if remove_all:
+                _, _, pool = get_cdn_pool_state(conn)
+                removed, new_pool = remove_ips_from_pool(conn, pool)
+                return jsonify({
+                    'code': 200,
+                    'data': {'removed': removed, 'pool_size': len(new_pool)},
+                    'msg': 'success'
+                })
+            if isinstance(payload, dict):
+                ips = payload.get('ips')
+                if not ips and payload.get('ip'):
+                    ips = [payload.get('ip')]
+            else:
+                ips = None
+            if not isinstance(ips, list):
+                return jsonify({'code': 400, 'data': {}, 'msg': 'ips required'}), 400
+            normalized = [str(ip).strip() for ip in ips if is_valid_ipv4(str(ip).strip())]
+            removed, new_pool = remove_ips_from_pool(conn, normalized)
+            return jsonify({
+                'code': 200,
+                'data': {
+                    'removed': removed,
+                    'requested': normalized,
+                    'pool_size': len(new_pool)
+                },
+                'msg': 'success'
+            })
+        except Exception as e:
+            logger.error(f"Preferred IP API错误: {e}")
+            return jsonify({'code': 500, 'data': {}, 'msg': 'error'}), 500
+        finally:
+            if conn:
+                conn.close()
 
     return app
 

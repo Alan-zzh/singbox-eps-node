@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## v4.3.9 - 2026-05-22
+
+- 修复 cdn_monitor 403 检测 Bug：HTTP 403/1020/1010 时返回 False（之前错误返回 True，导致被拦截 IP 被标记为存活）
+- subscription_service 移除 HTTP 层 403 检测，只做 TCP 连通测试，减少请求特征暴露
+- subscription_service 新增 CDN IP 检测结果缓存（10 分钟有效期），避免每次刷新都重测
+- subscription_service 新增换 IP 冷却机制：连续 3 次换 IP 失败后暂停 15 分钟
+- cdn_monitor HTTP 检测特征随机化：随机 UA（6 个）、随机路径（5 个）、随机间隔（1-3 秒）
+- cdn_monitor 403 拦截日志从 debug 提升到 warning，journalctl 默认可见
+- IP 池扩容：CDN_TOP_IPS_COUNT 从 5 → 15，每服务器 10-15 个 IP
+- IP 池多 C 段分散：优先选择不同 C 段的候选 IP，覆盖 ≥5 个 C 段
+- 协议 IP 分配改为随机选择，不固定绑定前 3 个
+
+## v4.3.8 - 2026-05-22
+
+- 引入 cfnew 可复用思路：订阅服务新增 `/api/preferred-ips`，支持优选 IP 的查询、批量添加、批量删除
+- 增强 `/api/cdn`：切换协议当前 CDN IP 时同步维护 `cdn_ips_list`，避免只改当前值不入池
+- `config.py` 新增自定义优选源 URL、最快 N 个筛选、地区筛选配置项
+- `cdn_monitor.py` 支持从自定义优选源 URL 拉取候选 IP，并按最快 N 个与地区筛选策略收敛结果
+
+## v4.3.7 - 2026-05-21
+
+- CDN优选IP更新：12个新IP随机分配到日本/新加坡/美国三台服务器（每区3个，不重复）
+- CDN优选IP池扩充：config.py新增12个用户投喂优质IP（第六批）
+- 服务器网络参数优化：TCP keepalive从600s降至30s，更快检测死连接；US服务器conntrack_max从65536扩至262144
+- CDN断线排查：确认断线根因为Cloudflare CDN WebSocket空闲超时（100秒），服务端无错误日志
+
 ## v4.3.6 - 2026-05-18
 
 - CDN优选IP调整：黑名单加入3个慢速IP（8.35.211.141 / 173.245.59.21 / 162.159.35.152），延迟低但实际速度不行

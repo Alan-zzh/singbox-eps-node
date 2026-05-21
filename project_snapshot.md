@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.6 | **更新**: 2026-05-21
+**版本**: v4.3.9 | **更新**: 2026-05-22
 
 ---
 
@@ -11,14 +11,14 @@
 |------|------|------|
 | singbox | ✅ | 代理内核，5个入站协议 |
 | singbox-sub | ✅ | HTTPS订阅服务，端口2087 |
-| singbox-cdn | ✅ | CDN优选IP学习系统（v4.1 存活优先模式） |
+| singbox-cdn | ✅ | CDN优选IP学习系统（v4.3.9 阻断检测+多C段分散） |
 
 ### 核心功能
 - ✅ 5个代理协议：VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
-- ✅ CDN优选IP：v4.1 存活优先模式（现有IP存活则不换，死亡才替换 + 用户投喂+外部API收集 + 存活率评分）
+- ✅ CDN优选IP：v4.3.9 阻断检测+多C段分散（403/1020拦截检测+自动替换+IP池10-15个/服务器+冷却机制）
 - ✅ CDN每小时自动更新：cdn_monitor.py while循环 + 进程锁防重复
 - ✅ CDN IP自动同步：cdn_monitor写数据库 → subscription_service实时读取 → 用户更新订阅即可
-- ✅ CDN纠错机制：subscription_service.py启动时检测CDN IP连通性，连不上自动回退到域名兜底
+- ✅ CDN纠错机制：subscription_service.py TCP连通检测（3秒超时），连不上自动换IP，10分钟缓存+15分钟冷却
 - ✅ 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
 - ✅ 存活检测：TCP端口连通性测试（3秒超时），不代替用户判断延迟质量
 - ✅ 外部API持续收集：vvhan/090227/001315/WeTest/IPDB作为候选池补充
