@@ -5,35 +5,29 @@
 ### Bug #90: sing-box JSON 客户端默认开启 `FakeIP + TUN`，会把延迟判断彻底带偏
 - **问题**: `subscription_service.py` 生成的 sing-box JSON 默认开启了 `dns.fakeip.enabled = true`，同时又默认带 `tun` 入站。这样用户在 v2rayN / sing-box TUN 模式里 ping 某些域名或节点相关目标时，命中的可能是本机分配的 FakeIP，而不是真实远端线路，容易出现 `<1ms` 这种明显不符合跨国链路常识的结果。
 - **影响**:
-  - 用户会误以为“新加坡明明走日本，为什么延迟还不到 1ms”，从而怀疑节点地区、路由、DNS 全部写错
+  - 用户会误以为"新加坡明明走日本，为什么延迟还不到 1ms"，从而怀疑节点地区、路由、DNS 全部写错
   - 延迟指标被 FakeIP 污染后，用户很难判断到底是 CDN 差、直连差，还是客户端指标本身失真
-  - TUN 场景下部分应用还可能出现“体感卡，但 ping 很漂亮”的错觉，排查方向会被严重带偏
+  - TUN 场景下部分应用还可能出现"体感卡，但 ping 很漂亮"的错觉，排查方向会被严重带偏
 - **修复**:
   - `scripts/subscription_service.py` 生成的客户端 sing-box JSON 改为默认关闭 `dns.fakeip.enabled`
   - 保留 FakeIP 结构和地址段定义，后续如确有明确需求再单独按场景开启，不再默认对所有用户生效
-- **验证**:
-  - 代码定位：`scripts/subscription_service.py` 的 `generate_singbox_config()` 中原本为 `fakeip.enabled = True`
-  - 修复后，新生成的 sing-box JSON 不再默认分配 FakeIP，本机 `ping` 结果不会再被伪造成本地级延迟
 
 ### Bug #89: 新格式DNS迁移时把 `detour: direct` 误带进来了，导致日本机 singbox 直接起不来
 - **问题**: 这次把 DNS 从旧 `address` 写法迁到 sing-box 新格式时，沿用了旧时代的 `detour: "direct"` 思路。但 sing-box 1.13.11 对新版 DNS server 直接报错：`detour to an empty direct outbound makes no sense`
 - **影响**:
   - 日本服务器 `singbox` 主服务持续重启，443/8443/2053/2083 全部掉线
-  - `singbox-sub` 仍然能回 200，所以表面像“订阅还活着”，但真正代理节点已经没网
+  - `singbox-sub` 仍然能回 200，所以表面像"订阅还活着"，但真正代理节点已经没网
   - 如果把同样代码继续推到其他服务器，会复制同一个现网故障
 - **修复**:
   - `scripts/config_generator.py` 删除新版 DNS server 上的 `detour: "direct"`
   - `scripts/subscription_service.py` 生成的客户端 sing-box JSON 同步删除这两个 DNS server 的 `detour`
   - 保留 `route.default_domain_resolver` 和 `dns_direct.domain_resolver`，只去掉错误的 `detour`
-- **验证**:
-  - 日本服务器日志明确报错：`start dns/tls[dns_proxy]: detour to an empty direct outbound makes no sense`
-  - 修复后需重新生成 `config.json`、`sing-box check`、重启 3 个服务并复测端口和订阅
 
 ### Bug #87: singbox当前正常，但仍靠 deprecated DNS 兼容开关硬撑
 - **问题**: 日本服务器当前 `singbox` 虽然是 active，但去掉 `ENABLE_DEPRECATED_LEGACY_DNS_SERVERS` 后 `sing-box check` 直接失败，说明 `config_generator.py` 仍在生成旧式 DNS server 写法，`subscription_service.py` 生成的客户端 JSON 也还是 `tls://` / `h3://` / `rcode://` / `fakeip` 老格式
 - **影响**:
   - 眼下不算现网故障，因为 systemd 里有 `ENABLE_DEPRECATED_*` 兜底，用户侧也基本正常
-  - 但这是典型“慢性复发型”暗病，一旦 sing-box 升到 1.14，兼容开关被删，`singbox` 会再次直接起不来
+  - 但这是典型"慢性复发型"暗病，一旦 sing-box 升到 1.14，兼容开关被删，`singbox` 会再次直接起不来
   - 新部署如果继续沿用 `install.sh` 里的兼容开关，也会把旧坑原样复制到下一台服务器
 - **修复**:
   - `scripts/config_generator.py` 改成 sing-box 新版 DNS server 格式：`type/server` 取代旧 `address`
@@ -41,10 +35,6 @@
   - `scripts/subscription_service.py` 生成的客户端 JSON 同步迁移到新版 DNS 格式，并给 `dns_direct` 补 `domain_resolver`
   - `install.sh` 删除 `ENABLE_DEPRECATED_LEGACY_DNS_SERVERS` 和 `ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER`
   - 新增 `tests/test_dns_config_migration.py`，防止以后回退到旧格式
-- **验证**:
-  - 远程实测：服务器当前 3 个服务 active，订阅链接 `https://jp.290372913.xyz:2087/sub/JP` 返回 200
-  - 远程实测：去掉 deprecated 环境变量后，旧配置 `sing-box check` 失败，证明这是“已被兜底掩盖的真实代码问题”
-  - 本地测试覆盖新增 DNS 配置迁移检查，避免旧写法回流
 
 ### Bug #88: install/diagnose 仍有边界错误和误报，容易把人带沟里
 - **问题**:
@@ -61,105 +51,86 @@
   - `diagnose.sh` 改正 iptables 计数器匹配逻辑
   - CDN 连通性检测改成 `--resolve 域名:端口:IP`，带域名 SNI 做真测试
   - 证书检查改成 `fullchain.pem` / `cert.pem` 二选一即可，不再把正常兜底当警告
-- **验证**:
-  - 远程实测日本服务器实际 INPUT 规则已经是 `21000:21200`
-  - 远程实测旧版 diagnose.sh 会把正常流量计数器和正常 CDN 错判为失败，且伴随 shell 整数比较报错
 
 ### Bug #86: `.env.example` 仍带行内注释，手动复制后有复发风险
 - **问题**: 仓库里的 `.env.example` 仍是 `KEY=  # 注释` 格式。虽然 `install.sh` 现在会生成干净 `.env`，但用户手动复制示例文件或人工补配置时，`config.py/config_generator.py` 的旧手写解析逻辑仍可能把注释误读成值
 - **影响**:
   - `AI_SOCKS5_PORT` 这类数字字段可能再次触发 `ValueError`
   - `CF_DOMAIN`、`REALITY_PUBLIC_KEY` 等字符串字段可能被读成带注释脏值
-  - 新部署不一定复现，手改配置时更隐蔽，属于“慢性复发型”问题
+  - 新部署不一定复现，手改配置时更隐蔽，属于"慢性复发型"问题
 - **修复**:
   - 清理 `.env.example` 的所有行内注释，改为独立注释行
   - `config.py` 新增统一 `.env` 读取逻辑，优先 `python-dotenv`
   - `config_generator.py` 改为复用 `config.py` 的统一解析逻辑
   - 补充最小测试覆盖旧式行内注释兼容场景
-- **验证**:
-  - `pytest -q` 通过新增的 `.env` 兼容解析测试
-  - 本地 grep 确认 `.env.example` 不再包含 `KEY=  # 注释` 形式
-  - 日本服务器当前 `.env` 由 `install.sh` 生成，线上服务状态正常，无需立即改线上
-
 
 ### Bug #85: singbox-cdn死循环重启1492次
 - **问题**: crontab每小时执行 `systemctl restart singbox-cdn`，但cdn_monitor --daemon已在运行中。新实例检测到锁文件后正常退出(exit 0)，systemd的Restart=always又把它拉起来，形成死循环
 - **影响**: 每5秒重启一次，累计1492次，浪费CPU和日志空间
-- **修复**: 
+- **修复**:
   - 删除crontab中 `0 * * * * /usr/bin/systemctl restart singbox-cdn` 条目
   - systemd service: Restart=always → Restart=on-failure
   - pkill旧进程 + 删锁文件 + 重启服务
   - install.sh同步修改Restart=on-failure
-- **验证**: 等待10秒后NRestarts不再增长，3个服务全部active
 
 ### Bug #84: install.sh硬编码CF API Token泄露
 - **问题**: install.sh第33行硬编码Cloudflare API Token，推到GitHub公开仓库会泄露
 - **影响**: 任何人可拿到Token操作你的Cloudflare DNS
 - **修复**: CF_DEFAULT_API_TOKEN改为从环境变量CF_API_TOKEN读取，无值时交互式询问用户输入
-- **验证**: grep确认install.sh中无硬编码Token
 
 ### Bug #83: config.py缺少AI_SOCKS5_POOL变量定义
 - **问题**: subscription_service.py和config_generator.py都引用AI_SOCKS5_POOL，但config.py没有定义
 - **影响**: 违反唯一真相源规则，其他文件只能自己读.env
 - **修复**: config.py添加 AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '')
-- **验证**: subscription_service.py从config.py成功导入AI_SOCKS5_POOL
 
 ### Bug #82: REALITY_SHORT_ID/DEST/SNI导入后被覆盖
 - **问题**: subscription_service.py从config.py导入了REALITY_SHORT_ID/DEST/SNI，但紧接着用os.getenv覆盖
 - **影响**: config.py的值被丢弃，等于白导入。如果config.py有特殊逻辑（如默认值检测），这些逻辑全部失效
 - **修复**: 删掉3行覆盖代码，直接使用config.py导入的值
-- **验证**: grep确认subscription_service.py中无 os.getenv('REALITY_SHORT_ID') 等覆盖行
 
 ### Bug #81: subscription_service.py多个变量不从config.py导入
 - **问题**: COUNTRY_CODE、SUB_TOKEN、AI_SOCKS5_POOL自己用os.getenv读，不从config.py导入
 - **影响**: 违反唯一真相源规则，如果config.py的默认值或读取逻辑变更，subscription_service.py不会同步
-- **修复**: 
+- **修复**:
   - COUNTRY_CODE/SUB_TOKEN/AI_SOCKS5_POOL加入config.py导入列表
   - ImportError降级块也补充这3个变量
   - parse_socks5_pool()改用导入的AI_SOCKS5_POOL变量
   - 删掉独立的COUNTRY_CODE定义行
-- **验证**: 语法检查通过，所有变量从config.py统一导入
 
 ### Bug #80: singbox-cdn未运行+CDN数据库缺失
 - **问题**: 日本服务器singbox-cdn服务未运行，CDN数据库文件不存在
 - **影响**: CDN优选IP无法自动更新，订阅中CDN节点可能失效
 - **修复**: 启动singbox-cdn服务，创建SQLite数据库和表结构
-- **验证**: systemctl status singbox-cdn显示active
 
 ### Bug #79: sing-box 1.12.0+ DNS配置格式不兼容
 - **问题**: sing-box 1.13.9/1.13.11要求新的DNS服务器格式，旧格式启动失败
 - **影响**: singbox无法启动，所有代理服务中断
 - **修复**: systemd服务文件添加ENABLE_DEPRECATED_LEGACY_DNS_SERVERS和ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER环境变量
-- **验证**: sing-box check通过，服务正常启动
 
 ### Bug #78: REALITY协议100%握手失败
 - **问题**: REALITY私钥/公钥不匹配，客户端TLS握手全部失败
 - **影响**: REALITY节点完全不可用，客户端疯狂重试导致连接池占满，所有协议卡顿（1秒+延迟）
-- **修复**: 
+- **修复**:
   - 重新生成REALITY密钥对（日本+新加坡）
   - 更新.env和config.json
   - 重启singbox和订阅服务
-- **验证**: 订阅链接中的pbk=公钥与服务器配置匹配
 
 ### Bug #77: 新加坡CF_DOMAIN配置错误
 - **问题**: 新加坡服务器.env中CF_DOMAIN=us.290372913.xyz（美国域名）
 - **影响**: CDN节点SNI使用美国域名，流量绕道美国，客户端连不上
 - **修复**: 改为sg.290372913.xyz，重启所有服务
-- **验证**: 订阅中CDN节点SNI正确显示sg.290372913.xyz
 
 ### Bug #76: AWS MTU 9001导致所有协议卡顿
 - **问题**: AWS云服务器默认MTU 9001（Jumbo Frames），客户端MTU 1500
 - **影响**: 数据包分片，UDP丢包严重，TCP重传率高，所有协议卡顿
-- **修复**: 
+- **修复**:
   - MTU改为1500（日本+新加坡）
   - UDP缓冲区优化：rmem_max/wmem_max从212KB提升到25MB
   - 创建永久生效配置（/etc/network-optimization.sh + rc.local + sysctl.d）
-- **验证**: 服务器网络统计无丢包，连接正常
 
 ### Bug #75: CDN IP黑名单更新
 - **问题**: 用户反馈多个CDN IP延迟高/连不上
 - **修复**: 加入黑名单：104.16.147.135、104.17.119.190、104.17.110.132、104.16.244.71、162.159.152.11
-- **验证**: CDN监控自动替换黑名单IP
 
 ---
 
@@ -169,7 +140,7 @@
 **教训来源**: v1.0.43 使用IP地址访问HTTPS订阅
 **Bug现象**: V2rayN等客户端验证SSL证书时，发现证书颁发给域名，与访问的IP不匹配，拒绝连接（SEC_E_WRONG_PRINCIPAL）
 **正确做法**: 使用域名访问（走CDN，证书匹配）
-**判断标准**: 
+**判断标准**:
 - 任何HTTPS服务，如果SSL证书是颁发给域名的，访问地址必须用域名
 - 订阅链接必须用域名格式：https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
 
@@ -210,7 +181,7 @@
 ### 规则6：禁止硬编码IP/域名/凭据/路径
 **教训来源**: v1.0.45前代码中硬编码了域名、服务器IP、SOCKS5凭据、文件路径
 **Bug现象**: 新VPS部署时必须手动修改大量代码，极易遗漏导致服务异常
-**正确做法**: 
+**正确做法**:
 - 所有IP/域名从.env读取（SERVER_IP自动检测，CF_DOMAIN从.env读取）
 - 所有凭据从环境变量读取
 - 所有文件路径从config.py的BASE_DIR/CERT_DIR拼接
@@ -223,10 +194,10 @@
 
 ### 规则8：HY2端口跳跃必须UDP+TCP双规则，目标必须与listen_port一致
 **教训来源**: v1.0.45前cert_manager.py将21000-21200转发到4433，但HY2监听443；后来修复时又错误地移除了TCP规则
-**Bug现象**: 
+**Bug现象**:
 - 端口跳跃的流量到达4433端口，但HY2不在4433监听，导致端口跳跃功能完全无效
 - 只设UDP规则时，UDP被封则HY2完全不可用，无TCP兜底
-**正确做法**: 
+**正确做法**:
 - iptables DNAT目标端口必须与config_generator.py中HY2的listen_port一致（当前为443）
 - mport参数范围必须与iptables规则范围一致（当前为21000-21200）
 - HY2端口跳跃必须同时设置UDP和TCP规则：
@@ -237,14 +208,14 @@
 ### 规则9：跨文件配置必须保持一致性
 **教训来源**: v1.0.45前HY2配置在cert_manager.py、subscription_service.py、config_generator.py三处不一致
 **Bug现象**: 端口跳跃范围21000-21200 vs 22000-22200，目标端口4433 vs 443
-**正确做法**: 
+**正确做法**:
 - 修改任何配置时，必须全局搜索所有引用该配置的文件
 - 使用config.py中的常量作为唯一真相源（Single Source of Truth）
 - 修改配置后必须验证所有引用点的一致性
 
 ### 规则10：改代码必须同步更新文档（强制红线）
 **教训来源**: v1.0.45中SOCKS5 AI路由规则代码已实现但文档未记录；TECHNICAL_DOC.md严重过时（还是硬编码IP/域名）；HY2双协议保障未在文档中说明导致AI错误移除TCP规则
-**Bug现象**: 
+**Bug现象**:
 - 文档过时 → 下一个AI基于过时文档做判断 → 犯错（如移除TCP规则）
 - 功能未记录 → AI不知道该功能存在 → 重复开发或误删
 - 文档与代码不一致 → 文档失去参考价值 → 形同虚设
@@ -259,11 +230,11 @@
 
 ### 规则11：区分"用户可见节点"和"幕后路由出站"（强制红线）
 **教训来源**: v1.0.48中将AI-SOCKS5作为"节点"加入Base64订阅和selector列表
-**Bug现象**: 
+**Bug现象**:
 - 用户在V2rayN节点列表中看到"AI-SOCKS5"节点，手动选择后无法正常使用
 - AI-SOCKS5本质是一个出站代理链路，不是独立代理节点
 - 用户选它=所有流量走SOCKS5=失去其他节点的分流能力，且SOCKS5本身可能不稳定
-**根本原因**: 
+**根本原因**:
 - 技术文档明确写了"无感路由，用户无需手动选择"，但AI只理解了"SOCKS5是个代理"的字面意思
 - AI没有理解设计意图：SOCKS5是"幕后工作者"，只在路由规则里默默把AI流量牵制过去
 - AI看到"SOCKS5"就当成"节点"塞进节点列表，完全忽略了"无感"这个关键词
@@ -296,92 +267,6 @@
    - health_check.sh（健康检查）
    - install.sh（安装脚本）
 
-### Bug #17: CAKE状态显示矛盾（verify显示未启用，summary硬编码已启用）
-- **版本**: v1.0.70 → v1.0.71
-- **日期**: 2026-04-22
-- **现象**: verify_installation检测CAKE未启用（降级为FQ），但print_summary硬编码"CAKE队列: 已启用"
-- **根因**: print_summary没有从实际检测结果读取CAKE状态，而是硬编码了"已启用"
-- **修复**: print_summary从 `tc qdisc show dev $MAIN_IF` 实际检测读取状态
-- **预防**: 状态显示必须从实际检测读取，禁止硬编码
-
-### Bug #18: reinstall命令逻辑错误（声称不需要密码，但无法获取root密码）
-- **版本**: v1.0.71 → v1.0.72
-- **日期**: 2026-04-22
-- **现象**: `bash install.sh reinstall` 声称"不需要输密码（自动从旧.env读取）"，但.env存储的是应用密码（VLESS_UUID/TROJAN_PASSWORD等），不是root密码，操作系统重装需要root密码
-- **根因**: AI混淆了"应用密码"和"root密码"的概念。.env中的密码是代理协议密码，操作系统重装需要的是系统root密码，两者完全不同
-- **修复**: 
-  1. reinstall改为操作系统重装（集成bin456789/reinstall脚本）
-  2. 添加root密码双重确认（连续输入两次，隐藏输入）
-  3. 自动检测当前OS版本，重装为相同版本
-  4. reset命令明确为singbox应用重装（保留配置和数据）
-- **预防**: 区分"应用层密码"和"系统层密码"，操作系统重装必须要求用户输入root密码
-
-### Bug #19: set -e导致CAKE失败时脚本直接退出
-- **版本**: v1.0.65 → v1.0.66
-- **日期**: 2026-04-22
-- **现象**: 一键安装脚本运行到CAKE步骤就中断，后续所有步骤（TCP调优、文件描述符、安装singbox等）全部不执行
-- **根因**: 脚本开头启用了 `set -e`，`tc qdisc replace` 在部分内核/VPS上不支持CAKE时返回非零退出码，导致脚本立即终止
-- **修复**: 
-  1. `tc qdisc replace` 改为 `cmd && CAKE_OK=true || true` 模式
-  2. CAKE支持检测改为 `if modprobe sch_cake` + `tc qdisc add` 试探法
-  3. 所有 `grep -q ... && sed || echo` 模式改为独立函数，用 `if/else` 替代
-- **预防**: `set -e` 环境下所有可能失败的命令必须用 `|| true` 或 `if` 包裹
-
-### Bug #20: geoip/geosite在sing-box 1.12+已移除，导致singbox FATAL退出
-- **版本**: v1.0.73 → v1.0.74
-- **日期**: 2026-04-22
-- **现象**: 升级sing-box到1.13.9后，`FATAL: geoip database is deprecated in sing-box 1.8.0 and removed in sing-box 1.12.0`，所有代理端口未监听
-- **根因**: config_generator.py和subscription_service.py仍使用`geoip`/`geosite`内联规则格式，sing-box 1.12.0彻底移除了该格式
-- **修复**: 
-  1. config_generator.py：删除`{"geoip":"cn"}`和`{"geosite":"cn"}`（服务端不需要）
-  2. subscription_service.py：改用`rule_set`远程规则集格式（.srs二进制）
-  3. 添加`rule_set`定义引用SagerNet/sing-geosite和sing-geoip
-- **预防**: 升级sing-box大版本时必须检查配置格式兼容性，1.12+禁用geoip/geosite
-
-### Bug #21: CAKE降级方案FQ不如FQ-PIE
-- **版本**: v1.0.73 → v1.0.74
-- **日期**: 2026-04-22
-- **现象**: 内核不支持CAKE时降级为`fq`，但`fq_pie`比`fq`更适应高丢包环境
-- **根因**: 初始实现时选了最基础的FQ作为降级方案，没有考虑FQ-PIE
-- **修复**: `net.core.default_qdisc=fq` → `net.core.default_qdisc=fq_pie`
-- **预防**: 降级方案应选择功能最接近原方案（CAKE=FQ+PIE）的替代品（FQ-PIE）
-
-### Bug #23: DNS代理查询导致延迟飙升（dns_proxy走ePS-Auto而非direct）
-- **版本**: v1.0.75 → v1.0.76
-- **日期**: 2026-04-22
-- **现象**: 代理服务器上测节点延迟很高，但本地连接显示延迟正常；所有流量（包括非AI网站）延迟都异常高
-- **根因**: subscription_service.py中dns_proxy的detour设置为"ePS-Auto"，导致DNS查询走了代理节点→SOCKS5→多了一层代理→延迟飙升。dns_direct的detour是"direct"是正确的，但dns_proxy用错了
-- **修复**: subscription_service.py第366行 `detour: "ePS-Auto"` → `detour: "direct"`
-- **原理说明**:
-  - dns_proxy（8.8.8.8）负责解析非国内域名，应该直连获取DNS结果，由后续路由规则决定流量走向
-  - dns_proxy走ePS-Auto会导致DNS查询本身也绕代理，增加额外延迟
-  - 最终路由（final: "ePS-Auto"）已经确保非国内/非AI流量走代理，DNS不需要提前绕代理
-- **预防**: DNS服务器detour应设为direct，最终流量走向由route.final规则控制
-
-### Bug #24: CDN优选IP不自动更新（本地池永远优先，外部API永不触发）
-- **版本**: v1.0.76 → v1.0.77
-- **日期**: 2026-04-22
-- **现象**: 优选IP一两天不更新，永远是本地池的那几个IP
-- **根因**: fetch_cdn_ips() 中本地池24个IP永远优先，只要前5个可达就停止，步骤2/3/4的外部API（WeTest.vip/001315/IPDB）永远不会被调用
-- **修复**: 调整获取顺序为：WeTest.vip电信优选DNS（步骤1，实时获取）→ 001315电信API（步骤2，补充）→ IPDB API（步骤3，补充）→ 本地实测IP池（步骤4，兜底）
-- **预防**: 外部API必须优先于本地固定池，确保每小时获取最新最快IP
-
-### Bug #25: SOCKS5路由规则顺序错误导致X/推特/groK走错
-- **版本**: v1.0.77 → v1.0.78
-- **日期**: 2026-04-22
-- **现象**: X/推特/groK 被AI规则匹配走了SOCKS5，而不是正常代理
-- **根因**: subscription_service.py 和 config_generator.py 中，AI规则在X/推特/groK排除规则之前。sing-box按顺序匹配规则，先匹配到的生效，导致X/groK先被AI规则捕获走SOCKS5
-- **修复**: 将X/推特/groK排除规则移到AI规则之前。客户端配置outbound改为ePS-Auto（走正常代理），服务端配置outbound为direct（VPS直连）
-- **预防**: 排除规则必须放在被排除的规则之前，sing-box按顺序匹配
-
-### Bug #26: SOCKS5缺少故障转移机制
-- **版本**: v1.0.77 → v1.0.78
-- **日期**: 2026-04-22
-- **现象**: SOCKS5住宅代理挂了，AI网站完全无法访问
-- **根因**: ai-residential selector 的 outbounds 只有 ["AI-SOCKS5"]，没有fallback选项
-- **修复**: ai-residential selector 的 outbounds 改为 ["AI-SOCKS5", "direct"]，SOCKS5不可用时自动切直连
-- **预防**: 所有selector必须包含fallback选项，防止单点故障
-
 ### 新增预防规则：路由规则顺序规范
 - **教训来源**: Bug #25
 - **正确做法**:
@@ -399,860 +284,77 @@
   - 最终流量走向由route.final规则控制，DNS不需要提前绕代理
   - DNS查询走代理会增加额外延迟，导致所有域名解析都变慢
 
-### Bug #43: CDN外部API高分IP实际延迟高（50-68ms），理论优选≠实际最优
-- **版本**: v2.0.0 → v2.2.0
-- **日期**: 2026-04-25
-- **现象**: CDN优选IP返回的外部API高分IP（如162.159.39.178/172.64.52.132）实际延迟50-68ms，而用户本地手动测试的低延迟IP（如162.159.38.60延迟35ms）反而被评分系统忽略。外部API返回的是中国用户测试结果，但日本服务器实际连接延迟差异大
-- **根因**: 
-  1. 评分系统依赖外部API的排名和IP段前缀打分，但这些都是"理论值"，不反映真实链路质量
-  2. IP段前缀固定加分（162.159段+10分），但同段内IP实际表现差异巨大
-  3. 本地池IP评分只有0分，被外部API的高分IP覆盖
-  4. 服务器端tcping测试所有CF IP都是1-2ms，无法区分实际延迟
-- **修复**:
-  1. cdn_monitor.py重构为混合模式：外部API只收集候选IP → HTTP真实延迟测试 → 按延迟排序
-  2. 新增http_latency_test()函数，对所有候选IP发送HTTPS请求测真实响应时间
-  3. 排序规则改为：延迟优先（升序），速度次之
-  4. 外部API统一降权（各5分），本地池同样5分，不再按来源给高分
-  5. config.py本地池更新为用户实测最优IP（108.162.198.57等7个新IP，速度>60mb/s）
-  6. 移除IP_PREFIX_SCORE中的162.159/108.162固定加分，仅保留104段降权（-10分）
-- **预防**: 
-  - CDN优选IP必须以真实HTTP延迟测试为准，外部API仅提供候选IP，不直接给高分
-  - IP段前缀不再作为判断标准，真实表现才是唯一标准
-  - 用户本地测试数据必须优先于外部API数据
-
-### Bug #28: AI规则包含google.com导致延迟测试走SOCKS5（360ms）
-- **版本**: v1.0.80 → v1.0.82
-- **日期**: 2026-04-23
-- **现象**: v2rayN延迟测试显示170-193ms，但本地ping只有63ms；用户反馈"加了SOCKS5后延迟莫名其妙变高"
-- **根因**: AI规则的domain_suffix包含了google.com/googleapis.com/gstatic.com。v2rayN延迟测试用www.google.com/generate_204，被AI规则匹配走了SOCKS5。延迟测到的是SOCKS5延迟（360ms）而非正常代理延迟（63ms+TLS开销）
-- **修复**: 从AI规则中移除google.com/googleapis.com/gstatic.com。只保留AI专用子域名（gemini.google.com/bard.google.com/aistudio.google.com/ai.google）
-- **预防**: AI规则中禁止包含通用域名（google.com等），只包含AI专用子域名。修改subscription_service.py时必须同步修改config_generator.py
-
-### Bug #29: CDN优选IP返回104.x.x.x高延迟段（130ms+）
-- **版本**: v1.0.82
-- **日期**: 2026-04-23
-- **现象**: CDN优选IP返回104.21.x.x/104.16-18.x.x段，对中国用户延迟130ms+，远高于162.159.x.x段的50ms
-- **根因1**: WeTest.vip的DNS记录本身就是104段，即使用湖南电信DNS(222.246.129.80)或阿里DoH解析也返回104段。不是DNS服务器的问题，是WeTest.vip的Anycast分配问题
-- **根因2**: 之前代码过滤104段后为空就"全部保留"，导致高延迟IP被使用
-- **根因3**: 日本服务器无法直接dig中国内网DNS（超时），需要用DoH方式
-- **修复**:
-  1. CDN获取顺序改为：001315 API(返回173.245等优质段) → WeTest(104段严格过滤，为空就丢弃) → IPDB → 本地池(兜底)
-  2. 过滤后为空就丢弃，不再"全部保留"
-  3. 增加DoH支持（阿里DoH: dns.alidns.com），境外服务器也能解析
-  4. `is_hunan_ct_optimal()`只允许162.159/172.64/108.162/198.41/173.245段
-- **预防**: 
-  - 104.x.x.x段必须严格过滤，不能"全部保留"
-  - 001315 API优先（返回优质段），WeTest仅作补充
-  - 境外服务器必须用DoH方式解析DNS，直接dig中国DNS会超时
-
-### Bug #30: config_generator.py与subscription_service.py不同步
-- **版本**: v1.0.82
-- **日期**: 2026-04-23
-- **现象**: 修改subscription_service.py的AI规则后，config_generator.py没有同步修改，导致服务端配置还是旧版本
-- **根因**: 两个文件独立生成配置，修改一个忘了另一个
-- **修复**: 同步修改config_generator.py的AI规则
-- **预防**: 修改subscription_service.py时必须同步修改config_generator.py，两个文件都要更新。改A忘B=隐藏Bug
-
-### Bug #31: CDN优选IP自动更新服务卡住
-- **版本**: v1.0.82
-- **日期**: 2026-04-24
-- **现象**: CDN优选IP停在2026-04-23 22:18:35不再更新，过了24小时后还是同一套IP
-- **根因**: singbox-cdn服务的 `time.sleep(3600)` 卡住，守护进程模式虽然显示active但不再执行后续更新
-- **修复**:
-  1. 手动运行CDN更新，IP已更换
-  2. 重启singbox-cdn服务
-  3. 添加crontab定时任务：每小时0分自动重启singbox-cdn，防止卡住
-- **预防**: singbox-cdn服务必须有定时重启保障（每小时一次），防止time.sleep或其他原因导致服务挂住
-
-### Bug #32: config_generator.py缺少DNS配置和final规则
-- **版本**: v1.0.83
-- **日期**: 2026-04-24
-- **现象**: 服务端config.json的DNS服务器数=0，final为空，只有3条路由规则
-- **根因**: config_generator.py从未添加DNS配置，final规则写成了普通规则而非route.final字段
-- **修复**:
-  1. 添加DNS配置（dns_proxy: tls://8.8.8.8 detour=direct, dns_direct: 223.5.5.5）
-  2. 将 `{"outbound":"direct"}` 普通规则改为 `"final": "direct"`
-- **预防**: config_generator.py生成的服务端配置必须包含DNS和final，与subscription_service.py的客户端配置保持结构一致
-
-### Bug #33: 旧面板残留进程和目录
-- **版本**: v1.0.83
-- **日期**: 2026-04-24
-- **现象**: 旧面板进程还在运行，占用内存
-- **根因**: install.sh的uninstall_old_panels只做了stop/disable，没有删除服务文件、目录和杀残留进程
-- **修复**:
-  1. 手动清理服务器上的旧面板残留（停止服务+删除服务文件+删除目录+杀进程）
-  2. install.sh的uninstall_old_panels加强：删除所有相关systemd服务文件+删除安装目录+杀残留进程+daemon-reload
-- **预防**: 卸载旧面板必须彻底：stop+disable+删除服务文件+删除目录+杀残留进程+daemon-reload
-
-### Bug #34: CDN重启crontab未写入install.sh
-- **版本**: v1.0.84
-- **日期**: 2026-04-24
-- **现象**: Bug #31修复时只在服务器上手动添加了crontab，但install.sh的setup_health_check_cron()没有写入，导致新服务器安装后CDN优选IP还是会卡住
-- **根因**: 修复Bug #31时只在运行中的服务器上手动执行了crontab命令，忘记同步更新install.sh的安装脚本
-- **修复**:
-  1. install.sh的setup_health_check_cron()添加：每小时0分自动重启singbox-cdn
-  2. 同时清理旧面板残留进程和目录
-  3. 统一所有文件版本号为v1.0.84
-- **预防**: 修复服务器问题时，必须同步更新install.sh安装脚本，确保新服务器安装也能获得同样的修复
-
-### Bug #35: CDN本地IP池混入104.x.x.x高延迟段
-- **版本**: v1.0.85
-- **日期**: 2026-04-25
-- **现象**: config.py的CDN_PREFERRED_IPS列表包含104.16.123.96/104.16.124.96/104.17.136.90三个104段IP，这些IP对中国用户延迟130ms+，违反了Bug #29自己制定的"104段严格过滤"规则
-- **根因**: 本地IP池和外部API过滤逻辑是分开的。外部API获取的IP会经过is_hunan_ct_optimal()过滤，但本地硬编码的CDN_PREFERRED_IPS没有经过同样的过滤，导致104段IP"混"进了本地池
-- **修复**:
-  1. config.py: 移除3个104段IP，替换为162.159.36.1/172.64.35.78/162.159.40.55
-  2. cdn_monitor.py: ImportError降级块中的CDN_PREFERRED_IPS同步更新
-- **预防**: 本地IP池也必须遵守104.x.x.x过滤规则，不能因为"本地池"就放松标准。新增IP到CDN_PREFERRED_IPS时必须检查是否属于HUNAN_CT_OPTIMAL_PREFIXES
-
-### Bug #36: cert_manager续签后漏重启singbox-cdn
-- **版本**: v1.0.85
-- **日期**: 2026-04-25
-- **现象**: cert_manager.py证书续签后只重启singbox和singbox-sub，漏了singbox-cdn。CDN监控服务使用旧证书继续运行，可能导致HTTPS请求失败
-- **根因**: Bug #15修复时只在tg_bot.py的update_env_and_restart()中添加了singbox-cdn重启，但cert_manager.py的restart_singbox()没有同步修改。两个文件各自独立调用重启命令，没有统一引用
-- **修复**: cert_manager.py的restart_singbox()添加 `os.system('systemctl restart singbox-cdn')`
-- **预防**: 服务重启必须覆盖所有相关服务（singbox + singbox-sub + singbox-cdn），无论在哪个文件中调用重启。建议将重启逻辑统一到config.py的一个函数中
-
-### Bug #37: health_check漏检UDP端口（HY2/QUIC不可检测）
-- **版本**: v1.0.85
-- **日期**: 2026-04-25
-- **现象**: health_check.sh的check_ports()只检查TCP端口，不检查UDP端口。Hysteria2使用QUIC协议（UDP 443），如果UDP 443未监听，HY2节点完全不可用，但健康检查不会报警
-- **根因**: 初始实现时只考虑了TCP协议的端口检查，忽略了HY2使用UDP协议的特殊性
-- **修复**: check_ports()增加UDP 443端口检查：`ss -ulnp | grep -q ":443 "`
-- **预防**: 端口检查必须同时覆盖TCP和UDP，特别是HY2/QUIC协议使用UDP
-
-### Bug #38: cdn_monitor数据库连接泄漏
-- **版本**: v1.0.85
-- **日期**: 2026-04-25
-- **现象**: cdn_monitor.py的init_db()函数中，如果cursor.execute()或conn.commit()抛异常，数据库连接不会关闭，导致连接泄漏
-- **根因**: conn.close()直接写在函数末尾，没有用try/finally包裹。违反了项目铁律#14"数据库连接必须在finally中关闭"
-- **修复**: 将conn = sqlite3.connect()移入try块，conn = None兜底，finally中if conn防护关闭
-- **预防**: 所有数据库连接必须在finally中关闭，即使init_db()这种简单函数也不能例外
-
-### Bug #39: 414MB内存无Swap，OOM Killer杀掉进程导致掉线
-- **版本**: v1.0.85
-- **日期**: 2026-04-25
-- **现象**: 服务器"时不时掉线突然连不上"，但ping正常。dmesg显示OOM killer已触发61次，杀掉了fwupd等进程。服务器只有414MB内存，无Swap分区
-- **根因**: AWS t3.micro实例只有414MB内存，运行singbox(27MB)+subscription_service(36MB)+cdn_monitor(26MB)+系统服务后内存耗尽。fwupd服务占用144MB触发OOM，如果singbox进程被OOM杀掉就会导致"突然连不上"
-- **修复**:
-  1. 创建2GB Swap文件并写入/etc/fstab持久化
-  2. 设置vm.swappiness=10（优先用物理内存，Swap做紧急缓冲）
-  3. 禁用并mask fwupd.service（占用144MB且VPS不需要固件更新）
-  4. 禁用snapd.service（节省24MB）
-- **预防**: 小内存VPS（<1GB）必须配Swap（至少2GB），fwupd/snapd等不必要的服务必须禁用
-
-### Bug #40: HUNAN_CT_OPTIMAL_PREFIXES包含未实测验证的IP段
-- **版本**: v1.0.85
-- **日期**: 2026-04-25
-- **现象**: CDN优选IP数据库中出现8.39.125.x和8.35.211.x段IP，这些段不在用户实测数据中。001315 API返回这些IP但未经is_hunan_ct_optimal()过滤直接使用，导致非优质段IP进入CDN列表
-- **根因**: 001315电信API返回8.39.x.x和8.35.x.x段IP，代码注释误标为"属于湖南电信最优段"，但用户实测数据（2026-04-25）显示优质段只有162.159/172.64/108.162/198.41/173.245。8.39/8.35段不在任何第三方CDN优选数据源中出现
-- **修复**:
-  1. HUNAN_CT_OPTIMAL_PREFIXES移除'8.39.'和'8.35.'前缀
-  2. 001315 API返回的IP也必须经过is_hunan_ct_optimal()过滤
-  3. CDN_PREFERRED_IPS用用户实测优质IP更新（前9个为实测排名）
-- **预防**: CDN最优IP段必须以用户实测数据为准，API返回的IP段未经实测验证不能加入最优前缀列表
-
-### Bug #41: CDN优选IP硬过滤IP段导致优质IP被丢弃，判断规则反复调整不稳定
-- **版本**: v2.0.0
-- **日期**: 2026-04-25
-- **现象**: CDN优选IP的判断规则一直调来调去不正常：按IP段前缀硬过滤（is_hunan_ct_optimal）导致001315返回的8.39段被丢弃，但001315是中国电信实测排序；104段一刀切过滤可能丢弃好IP；不同API返回的IP质量参差不齐无法统一处理
-- **根因**: 
-  1. 硬过滤逻辑（is_hunan_ct_optimal）太粗糙，无法处理边界情况
-  2. 单一数据源依赖（090227优先），API挂了就降级到不可靠源
-  3. 没有交叉验证机制，无法区分"多个源都推荐的IP"和"只有一个源推荐的IP"
-  4. IP段前缀作为唯一判断标准，忽略了API排序本身就是实测结果的事实
-- **修复**:
-  1. 彻底重构为多源聚合+综合评分排序（v2.0.0）
-  2. 新增vvhan API作为最高可信度数据源（含延迟/速度/数据中心信息）
-  3. 评分公式：总分 = 数据源可信度分 + 排名加分 + 交叉验证加分 + IP段参考分
-  4. 不再硬过滤IP段，104段降低权重（-10分）但不直接丢弃
-  5. 交叉验证：同一IP被多个数据源推荐则大幅加分（每个额外源+15分）
-  6. 数据源可信度权重：vvhan(30) > 090227(25) > 001315(15) > WeTest(10) > IPDB(5) > 本地池(0)
-- **预防**: CDN优选IP判断不能靠单一规则硬过滤，必须多源聚合+综合评分
-
-### Bug #42: 订阅响应缺少subscription-userinfo头，客户端看不到流量统计
-- **版本**: v2.0.0
-- **日期**: 2026-04-25
-- **现象**: 用户更新订阅后在客户端（v2rayN/Clash等）看不到流量统计信息。服务端首页和/api/traffic接口能看到流量数据，但客户端订阅更新时收不到
-- **根因**: subscription_service.py的/sub和/singbox路由只返回了内容（Base64/JSON），没有在HTTP响应头中添加`subscription-userinfo`头。这是代理订阅协议的标准做法：客户端通过读取响应头`subscription-userinfo`来显示流量信息，格式为`upload=0; download=字节数; total=-1; expire=0`
-- **修复**:
-  1. /sub路由：Response添加`headers={'subscription-userinfo': userinfo}`
-  2. /singbox路由：同上
-  3. userinfo格式：`upload=0; download={bytes_used}; total=-1; expire=0`
-     - upload=0：上传流量（本项目不统计上传，固定0）
-     - download={bytes_used}：当月已用下载流量（字节）
-     - total=-1：总流量不限（-1表示无限）
-     - expire=0：永不过期（0表示无限期）
-- **预防**: 订阅响应必须包含subscription-userinfo头，否则客户端无法显示流量统计
-
-### Bug #53: 流量统计只显示几KB，用户实际跑的100GB流量没统计
-- **版本**: v3.0.4 → v3.1.1
-- **日期**: 2026-04-29
-- **现象**: 用户跑了一百多个GB流量，但登录首页和订阅看到的流量统计只有几KB
-- **根因分析（三轮排查）**:
-  - **第一轮（错误方案）**: 改用sing-box Clash API (`127.0.0.1:9090/proxies`) 获取流量 → 失败，因为服务端config_generator.py没有experimental.clash_api配置
-  - **第二轮（错误方案）**: 在服务端config_generator.py添加experimental.clash_api → 仍然失败，因为Clash API的/proxies端点不返回download/upload字段，只返回type/name/udp。/connections是SSE流式端点，/traffic也是流式。sing-box 1.10.0编译标签只有with_clash_api，没有with_v2ray_api，所以gRPC StatsService也不可用
-  - **第三轮（正确方案）**: Clash API不返回持久流量统计，重启后计数器归零。sing-box本身不持久化流量统计
-- **最终修复**: 改用iptables内核级计数器（与机场面板相同做法）
-  1. `setup_iptables_traffic_counters()` - 在INPUT链中为每个sing-box入站端口(443/8443/2053/2083)添加统计规则，幂等操作
-  2. `get_iptables_traffic_bytes()` - 解析`iptables -L INPUT -v -n -x`输出，提取每条规则的bytes计数器
-  3. `check_and_reset_month()` - 首次升级时初始化iptables_baseline基准值，每月14号更新基准值
-  4. `get_traffic_stats()` - 返回iptables当前计数器值-基准值=当月流量
-  5. 移除旧的update_traffic()（只统计订阅文件大小）和Clash API获取逻辑
-- **部署验证**:
-  - iptables规则已添加: `iptables -L INPUT -v -n -x` 显示4个端口均有计数器
-  - `/api/traffic` 返回正确的当月流量值
-  - `subscription-userinfo` 响应头包含正确的download值
-- **教训**:
-  - 流量统计必须从内核/网络层（iptables/netfilter）获取真实传输数据
-  - Clash API在sing-box中仅用于客户端管理和配置，不提供持久化流量统计
-  - sing-box编译标签决定API能力：with_clash_api≠with_v2ray_api，后者才有StatsService
-  - 任何方案都必须先在目标环境验证，不能假设API端点行为
-- **预防**: 统计代理流量使用iptables内核计数器，持久化、重启不丢失，与机场面板一致
-
-### 数据源调研记录（v2.0.0重构依据，2026-04-25）
-
-> 以下是Bug #41修复过程中对所有CDN优选IP数据源的调研结果。
-> 详细API格式和返回示例见TECHNICAL_DOC.md的"CDN数据源详细调研记录"章节。
-
-**调研方法**：
-1. 联网搜索"cloudflare CDN 优选IP API 中国电信"等关键词
-2. 找到GitHub项目 CF-Worker-BestIP-collector，其中列出了6个数据源
-3. 逐一访问每个API，记录返回格式和实际数据
-4. 访问cf.vvhan.com展示页面，发现其返回JSON含延迟/速度/数据中心信息
-5. 访问cf-ip.cdtools.click，发现其按城市测速但无API接口
-
-**调研结果**：
-
-| API | 地址 | 格式 | 电信IP段 | 含延迟数据 | 可信度 |
-|-----|------|------|---------|-----------|--------|
-| vvhan | api.vvhan.com/tool/cf_ip | JSON | 108.162/162.159 | 是(latency+speed+colo) | 最高 |
-| 090227 | addressesapi.090227.xyz/ct | IP#CT | 纯162.159 | 否 | 高 |
-| 001315 | cf.001315.xyz/ct | IP#电信 | 8.39/173.245/162.159 | 否 | 中 |
-| WeTest | ct.cloudflare.182682.xyz | DNS A记录 | 104.18(差) | 否 | 低 |
-| IPDB | ipdb.api.030101.xyz/?type=bestcf | 纯IP | 104.16-19(差) | 否 | 最低 |
-
-**关键发现**：
-1. vvhan API是唯一返回延迟/速度/数据中心信息的数据源，且按运营商分类
-2. 090227 API返回纯162.159段，与用户实测完全一致
-3. 001315 API返回8.39段，但无其他数据源交叉验证支持
-4. WeTest DNS即使用中国DNS解析也可能返回104段
-5. IPDB API大量104段，对中国延迟高
-6. stock.hostmonit.com和cf-ip.cdtools.click有延迟数据但无结构化API
-
-**评分权重推导**：
-- vvhan(30分)：唯一含延迟数据+按运营商分类+每15分钟更新
-- 090227(25分)：纯162.159段+中国电信实测
-- 001315(15分)：含8.39段存疑+部分173.245/162.159可靠
-- WeTest(10分)：DNS解析不稳定+可能返回104段
-- IPDB(5分)：大量104段+不按运营商分类
-- 本地池(0分)：兜底，可能过时
-
-### Bug #44: CDN评分依赖理论值不反映真实表现，IP段前缀判断规则狭隘
-- **版本**: v2.2.0 → v3.0.0
-- **日期**: 2026-04-25
-- **现象**: CDN评分系统依赖外部API排名+IP段前缀打分（如162.159段固定+10分），但同段内IP实际表现差异巨大。理论高分IP（如162.159.39.178延迟50-68ms）用户本地实测速度不行，而用户手动测试的好IP反而评分低。IP段判断逻辑反复调整不稳定，今天改明天改
-- **根因**: 
-  1. 评分系统依赖"理论值"（外部API排名+IP段前缀），不反映真实链路质量
-  2. 没有历史数据积累机制，每次重新评分，无法做长期趋势分析
-  3. 没有淘汰机制，不好的IP永远在候选池里竞争
-  4. 用户无法手动标记不想要的IP
-- **修复**:
-  1. 重构为v3.0学习系统：IP性能数据库+综合评分+自动淘汰+用户投喂
-  2. 新增ip_performance表：记录每个IP的历史延迟/成功率/连续失败次数
-  3. 综合评分算法：平均延迟40% + 成功率30% + 稳定性20% + 新鲜度10%
-  4. 自动淘汰机制：连续5次失败降权，连续3天不达标移出优选池
-  5. 黑名单机制：用户手动标记不好的IP直接跳过
-  6. 用户投喂通道：config.py的IP池作为候选池，脚本自动验证后入库
-  7. 不再依赖IP段前缀打分，完全基于历史表现数据
-- **预防**: 
-  - CDN优选IP必须基于历史表现数据做综合评分，不能依赖IP段前缀
-  - 学习系统必须记录每个IP的性能历史，越用越准
-  - 用户投喂+自动验证+自动淘汰，形成持续优化闭环
-
-### Bug #45: health_check.sh无执行权限导致健康检查完全失效
-- **版本**: v3.0.0 → v3.0.1
-- **日期**: 2026-04-26
-- **现象**: 健康检查crontab每5分钟执行一次，但每次都报Permission denied。服务挂了不会自动恢复，singbox凌晨重启46次无人救
-- **根因**: install.sh的setup_health_check_cron()只添加了crontab条目，没有给health_check.sh加chmod +x执行权限。Git上传的文件默认没有执行权限
-- **修复**: 
-  1. 服务器: `chmod +x health_check.sh diagnose.sh`
-  2. install.sh: setup_health_check_cron()开头添加 `chmod +x "${BASE_DIR}/scripts/health_check.sh" "${BASE_DIR}/scripts/diagnose.sh"`
-- **预防**: 安装脚本添加crontab前必须先chmod +x，Git上传的脚本文件默认无执行权限
-
-### Bug #46: fwupd-refresh.timer未禁用导致fwupd反复重启触发OOM
-- **版本**: v3.0.0 → v3.0.1
-- **日期**: 2026-04-26
-- **现象**: Bug #39修复时只mask了fwupd.service，漏了fwupd-refresh.timer。timer定期触发fwupd-refresh.service，后者又拉起fwupd，fwupd占用144MB内存触发OOM killer
-- **根因**: fwupd-refresh.timer是fwupd的定时触发器，mask service不等于mask timer。timer到时间会重新拉起service
-- **修复**: 
-  1. `systemctl stop fwupd-refresh.timer`
-  2. `systemctl mask fwupd-refresh.timer`
-  3. `pkill -9 fwupd`
-- **预防**: 禁用服务时必须同时禁用其timer，否则timer会重新拉起service。systemctl mask要覆盖service+timer
-
-### Bug #47: api.vvhan.com域名DNS失效(NXDOMAIN)，CDN最高可信度数据源不可用
-- **版本**: v3.0.0 → v3.0.1
-- **日期**: 2026-04-26
-- **现象**: cdn_monitor.py每小时报错"vvhan电信API获取失败: Name or service not known"。vvhan.com主域名可解析，但api.vvhan.com子域名返回NXDOMAIN
-- **根因**: vvhan API的DNS记录被删除或域名配置变更，api.vvhan.com不再存在
-- **修复**: cdn_monitor.py已有try/except降级处理，vvhan失败时自动降级到090227/001315/WeTest/IPDB/本地池。无需代码修改，记录此问题供参考
-- **预防**: 外部API随时可能失效，必须有降级方案。当前5个数据源+本地池的冗余设计是正确的
-
-### Bug #48: singbox凌晨因config.json不存在重启46次，服务长时间不可用
-- **版本**: v3.0.0 → v3.0.1
-- **日期**: 2026-04-26
-- **现象**: 4月25日凌晨01:25，singbox连续重启46次（约5分钟），日志显示"FATAL: open config.json: no such file or directory"
-- **根因**: config.json被删除或未生成。可能是cert_manager.py续签或某次部署操作误删了config.json。由于health_check.sh无执行权限（Bug #45），没有自动恢复机制
-- **修复**: 
-  1. 重新运行config_generator.py生成config.json
-  2. 重启所有服务
-  3. 修复health_check.sh权限（Bug #45），确保自动恢复
-- **预防**: 
-  - config.json被删时health_check应能自动重新生成
-  - health_check.sh必须有执行权限
-  - 部署操作后必须验证config.json存在
-
-### Bug #49: Windows CRLF换行符导致上传的shell脚本无法执行
-- **版本**: v3.0.1
-- **日期**: 2026-04-26
-- **现象**: 从Windows上传health_check.sh到Linux后报"cannot execute: required file not found"，脚本有+x权限但无法执行
-- **根因**: Windows编辑器保存文件时使用CRLF(\r\n)换行符，Linux bash解释器把\r当成命令的一部分，导致#!/bin/bash\r无法匹配到解释器
-- **修复**: `sed -i 's/\r$//' file.sh` 转换换行符
-- **预防**: 
-  - 上传shell脚本到Linux后必须执行`sed -i 's/\r$//'`转换换行符
-  - 或在SFTP上传时使用binary模式并确保本地文件是LF换行
-  - install.sh部署流程中应加入自动换行符转换
-
-### Bug #50: systemd ExecStartPre中cd命令路径解析错误
-- **版本**: v3.0.1
-- **日期**: 2026-04-26
-- **现象**: singbox.service的ExecStartPre=`cd /root/singbox-eps-node && python3 scripts/config_generator.py`报错"python3: can't open file '//scripts/config_generator.py'"
-- **根因**: systemd中ExecStartPre的bash -c执行cd时，如果cd失败（或WorkingDirectory未设置），相对路径scripts/会解析为//scripts/。systemd不使用shell的当前目录概念
-- **修复**: 改用绝对路径：`python3 /root/singbox-eps-node/scripts/config_generator.py`
-- **预防**: systemd服务文件中所有路径必须使用绝对路径，禁止cd+相对路径的组合
-
-### Bug #74: CDN监控测试逻辑不合理，服务器测延迟不代表国内用户体验
-- **版本**: v3.1.3 → v4.0.0
-- **日期**: 2026-05-04
-- **现象**: 
-  1. 110个IP×5端口=550次HTTP延迟测试，每次5秒超时，串行测试要几十分钟
-  2. 新加坡服务器测出来104.21.224.5延迟99ms，但中国用户可能200ms+
-  3. IP池越来越大，测试越来越慢，CPU和网络资源持续占用
-  4. CDN优选IP保存到数据库后，订阅服务读不到（key名称不一致）
-- **根因分析**:
-  1. **根本性错误**：服务器在新加坡/日本测的延迟≠中国用户体验
-  2. 全量HTTP测试纯属浪费资源，IP越多越慢
-  3. 外部API给的IP用户可能早就觉得不好用了
-  4. cdn_monitor.py保存的key（cdn_vless_ws）与subscription_service.py读取的key（vless_ws_cdn_ip）不一致
-- **修复**:
-  1. 彻底重构cdn_monitor.py为v4.0用户反馈驱动版
-  2. 删除HTTP延迟测试，改为TCP存活检测（3秒超时）
-  3. 用户投喂IP池（CDN_PREFERRED_IPS）= 真理来源，优先级最高
-  4. 外部API仅作补充候选，用户IP不足时才使用
-  5. 统一数据库key名称：vless_ws_cdn_ip/vless_upgrade_cdn_ip/trojan_ws_cdn_ip
-  6. 评分算法简化为存活率评分（alive_count/total_checks）
-- **效果对比**：
-  - v3.x：550次测试，几分钟，CPU高占用，延迟判断不准确
-  - v4.0：~100次TCP检测，2秒完成，极低资源消耗，用户反馈为准
-- **预防**: 
-  - **预防**: CDN优选IP必须以用户反馈为准，不代替用户判断质量
-  - 服务器只做存活检测（IP还活着吗？），不测延迟
-  - 用户说哪个不好用→加黑名单，说哪个好用→加入优选池
-  - CDN监控保存的key必须与订阅服务读取的key保持一致
-
-### Bug #75: CDN监控每小时重新选TOP5，即使现有IP都存活也会换
-- **版本**: v4.0.0 → v4.1.0
-- **日期**: 2026-05-07
-- **现象**: 
-  1. v4.0每小时重新收集候选IP+评分排序，选出新的TOP5
-  2. 即使数据库现有5个IP全部存活，也会被替换掉
-  3. 频繁切换IP可能导致用户连接不稳定
-  4. 用户投喂的优质IP（162.159.109.77等）不在CDN_PREFERRED_IPS里，不会被测试
-- **根因分析**:
-  1. v4.0的fetch_cdn_ips()每次都从零开始选TOP5，没有"保留现有存活IP"的逻辑
-  2. 外部API持续收集新IP，评分高的会挤掉现有IP
-  3. 用户反馈好用的IP需要手动加到config.py才会被系统识别
-- **修复**:
-  1. 重构fetch_cdn_ips()为v4.1存活优先模式：
-     - 步骤1：读取数据库现有CDN IP，逐个TCP存活检测
-     - 步骤2：存活的IP保留，死亡的IP标记待替换
-     - 步骤3：收集候选IP（用户投喂+外部API持续收集）
-     - 步骤4：从候选池挑存活IP补上死亡空缺
-     - 步骤5：只对新增候选IP做HTTP测试记录评分
-  2. 新增get_current_cdn_ips_from_db()函数读取现有IP
-  3. 更新CDN_PREFERRED_IPS：添加用户投喂的优质IP（162.159.109.77/162.159.109.87/162.159.105.93/162.159.105.151/172.64.53.146/172.64.48.95）
-  4. 更新CDN_IP_BLACKLIST：添加104.18.185.26（用户反馈拉跨）
-- **效果对比**：
-  - v4.0：每小时重新选TOP5，即使现有IP都存活也会换，可能频繁切换
-  - v4.1：现有IP存活则不换，死亡才替换，更稳定
-- **预防**: 
-  - CDN优选IP更新逻辑应该是"存活不换，死亡才换"
-  - 外部API持续收集作为候选池补充，但不主动挤掉现有IP
-  - 用户反馈好用的IP要及时加入CDN_PREFERRED_IPS
-
 ---
-
-### 三层自愈保障
-
-| 层级 | 机制 | 触发条件 | 恢复动作 |
-|------|------|----------|----------|
-| 第1层 | systemd ExecStartPre | singbox启动时config.json不存在 | 自动运行config_generator.py生成 |
-| 第2层 | health_check.sh | 每5分钟crontab检查 | config.json缺失→自动生成+重启singbox |
-| 第3层 | StartLimitBurst=5 | singbox连续崩溃 | 60秒内最多重启5次，防止无限重启 |
-
-### 自愈验证记录（2026-04-26）
-
-| 测试场景 | 操作 | 结果 |
-|----------|------|------|
-| systemd自愈 | 删除config.json → systemctl restart singbox | ✅ config.json自动恢复，singbox正常启动 |
-| health_check自愈 | 删除config.json → 运行health_check.sh | ✅ config.json自动恢复，singbox自动重启 |
-| 启动限速 | config.json持续不存在 | ✅ 60秒内最多重启5次，不再无限循环 |
-
-### Bug #51: cdn_monitor.py进程泄漏，5个孤儿进程浪费80MB内存
-- **版本**: v3.0.1
-- **日期**: 2026-04-26
-- **现象**: 服务器上发现5个cdn_monitor.py进程在运行，只有1个是systemd管理的daemon，其余4个是孤儿进程，总共浪费80MB内存
-- **根因**: 
-  1. crontab中有`0 * * * * systemctl restart singbox-cdn`，每小时重启cdn_monitor服务（Bug #31遗留）
-  2. 手动启动的cdn_monitor进程（`--update`模式）不会被systemd管理，重启服务不会清理它们
-  3. cdn_monitor.py没有进程锁，允许多个实例同时运行
-- **修复**: 
-  1. 删除crontab中每小时重启singbox-cdn的条目（cdn_monitor.py的while True循环已自带定时，无需外部重启）
-  2. 给cdn_monitor.py添加fcntl文件锁，第二个实例启动时检测到锁文件直接退出
-- **预防**: 
-  - 守护进程必须加进程锁（fcntl.flock），防止多实例运行
-  - crontab不应重启已有while True循环的daemon服务
-  - systemd Restart=always已能处理进程崩溃，不需要crontab兜底
-
-### Bug #52: VPS系统服务浪费大量内存(60MB+)
-- **版本**: v3.0.1
-- **日期**: 2026-04-26
-- **现象**: 414MB VPS跑个代理就用了244MB内存，同类面板同样功能只需约100MB
-- **根因**: AWS Ubuntu默认安装了大量桌面/VPS不需要的服务：
-  - multipathd: 26MB（多路径存储，VPS不需要）
-  - caddy: 15MB（旧面板反代，已不用）
-  - amazon-ssm-agent: 13MB（AWS管理代理）
-  - udisksd: 7MB（磁盘管理GUI）
-  - ModemManager: 6MB（调制解调器管理）
-  - polkitd: 6MB（桌面权限管理）
-  - unattended-upgrades: 3.6MB（自动更新）
-  - journald: 18MB（日志无上限增长）
-- **修复**: 
-  1. 禁用所有不必要服务：ModemManager/udisks2/unattended-upgrades/multipathd/caddy
-  2. 限制journald日志大小：SystemMaxUse=50M
-  3. install.sh加入服务禁用步骤，防止下次部署再出现
-- **效果**: 内存从244MB降到181MB，可用内存从169MB升到233MB，Swap从104MB降到19MB
 
 ## Bug 修复历史
 
-### Bug #9: AI-SOCKS5被错误地作为用户可见节点暴露
-- **版本**: v1.0.48 → v1.0.49
-- **日期**: 2026-04-21
-- **现象**: 用户在V2rayN节点列表中看到"AI-SOCKS5"节点，首页HTML写着"包含6个节点"
-- **根因**: AI实现SOCKS5功能时，只理解了"SOCKS5是个代理"的字面意思，把它当成普通节点塞进了Base64订阅链接和ePS-Auto selector。完全忽略了技术文档中"无感路由，用户无需手动选择"的设计意图
-- **修复**:
-  1. subscription_service.py: 移除generate_all_links()中的socks5://链接
-  2. subscription_service.py: 移除ePS-Auto selector中的"AI-SOCKS5"选项
-  3. subscription_service.py: 修复首页HTML从"6个节点"改为"5个节点"
-  4. TECHNICAL_DOC.md: 明确AI-SOCKS5是幕后路由出站，不是用户可见节点
-- **预防**: 规则11
+### 近期 Bug 完整记录（#75-#90）
 
-### Bug #10: 跨文件配置不一致导致多处隐藏问题
-- **版本**: v1.0.49 → v1.0.50
-- **日期**: 2026-04-21
-- **现象**: 全面审查发现13个隐藏问题：README把AI-SOCKS5列为节点、config_generator.py缺少AI路由域名和排除规则、tg_bot.py端口硬编码6969、设置住宅后不重启singbox-sub、SSL证书路径不一致、SOCKS5出站结构不一致、install.sh包名错误、文档版本过时、变量覆盖等
-- **根因**: 
-  - 多个文件独立实现相同功能，没有统一引用config.py作为唯一真相源
-  - 修改一个文件时没有全局搜索所有引用该配置的文件（违反规则9）
-  - 新增功能时只在subscription_service.py实现，没有同步更新config_generator.py
-  - 文档更新不彻底（违反规则10）
-- **修复**: 详见project_snapshot.md v1.0.50更新内容
-- **预防**: 规则12
+> 详见上方"最新修复"章节，Bug #75-#90 保留完整的问题/影响/修复描述。
 
-### Bug #12: 证书文件名不一致导致续签和检查形同虚设
-- **版本**: v1.0.51 → v1.0.52
-- **日期**: 2026-04-21
-- **现象**: 证书7月19日到期后不会自动续签；cert_manager.py检查的cert.crt根本不存在
-- **根因**: 
-  - cert_manager.py生成cert.crt+cert.key，但config_generator.py引用cert.pem+key.pem，两套文件名
-  - check_cert_expiry()只检查cert.crt，服务器实际用的是fullchain.pem+key.pem（acme.sh）和cert.pem+key.pem（Cloudflare API）
-  - 没有配置证书续签cron定时任务
-  - health_check.sh只检查fullchain.pem，漏检cert.pem
-- **修复**: 
-  1. cert_manager.py: CERT_FILE从cert.crt改为cert.pem，KEY_FILE从cert.key改为key.pem
-  2. check_cert_expiry(): 循环检查fullchain.pem和cert.pem，找到哪个用哪个
-  3. health_check.sh: 同样兼容fullchain.pem和cert.pem
-  4. install.sh: 添加证书续签cron（每月1号凌晨3点执行cert_manager.py --renew）
-  5. 服务器: 手动添加cert_manager.py续签cron
-- **预防**: 证书文件名必须统一为cert.pem+key.pem（与config_generator.py一致），续签必须有cron保障
+### 历史 Bug 摘要表（#1-#74）
 
-### Bug #13: install.sh防火墙全放行清除端口跳跃规则
-- **版本**: v1.0.48 → v1.0.52
-- **日期**: 2026-04-21
-- **现象**: 新VPS安装后HY2端口跳跃不工作
-- **根因**: install.sh中setup_firewall()在setup_port_hopping()之后执行，iptables -F清空了所有规则包括刚设置的端口跳跃规则
-- **修复**: 调整执行顺序，setup_firewall移到setup_port_hopping之前
-- **预防**: 防火墙重置必须在iptables规则设置之前
-
-### Bug #14: tg_bot.py运行CDN更新会死循环
-- **版本**: v1.0.52
-- **日期**: 2026-04-21
-- **现象**: TG机器人/优选命令执行后永远无响应
-- **根因**: update_cdn()用subprocess.run运行cdn_monitor.py，但cdn_monitor.py是while True无限循环，永远不会退出
-- **修复**: 改为直接import cdn_monitor的fetch_cdn_ips和assign_and_save_ips函数，只执行一次
-- **预防**: 调用长期运行脚本时必须区分"单次执行"和"守护进程"模式
-
-### Bug #15: tg_bot.py设置住宅后不重启singbox-cdn
-- **版本**: v1.0.52
-- **日期**: 2026-04-21
-- **现象**: 设置AI住宅IP后CDN监控服务不刷新
-- **根因**: update_env_and_restart()只重启singbox和singbox-sub，漏了singbox-cdn（违反铁律11）
-- **修复**: 添加systemctl restart singbox-cdn
-- **预防**: 服务重启必须覆盖所有相关服务：singbox + singbox-sub + singbox-cdn
-
-### Bug #16: subscription_service.py硬编码覆盖config.py的HYSTERIA2_UDP_PORTS
-- **版本**: v1.0.52
-- **日期**: 2026-04-21
-- **现象**: HY2端口范围定义不统一，违反唯一真相源原则
-- **根因**: subscription_service.py第55行 HYSTERIA2_UDP_PORTS = list(range(21000, 21201)) 覆盖了从config.py导入的同名变量
-- **修复**: 删除该行，直接使用config.py导入的值
-- **预防**: 配置值只在config.py定义，其他文件必须import，禁止各自独立定义（规则4）
-
-### Bug #11: HY2端口跳跃iptables规则端口范围错误+缺少TCP规则
-- **版本**: v1.0.50部署时
-- **日期**: 2026-04-21
-- **现象**: HY2不通，客户端无法连接Hysteria2节点
-- **根因**: 
-  - 服务器iptables规则是旧的22000:22200范围，但config.py和订阅链接生成的是21000-21200
-  - 只有UDP规则没有TCP规则（违反铁律：HY2必须UDP+TCP双规则）
-  - 上传代码时没有同步运行cert_manager.py重新生成iptables规则
-- **修复**: 
-  1. 清空旧iptables PREROUTING规则
-  2. 重新生成21000-21200范围的UDP+TCP双协议DNAT规则（共402条）
-  3. netfilter-persistent save持久化
-- **预防**: 部署代码后必须运行cert_manager.py或手动检查iptables规则是否与config.py一致
-
-### Bug #8: HY2端口跳跃目标端口错误（4433→443）
-- **版本**: v1.0.44 → v1.0.45
-- **日期**: 2026-04-21
-- **现象**: Hysteria2端口跳跃功能无效，客户端使用21000-21200端口无法连接
-- **根因**: cert_manager.py将21000-21200端口DNAT到4433，但singbox配置中HY2监听443端口。端口跳跃流量到达4433但无服务监听
-- **修复**: 
-  1. cert_manager.py: DNAT目标从4433改为443
-  2. 移除TCP规则（HY2只用UDP）
-  3. subscription_service.py: mport从22000-22200统一为21000-21200
-  4. config.py: 新增HY2规避配置说明注释
-- **预防**: 规则8和规则9
-
-### Bug #7: 代码硬编码导致新VPS部署困难
-- **版本**: v1.0.44 → v1.0.45
-- **日期**: 2026-04-21
-- **现象**: 新VPS部署时需手动修改大量硬编码的IP、域名、凭据、路径
-- **根因**: 开发过程中为图方便硬编码了各种配置值
-- **修复**: 
-  1. config.py: 新增_detect_server_ip()自动检测IP，新增_load_env_value()统一读取.env
-  2. subscription_service.py: 所有硬编码改为动态读取，SOCKS5凭据改为环境变量
-  3. config_generator.py: 所有硬编码路径改为从BASE_DIR/CERT_DIR拼接
-  4. cert_manager.py: .env路径改为从BASE_DIR拼接
-  5. 清理26个临时脚本（含硬编码凭据）
-- **预防**: 规则6
-
-### Bug #6: CDN优选IP获取方式不正确
-- **版本**: v1.0.44 → v1.0.45
-- **日期**: 2026-04-21
-- **现象**: CDN优选IP使用固定IP池+随机ping，IP可能过期失效
-- **根因**: 未使用指定的DNS服务器解析
-- **修复**: cdn_monitor.py改为三层获取策略：指定DNS→降级DNS→固定IP池
-- **预防**: 规则7
-
-### Bug #5: V2rayN无法更新订阅（证书域名不匹配）
-- **版本**: v1.0.43 → v1.0.44
-- **日期**: 2026-04-21
-- **现象**: V2rayN更新订阅（IP地址访问HTTPS）失败
-- **根因**: SSL证书颁发给域名，用IP访问时证书域名不匹配，V2rayN拒绝连接。9443端口不在CDN代理列表中，无法通过域名走CDN
-- **修复**: SUB_PORT 9443→2087（CDN支持端口），订阅URL改为域名访问
-- **验证**: Windows本地curl（不跳过验证）返回200 OK，证书匹配
-- **预防**: 规则1和规则2
-
-### Bug #4: 订阅端口9443从外部无法访问
-- **版本**: v1.0.41 → v1.0.42
-- **日期**: 2026-04-21
-- **现象**: 订阅链接从外部无法访问，端口超时
-- **根因**: 三重bug叠加——代码默认端口6969、防火墙只放行6969、CDN不代理9443
-- **修复**: 默认端口6969→9443、iptables放行9443、path编码一致性
-- **遗留问题**: 9443不在CDN支持列表中，导致Bug #5
-- **预防**: 规则3
-
-### Bug #3: Trojan-WS协议不通
-- **版本**: v1.0.40 → v1.0.41
-- **日期**: 2026-04-20
-- **现象**: Trojan-WS节点无法连接
-- **根因**: 缺少SSL配置 + path参数URL编码不一致
-- **修复**: 添加SSL配置 + 统一使用 `urllib.parse.quote(str(v), safe='')`
-- **预防**: 规则9
-
-### Bug #2: CDN优选IP对中国用户延迟高
-- **版本**: v1.0.36 → v1.0.37
-- **日期**: 2026-04-20
-- **现象**: 从日本服务器DNS解析获取的CDN IP对中国用户延迟高
-- **根因**: 日本服务器解析的CDN IP对中国不友好
-- **修复**: 恢复固定优选IP池（中国用户实测50ms左右）
-- **预防**: 规则7
-
-### Bug #1: Trojan-WS链接缺少insecure=1参数
-- **版本**: v1.0.38 → v1.0.39
-- **日期**: 2026-04-20
-- **现象**: Trojan-WS链接在某些客户端无法使用
-- **根因**: 缺少allowInsecure=1参数
-- **修复**: 添加 insecure=1 和 allowInsecure=1 参数
-
-### Bug #54: config_generator.py 路由规则不完整，缺少 Google 通用域名排除规则
-- **版本**: v3.1.1 → v3.1.2
-- **日期**: 2026-04-30
-- **现象**: 用户访问 Gemini 时显示 IP 不一致（54.250.149.157 ≠ 206.163.4.241），AI 流量没有走 SOCKS5 代理
-- **根因分析**:
-  1. **服务器 config.json 只有 2 条路由规则**：X/推特/groK 排除规则 + AI 域名规则
-  2. **订阅服务 subscription_service.py 生成了 6 条规则**：包含 Google 通用域名排除规则 + geosite-cn 规则
-  3. **config_generator.py 缺少 Google 通用域名排除规则**（39 个域名）
-  4. Gemini 访问时会调用 `accounts.google.com`、`oauth2.googleapis.com` 等 Google API 域名
-  5. 这些域名没有被 AI 规则匹配到，走了 `final: direct` 直连，导致 IP 不一致
-- **关键发现**:
-  - SOCKS5 代理池全部健康检测通过（6 个代理均可连接 Google）
-  - AI 规则包含 29 个域名，覆盖了主要的 AI 网站
-  - 但缺少 Google 通用域名规则，导致部分 Google 子域名走了直连
-  - 服务端 config.json 和订阅服务生成的配置不一致，是长期存在的"暗病"
-- **修复**:
-  1. config_generator.py 添加完整的 3 条路由规则：
-     - 规则 1: X/推特/groK → direct（排除规则，6 个 domain_suffix）
-     - 规则 2: AI 域名 → ai-residential（29 个 domain_suffix + 7 个 domain_keyword）
-     - 规则 3: Google 通用域名 → direct（39 个 domain_suffix + 1 个 domain_keyword）
-  2. 重新生成服务器 config.json 并重启 singbox 服务
-  3. 验证新配置：3 条规则均正确，关键域名全部包含
-- **预防**:
-  - config_generator.py 和 subscription_service.py 的路由规则必须完全一致
-  - 修改 subscription_service.py 时必须同步修改 config_generator.py（规则 12）
-  - 服务端配置生成后必须验证路由规则数量和完整性
-  - AI 规则只包含 AI 专用子域名，不包含通用 google 域名（Bug #28 教训）
-
----
-
-## 操作避坑指南（新增）
-
-### 1. 修改路由规则时必须同步的文件
-**涉及文件**:
-- `scripts/subscription_service.py` - 订阅服务（客户端配置）
-- `scripts/config_generator.py` - 配置生成器（服务端配置）
-
-**操作步骤**:
-1. 先修改 subscription_service.py 的路由规则
-2. 立即同步修改 config_generator.py 的对应规则
-3. 在服务器上重新生成 config.json：`python3 scripts/config_generator.py`
-4. 重启 singbox 服务：`systemctl restart singbox`
-5. 验证路由规则：检查 config.json 中的 route.rules 数量和域名列表
-
-**可能出现问题**:
-- 只改一个文件忘了另一个 → 服务端和客户端配置不一致 → 部分流量走错路由
-- 修改后没重新生成 config.json → 服务器还在用旧配置
-- 重新生成后没重启服务 → 新配置不生效
-
-### 2. 添加新域名到 AI 规则时的注意事项
-**必须检查**:
-1. 新域名是否已在 subscription_service.py 的 AI 规则中
-2. 新域名是否已在 config_generator.py 的 AI 规则中
-3. 新域名是否会被其他规则先匹配（如 geosite-cn、Google 通用域名规则）
-4. 新域名的出站是否正确（ai-residential 还是 ePS-Auto 还是 direct）
-
-**常见错误**:
-- 添加了 `gemini.google.com` 但没添加 `generativelanguage.googleapis.com` → Gemini 部分功能走错路由
-- 添加了 `googleapis.com` 到 AI 规则 → v2rayN 延迟测试走 SOCKS5，延迟飙升
-- 规则顺序错误 → geosite-cn 先匹配，AI 域名走了 direct
-
-### 3. 服务重启必须覆盖的所有服务
-**相关服务**:
-- `singbox` - 主代理服务
-- `singbox-sub` - 订阅服务
-- `singbox-cdn` - CDN 优选 IP 监控服务
-
-**重启命令**:
-```bash
-systemctl restart singbox singbox-sub singbox-cdn
-```
-
-**可能出现问题**:
-- 只重启 singbox 忘了 singbox-sub → 订阅服务还在用旧配置
-- 只重启 singbox 忘了 singbox-cdn → CDN 监控还在用旧证书
-- 证书续签后必须重启所有三个服务
-
-### 4. GitHub 推送失败的处理
-**常见原因**:
-- 本地网络无法访问 GitHub（连接被重置/超时）
-- 服务器网络也无法访问 GitHub（需要认证）
-
-**解决方案**:
-- 等待网络恢复后重试
-- 或使用代理推送（如果配置了代理）
-- 本地 commit 后等网络恢复再 push
-
-### 5. 配置验证的标准流程
-**验证步骤**:
-1. 检查 config.json 的路由规则数量和内容
-2. 检查 SOCKS5 代理池是否全部健康
-3. 检查 DNS 配置是否正确
-4. 检查服务状态：`systemctl status singbox`
-5. 测试关键域名是否走正确的出站
-
-**验证命令**:
-```bash
-# 检查路由规则
-python3 -c "import json; c=json.load(open('config.json')); print(len(c['route']['rules']))"
-
-# 检查服务状态
-systemctl status singbox --no-pager | head -10
-
-# 检查 SOCKS5 代理
-python3 -c "from subscription_service import SOCKS5_POOL; print(len(SOCKS5_POOL))"
-```
-
-### Bug #57: CDN优选IP连不上但没有纠错机制，用户无法通过更新订阅恢复
-- **版本**: v3.1.1 → v3.1.2
-- **日期**: 2026-05-01
-- **现象**: 用户反馈CDN线路（VLESS-WS-CDN、VLESS-HTTPUpgrade-CDN、Trojan-WS-CDN）全部连不上，延迟显示-1（超时）。cdn_monitor.py每小时运行但优选IP对中国用户延迟高，服务器端TCP测试都是1-2ms无法区分真实链路质量
-- **根因分析（两层问题）**:
-  - **根因1**: cdn_monitor.py的http_latency_test()函数名是HTTP但实际只做TCP连接测试（Bug #43修复后又退化）。在日本服务器上测试所有CF IP都是1-2ms，无法反映对中国用户的真实延迟
-  - **根因2**: subscription_service.py的get_cdn_ip_for_protocol()从数据库读取CDN IP，即使IP连不上也不会触发兜底。只有数据库为空时才回退到域名，导致坏IP一直使用
-- **修复**:
-  1. cdn_monitor.py: http_latency_test()改为真实HTTPS请求测试，发送HTTP GET请求测量完整握手+响应时间
-  2. subscription_service.py: get_cdn_ip_for_protocol()增加连通性检测，3秒超时测试CDN IP，连不上就清空数据库记录，自动回退到域名兜底
-  3. 用户更新订阅即可恢复连接（域名走CDN，证书匹配）
-- **预防**: 
-  - CDN优选IP测试必须用真实HTTPS请求，不能用纯TCP连接测试
-  - 订阅服务必须有纠错机制：CDN IP连不上时自动回退到域名
-  - 数据库里的坏IP必须能被自动清理，不能让用户手动处理
-
-### Bug #58: 淘汰IP只标记不过滤，被淘汰IP仍可入选TOP5
-- **版本**: v3.1.3
-- **日期**: 2026-05-01
-- **现象**: cdn_monitor.py的should_eliminate_ip()标记了不达标IP，但fetch_cdn_ips()中只打日志不过滤，被淘汰的IP仍然出现在valid_ips中
-- **根因**: fetch_cdn_ips()第674-686行，eliminated列表只用于日志输出，valid_ips直接从tested_results取TOP5，没有排除eliminated中的IP
-- **修复**: 新增eliminated_set，从tested_results中过滤掉被淘汰的IP后再取TOP5
-- **预防**: 淘汰机制必须同时标记和过滤，否则淘汰形同虚设
-
-### Bug #59: http_latency_test()异常路径socket泄漏
-- **版本**: v3.1.3
-- **日期**: 2026-05-01
-- **现象**: http_latency_test()在SSL握手或HTTP请求异常时，socket和ssl_socket不会关闭，长期运行导致文件描述符泄漏
-- **根因**: 原代码只在正常路径调用ssock.close()，except分支直接返回，socket未关闭
-- **修复**: 用finally块确保ssock和sock在所有路径下都关闭
-- **预防**: 所有涉及socket/文件/数据库连接的代码必须在finally中关闭资源
-
-### Bug #60: ImportError降级块含104段IP+缺少必需变量
-- **版本**: v3.1.3
-- **日期**: 2026-05-01
-- **现象**: ImportError降级块中CDN_PREFERRED_IPS包含104.18.41.58/104.18.32.206/104.18.42.36三个104段IP，违反Bug #35教训；且缺少DATA_DIR/SERVER_IP/CF_DOMAIN定义，init_db()和http_latency_test()会NameError崩溃
-- **根因**: 降级块只复制了部分变量，没有同步更新；104段IP是v1.0.85修复前的残留
-- **修复**: 移除104段IP，补全DATA_DIR/SERVER_IP/CF_DOMAIN定义
-- **预防**: ImportError降级块必须定义所有必需变量，否则降级后服务无法启动（铁律16）
-
-### Bug #61: assign_and_save_ips()数据库连接无try/finally
-- **版本**: v3.1.3
-- **日期**: 2026-05-01
-- **现象**: assign_and_save_ips()中conn=sqlite3.connect()在try外面，如果连接成功但后续操作异常，conn不会关闭
-- **根因**: 违反Bug #38铁律"数据库连接必须在finally中关闭"
-- **修复**: conn=None兜底，sqlite3.connect()移入try块，finally中if conn防护关闭
-- **预防**: 所有数据库连接必须遵循conn=None→try中connect→finally中if conn:close()模式
-
-### Bug #62: should_eliminate_ip()中last_success_time为None时跳过检查
-- **版本**: v3.1.3
-- **日期**: 2026-05-01
-- **现象**: IP首次测试失败后last_success_time为None，should_eliminate_ip()的"多天无成功记录"检查被跳过，导致从未成功的IP不会被淘汰
-- **根因**: if perf['last_success_time']为False时直接跳过，没有处理"从未成功"的情况
-- **修复**: 新增else分支：如果last_success_time为None且测试>=5次且成功次数=0，则淘汰
-- **预防**: 条件分支必须覆盖所有情况，None和空值不能简单跳过
-
-### Bug #63: ip_test_history表无清理机制，数据库无限膨胀
-- **版本**: v3.1.3
-- **日期**: 2026-05-01
-- **现象**: ip_test_history表每次测试都INSERT，每小时约100条记录，一个月约72000条，长期运行后数据库膨胀
-- **根因**: MAX_PERFORMANCE_HISTORY常量定义了但从未使用，没有实现清理逻辑
-- **修复**: 新增cleanup_old_history()函数，每次run_once()后清理7天前的历史记录
-- **预防**: 有增长的数据表必须有清理机制，定义了常量就要实现对应功能
-
-### Bug #65: 新服务器部署时install.sh被绕过导致功能缺失
-- **版本**: v3.1.3
-- **日期**: 2026-05-03
-- **现象**: 新日本服务器52.195.179.240部署后，3个功能异常：
-  1. 防火墙端口2087未开放（订阅服务无法访问）
-  2. CDN监控服务缺少--daemon参数（进程锁冲突，每小时执行卡住）
-  3. BBR未启用（系统优化步骤被跳过）
-- **根因**: deploy_server.py自定义部署脚本没有调用install.sh，而是手动拼装各个步骤，漏掉了：
-  1. setup_firewall()中的iptables -P INPUT ACCEPT（默认全放行）
-  2. singbox-cdn.service中的--daemon标志
-  3. optimize_system()中的BBR+CAKE配置
-- **修复**: 
-  1. 立即在服务器上补充修复3个遗漏项
-  2. 重写deploy_server.py，改为上传文件后直接调用install.sh，不再手动拼装
-  3. 验证install.sh本身完整无误，包含所有功能步骤
-- **验证结果**: install.sh从第1010行开始的全新安装流程（install命令），按顺序执行：
-  系统更新→安装依赖→BBR+FQ+CAKE优化→卸载旧面板→安装sing-box→克隆项目→Python环境→生成密码→生成密钥→创建.env→生成config→安装证书→防火墙→端口跳跃→systemd服务→Swap优化→定时任务→启动服务→验证→输出摘要
-  每个步骤都在install.sh中有对应函数，无遗漏
-- **预防**: 
-  - 任何部署脚本必须调用install.sh，禁止手动拼装部署步骤
-  - install.sh是唯一安装入口，所有功能变更必须先改install.sh再改其他脚本
-  - 每次改install.sh后必须在空白VPS上实测全新安装
-
-### Bug #66: AI路由强制内置不合理，应改为可选项
-- **版本**: v4.1.0
-- **日期**: 2026-05-07
-- **现象**: AI路由（SOCKS5 AI域名走住宅代理）强制内置，用户无法关闭
-- **根因**: 之前设计时AI路由是固定功能，没有考虑用户可能不需要住宅代理的场景
-- **修复**:
-  1. config.py新增AI_SOCKS5_ROUTING配置项，默认off
-  2. config_generator.py和subscription_service.py条件生成AI路由（仅当AI_SOCKS5_ROUTING=on时）
-  3. install.sh安装时新增交互："是否开启AI路由？(y/N)"，默认N
-  4. tg_bot.py新增/AI路由命令，一键开关，立即重启服务
-  5. 关闭时所有流量走正常协议（VLESS/Trojan/HY2），不经过SOCKS5
-- **预防**: 
-  - 新增功能必须考虑可配置性，避免强制内置
-  - 配置项统一从config.py读取，确保config_generator和subscription_service同步
-  - 开关切换后立即重启服务，确保配置生效
-
-### Bug #75: .env行内注释被Python当作配置值读取导致ValueError
-- **版本**: v4.1.1
-- **日期**: 2026-05-07
-- **现象**: 日本服务器singbox-sub服务持续崩溃，报错`ValueError: invalid literal for int() with base 10: '# SOCKS5端口'`，singbox也因空密码无法启动
-- **根因**: 
-  1. .env.example中配置项带行内注释（如`AI_SOCKS5_PORT=  # SOCKS5端口`）
-  2. install.sh生成.env时直接复制了注释格式
-  3. config.py读取`os.getenv('AI_SOCKS5_PORT')`时返回`'# SOCKS5端口'`而非空值
-  4. `int('# SOCKS5端口')`直接崩溃
-  5. 同时VLESS_UUID/TROJAN_PASSWORD等核心密码为空，singbox报`invalid private key`和`missing obfs password`
-- **修复**:
-  1. 服务器端：`sed -i 's/[[:space:]]*#.*$//' .env` 清除所有行内注释
-  2. 生成所有协议密码（VLESS UUID、Trojan密码、HY2密码、Reality密钥对）
-  3. 重新生成config.json并重启所有服务
-  4. .env.example注释格式已改为独立行注释（不放在值后面）
-- **预防**: 
-  - .env文件中禁止使用行内注释，注释必须单独成行
-  - install.sh生成.env时确保不携带注释
-  - config.py读取环境变量时必须处理注释干扰
-
-### 6. 域名匹配优先级规则
-**sing-box 路由规则匹配顺序**:
-1. 按数组顺序从上到下匹配，第一条命中的规则生效
-2. domain（精确匹配）> domain_suffix（后缀匹配）> domain_keyword（关键词匹配）
-3. 规则顺序至关重要，优先级高的必须放在前面
-
-**正确顺序**:
-1. DNS 规则
-2. 私有 IP 规则
-3. X/推特/groK 排除规则（走 direct/ePS-Auto）
-4. AI 域名规则（走 ai-residential）
-5. Google 通用域名规则（走 direct/ePS-Auto）
-6. geosite-cn/geoip-cn 规则（走 direct）
-7. final 规则（兜底）
-
-**错误顺序示例**:
-- geosite-cn 在 AI 规则之前 → gemini.google.com 被 geosite-cn 匹配走 direct
-- AI 规则在 X/推特/groK 排除规则之前 → x.com 被 AI 规则匹配走 SOCKS5
-- Google 通用域名规则在 AI 规则之前 → generativelanguage.googleapis.com 被 Google 规则匹配走 direct
+| Bug# | 版本 | 一句话摘要 |
+|------|------|-----------|
+| #1 | v1.0.38→v1.0.39 | Trojan-WS链接缺少insecure=1参数 |
+| #2 | v1.0.36→v1.0.37 | CDN优选IP对中国用户延迟高（日本DNS解析） |
+| #3 | v1.0.40→v1.0.41 | Trojan-WS协议不通（缺SSL+path编码不一致） |
+| #4 | v1.0.41→v1.0.42 | 订阅端口9443从外部无法访问（三重bug叠加） |
+| #5 | v1.0.43→v1.0.44 | V2rayN无法更新订阅（证书域名不匹配+9443不在CDN列表） |
+| #6 | v1.0.44→v1.0.45 | CDN优选IP获取方式不正确（未用指定DNS） |
+| #7 | v1.0.44→v1.0.45 | 代码硬编码导致新VPS部署困难 |
+| #8 | v1.0.44→v1.0.45 | HY2端口跳跃目标端口错误（4433→443） |
+| #9 | v1.0.48→v1.0.49 | AI-SOCKS5被错误地作为用户可见节点暴露 |
+| #10 | v1.0.49→v1.0.50 | 跨文件配置不一致导致13个隐藏问题 |
+| #11 | v1.0.50部署时 | HY2端口跳跃iptables端口范围错误+缺少TCP规则 |
+| #12 | v1.0.51→v1.0.52 | 证书文件名不一致导致续签和检查形同虚设 |
+| #13 | v1.0.48→v1.0.52 | install.sh防火墙全放行清除端口跳跃规则 |
+| #14 | v1.0.52 | tg_bot.py运行CDN更新会死循环（while True脚本） |
+| #15 | v1.0.52 | tg_bot.py设置住宅后不重启singbox-cdn |
+| #16 | v1.0.52 | subscription_service.py硬编码覆盖config.py的HYSTERIA2_UDP_PORTS |
+| #17 | v1.0.70→v1.0.71 | CAKE状态显示矛盾（verify未启用，summary硬编码已启用） |
+| #18 | v1.0.71→v1.0.72 | reinstall命令逻辑错误（混淆应用密码和root密码） |
+| #19 | v1.0.65→v1.0.66 | set -e导致CAKE失败时脚本直接退出 |
+| #20 | v1.0.73→v1.0.74 | geoip/geosite在sing-box 1.12+已移除导致FATAL |
+| #21 | v1.0.73→v1.0.74 | CAKE降级方案FQ不如FQ-PIE |
+| #23 | v1.0.75→v1.0.76 | DNS代理查询导致延迟飙升（dns_proxy走ePS-Auto而非direct） |
+| #24 | v1.0.76→v1.0.77 | CDN优选IP不自动更新（本地池永远优先，外部API永不触发） |
+| #25 | v1.0.77→v1.0.78 | SOCKS5路由规则顺序错误导致X/推特/groK走错 |
+| #26 | v1.0.77→v1.0.78 | SOCKS5缺少故障转移机制 |
+| #28 | v1.0.80→v1.0.82 | AI规则包含google.com导致延迟测试走SOCKS5 |
+| #29 | v1.0.82 | CDN优选IP返回104.x.x.x高延迟段（130ms+） |
+| #30 | v1.0.82 | config_generator.py与subscription_service.py不同步 |
+| #31 | v1.0.82 | CDN优选IP自动更新服务卡住（time.sleep挂住） |
+| #32 | v1.0.83 | config_generator.py缺少DNS配置和final规则 |
+| #33 | v1.0.83 | 旧面板残留进程和目录 |
+| #34 | v1.0.84 | CDN重启crontab未写入install.sh |
+| #35 | v1.0.85 | CDN本地IP池混入104.x.x.x高延迟段 |
+| #36 | v1.0.85 | cert_manager续签后漏重启singbox-cdn |
+| #37 | v1.0.85 | health_check漏检UDP端口（HY2/QUIC不可检测） |
+| #38 | v1.0.85 | cdn_monitor数据库连接泄漏 |
+| #39 | v1.0.85 | 414MB内存无Swap，OOM Killer杀掉进程导致掉线 |
+| #40 | v1.0.85 | HUNAN_CT_OPTIMAL_PREFIXES包含未实测验证的IP段 |
+| #41 | v2.0.0 | CDN优选IP硬过滤IP段导致优质IP被丢弃，判断规则反复调整不稳定 |
+| #42 | v2.0.0 | 订阅响应缺少subscription-userinfo头，客户端看不到流量统计 |
+| #43 | v2.0.0→v2.2.0 | CDN外部API高分IP实际延迟高，理论优选≠实际最优 |
+| #44 | v2.2.0→v3.0.0 | CDN评分依赖理论值不反映真实表现，重构为v3.0学习系统 |
+| #45 | v3.0.0→v3.0.1 | health_check.sh无执行权限导致健康检查完全失效 |
+| #46 | v3.0.0→v3.0.1 | fwupd-refresh.timer未禁用导致fwupd反复重启触发OOM |
+| #47 | v3.0.0→v3.0.1 | api.vvhan.com域名DNS失效(NXDOMAIN)，CDN数据源不可用 |
+| #48 | v3.0.0→v3.0.1 | singbox凌晨因config.json不存在重启46次 |
+| #49 | v3.0.1 | Windows CRLF换行符导致上传的shell脚本无法执行 |
+| #50 | v3.0.1 | systemd ExecStartPre中cd命令路径解析错误 |
+| #51 | v3.0.1 | cdn_monitor.py进程泄漏，5个孤儿进程浪费80MB内存 |
+| #52 | v3.0.1 | VPS系统服务浪费大量内存(60MB+) |
+| #53 | v3.0.4→v3.1.1 | 流量统计只显示几KB，改用iptables内核计数器替代Clash API |
+| #54 | v3.1.1→v3.1.2 | config_generator.py路由规则不完整，缺少Google通用域名排除规则 |
+| #57 | v3.1.1→v3.1.2 | CDN优选IP连上但没有纠错机制，用户无法通过更新订阅恢复 |
+| #58 | v3.1.3 | 淘汰IP只标记不过滤，被淘汰IP仍可入选TOP5 |
+| #59 | v3.1.3 | http_latency_test()异常路径socket泄漏 |
+| #60 | v3.1.3 | ImportError降级块含104段IP+缺少必需变量 |
+| #61 | v3.1.3 | assign_and_save_ips()数据库连接无try/finally |
+| #62 | v3.1.3 | should_eliminate_ip()中last_success_time为None时跳过检查 |
+| #63 | v3.1.3 | ip_test_history表无清理机制，数据库无限膨胀 |
+| #65 | v3.1.3 | 新服务器部署时install.sh被绕过导致功能缺失 |
+| #66 | v4.1.0 | AI路由强制内置不合理，改为可选项 |
+| #74 | v3.1.3→v4.0.0 | CDN监控测试逻辑不合理，服务器测延迟不代表国内用户体验 |

@@ -19,3 +19,15 @@ venv/
 deploy.py
 deploy_server.py
 deploy_*.py
+# 一次性调试脚本
+check_*.py
+do_*.py
+fix_*.py
+# IDE 配置
+.trae/
+.idea/
+.vscode/
+# 本地备份
+💾 备份/
+# Python 编译缓存
+*.pyo

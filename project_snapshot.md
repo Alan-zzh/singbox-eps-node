@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.6 | **更新**: 2026-05-18
+**版本**: v4.3.6 | **更新**: 2026-05-21
 
 ---
 
@@ -78,19 +78,6 @@
 - 用户投喂候选池（config.py的CDN_PREFERRED_IPS）- 优先级最高
 - 外部API持续收集（vvhan/090227/001315/WeTest/IPDB）- 候选池补充
 
-**v4.1 vs v4.0 区别：**
-| 维度 | v4.0（旧） | v4.1（新） |
-|------|-----------|-----------|
-| 更新逻辑 | 每小时重新评分选TOP5 | 只替换死亡IP，存活不换 |
-| 外部API | 仅当用户IP不足时使用 | 持续收集，作为候选池补充 |
-| 稳定性 | 可能频繁切换IP | 更稳定，存活就不换 |
-| 评分算法 | 存活率评分 | 存活率评分（保留历史评分机制） |
-
-**为什么v4.1要改：**
-- v4.0每小时重新选TOP5，即使现有IP都存活也会换
-- 频繁切换IP可能导致用户连接不稳定
-- v4.1改为"存活不换，死亡才换"，更稳定
-
 ### 定时任务
 | 任务 | 频率 | 说明 |
 |------|------|------|
@@ -116,38 +103,6 @@
 1. X/推特/groK排除（走direct）
 2. AI网站（走ai-residential→AI-SOCKS5，故障转移direct）
 3. final: direct
-
----
-
-## 近期Bug修复
-
-| Bug# | 版本 | 问题 | 修复 |
-|------|------|------|------|
-| #75 | v4.1.0 | CDN监控每小时重新选TOP5，即使现有IP都存活也会换，导致频繁切换 | 改为v4.1存活优先模式：现有IP存活则不换，死亡才替换 + 外部API持续收集 |
-| #76 | v4.3.0 | AWS云服务器MTU 9001导致数据包分片，Hysteria2 UDP和所有协议卡顿 | MTU改为1500 + UDP缓冲区优化到25MB + 永久生效配置（日本+新加坡） |
-| #77 | v4.3.0 | 新加坡CF_DOMAIN配置为us.290372913.xyz，CDN节点SNI错误导致连不上 | 改为sg.290372913.xyz，订阅路径大小写不敏感支持 |
-| #78 | v4.3.1 | REALITY协议100%握手失败，客户端疯狂重试导致卡顿 | 重新生成REALITY密钥对（日本+新加坡），重启订阅服务 |
-| #79 | v4.3.1 | sing-box 1.12.0+ DNS配置格式过时导致启动失败 | systemd服务添加ENABLE_DEPRECATED_LEGACY_DNS_SERVERS和ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER环境变量 |
-| #80 | v4.3.1 | singbox-cdn服务未运行（日本），CDN数据库不存在 | 启动singbox-cdn，创建CDN数据库 |
-| #81 | v4.3.2 | subscription_service.py的COUNTRY_CODE/SUB_TOKEN/AI_SOCKS5_POOL自己读.env不从config.py导入，违反唯一真相源 | 改为从config.py统一导入，删掉覆盖行 |
-| #82 | v4.3.2 | REALITY_SHORT_ID/DEST/SNI从config.py导入后被os.getenv覆盖，等于白导入 | 删掉覆盖行，直接用config.py导入值 |
-| #83 | v4.3.2 | config.py缺少AI_SOCKS5_POOL变量定义 | 补充AI_SOCKS5_POOL = os.getenv('AI_SOCKS5_POOL', '') |
-| #84 | v4.3.2 | install.sh硬编码CF API Token，推GitHub会泄露 | 改为环境变量传入+交互式输入 |
-| #85 | v4.3.3 | singbox-cdn死循环重启1492次：crontab每小时restart + systemd Restart=always + 进程锁冲突 | 删crontab重启条目 + Restart=always→on-failure + 清理锁文件重启 |
-| #87 | v4.3.5 | singbox当前虽然能跑，但仍依赖 `ENABLE_DEPRECATED_*` 才能吃旧式DNS配置，未来升到1.14会再次启动失败 | `config_generator.py/subscription_service.py` 全量改成新DNS格式 + `route.default_domain_resolver`，并移除install.sh兼容开关 |
-| #89 | v4.3.5 | 新格式DNS迁移时把 `detour: direct` 误带进新版 DNS server，导致日本机 singbox 起不来 | 删掉新版 DNS server 上错误的 `detour`，保留 `default_domain_resolver/domain_resolver` |
-| #88 | v4.3.5 | install.sh和diagnose.sh仍有隐藏误差：21000-21200尾端口被写成21199，诊断脚本还会把正常CDN和正常流量计数器误判成故障 | 统一修正端口范围 + 改正iptables匹配逻辑 + CDN连通性改成带域名SNI测试 |
-| #86 | v4.3.4 | `.env.example` 残留行内注释，手动复制后可能再次触发 `.env` 解析错值 | 清理示例文件行内注释 + `config.py/config_generator.py` 统一兼容解析旧格式 |
-| #74 | v4.0.0 | CDN监控测试逻辑不合理：服务器在新加坡测延迟不代表国内体验，全量测试浪费资源 | 重构为v4.0用户反馈驱动版：只测存活、用户IP优先、外部API仅补充 |
-| #73 | v3.1.3 | diagnose.sh crontab检查仍要求singbox-cdn重启(Bug#51已废弃) | 改为检测到则提示移除 |
-| #72 | v3.1.3 | diagnose.sh 缺少4项关键检查 | 新增Swap/iptables流量/旧面板残留/CDN连通性/孤儿进程检查，14项→18项 |
-| #71 | v3.1.3 | health_check.sh config.json自愈不校验JSON语法 | 增加JSON语法校验，损坏时自动重新生成 |
-| #70 | v3.1.3 | health_check.sh 订阅检查硬编码端口2087 | 改为从config.py读取SUB_PORT |
-| #69 | v3.1.3 | health_check.sh 缺少Swap和iptables流量计数器检查 | 新增check_swap()和check_iptables_traffic() |
-| #68 | v3.1.3 | tg_bot.py 启动日志泄露Bot Token前缀 | 移除Token打印，仅记录启动事件 |
-| #67 | v3.1.3 | tg_bot.py 异常信息暴露给用户(stderr/exception) | 异常写日志，返回通用错误信息 |
-| #66 | v3.1.3 | tg_bot.py 设置住宅触发12次服务重启(4次×3服务) | 新增batch_update_env()批量更新后只重启1次 |
-| #65 | v3.1.3 | tg_bot.py /重启命令漏重启singbox-sub和singbox-cdn | restart_singbox()改为重启全部3个服务 |
 
 ---
 
