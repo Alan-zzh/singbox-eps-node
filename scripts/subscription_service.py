@@ -909,6 +909,10 @@ def generate_singbox_config():
                 "uuid": VLESS_UUID,
                 "flow": "xtls-rprx-vision",
                 "packet_encoding": "xudp",
+                "multiplex": {
+                    "enabled": False
+                },
+                "tcp_fast_open": True,
                 "tls": {
                     "enabled": True,
                     "server_name": REALITY_SNI,
@@ -931,6 +935,10 @@ def generate_singbox_config():
                 "server_port": VLESS_WS_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
+                "multiplex": {
+                    "enabled": False
+                },
+                "tcp_fast_open": True,
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
@@ -938,7 +946,8 @@ def generate_singbox_config():
                     "utls": {
                         "enabled": True,
                         "fingerprint": "chrome"
-                    }
+                    },
+                    "alpn": ["http/1.1"]
                 },
                 "transport": {
                     "type": "ws",
@@ -956,6 +965,10 @@ def generate_singbox_config():
                 "server_port": VLESS_UPGRADE_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
+                "multiplex": {
+                    "enabled": False
+                },
+                "tcp_fast_open": True,
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
@@ -963,7 +976,8 @@ def generate_singbox_config():
                     "utls": {
                         "enabled": True,
                         "fingerprint": "chrome"
-                    }
+                    },
+                    "alpn": ["http/1.1"]
                 },
                 "transport": {
                     "type": "httpupgrade",
@@ -978,10 +992,19 @@ def generate_singbox_config():
                 "server": trojan_ws_addr,
                 "server_port": TROJAN_WS_PORT,
                 "password": TROJAN_PASSWORD,
+                "multiplex": {
+                    "enabled": False
+                },
+                "tcp_fast_open": True,
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
-                    "insecure": True
+                    "insecure": True,
+                    "utls": {
+                        "enabled": True,
+                        "fingerprint": "chrome"
+                    },
+                    "alpn": ["http/1.1"]
                 },
                 "transport": {
                     "type": "ws",

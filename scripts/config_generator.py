@@ -142,6 +142,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 443,
             "users": [{"uuid": vless_uuid, "flow": "xtls-rprx-vision"}],
+            "tcp_keep_alive": "30s",
+            "tcp_keep_alive_interval": "15s",
             "tls": {
                 "enabled": True,
                 "server_name": "www.apple.com",
@@ -159,6 +161,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 8443,
             "users": [{"uuid": vless_ws_uuid}],
+            "tcp_keep_alive": "30s",
+            "tcp_keep_alive_interval": "15s",
             "transport": {
                 "type": "ws",
                 "path": "/vless-ws",
@@ -178,6 +182,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 2053,
             "users": [{"uuid": vless_ws_uuid}],
+            "tcp_keep_alive": "30s",
+            "tcp_keep_alive_interval": "15s",
             "transport": {
                 "type": "httpupgrade",
                 "path": "/vless-upgrade",
@@ -197,6 +203,8 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 2083,
             "users": [{"password": trojan_pass}],
+            "tcp_keep_alive": "30s",
+            "tcp_keep_alive_interval": "15s",
             "transport": {
                 "type": "ws",
                 "path": "/trojan-ws",
@@ -226,7 +234,9 @@ config = {
             "obfs": {
                 "type": "salamander",
                 "password": hysteria2_pass[:8]
-            }
+            },
+            "up_mbps": 200,
+            "down_mbps": 200
         }
     ],
     "outbounds": [

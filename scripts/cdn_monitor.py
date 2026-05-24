@@ -135,9 +135,10 @@ DOH_SERVERS = [
 
 IPDB_API_URL = CDN_API_IPDB
 
-# v3.0 综合评分权重
-SCORE_LATENCY_WEIGHT = 0.40    # 平均延迟占比40%
-SCORE_SUCCESS_WEIGHT = 0.30    # 成功率占比30%
+# v4.4 综合评分权重（新增速度维度）
+SCORE_LATENCY_WEIGHT = 0.25    # 平均延迟占比25%
+SCORE_SPEED_WEIGHT = 0.20      # 下载速度占比20%
+SCORE_SUCCESS_WEIGHT = 0.25    # 成功率占比25%
 SCORE_STABILITY_WEIGHT = 0.20  # 稳定性占比20%
 SCORE_FRESHNESS_WEIGHT = 0.10  # 新鲜度占比10%
 
@@ -173,9 +174,15 @@ def init_db():
                 last_test_time TEXT,
                 last_success_time TEXT,
                 first_seen TEXT,
-                source TEXT DEFAULT 'unknown'
+                source TEXT DEFAULT 'unknown',
+                speed_mbps REAL DEFAULT 0.0
             )
         """)
+        # v4.4 兼容：为旧表添加 speed_mbps 列
+        try:
+            cursor.execute("ALTER TABLE ip_performance ADD COLUMN speed_mbps REAL DEFAULT 0.0")
+        except Exception:
+            pass  # 列已存在，忽略
         # v3.0 新增：每次测试的详细记录表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ip_test_history (
@@ -273,6 +280,7 @@ def get_ip_performance(db_path, ip):
                 'last_success_time': row[9],
                 'first_seen': row[10],
                 'source': row[11],
+                'speed_mbps': row[12] if len(row) > 12 else 0.0,
             }
         return None
     finally:
@@ -280,11 +288,26 @@ def get_ip_performance(db_path, ip):
             conn.close()
 
 
+def update_speed_mbps(db_path, ip, speed_mbps):
+    """更新IP的下载速度到数据库"""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ip_performance SET speed_mbps=? WHERE ip=?", (speed_mbps, ip))
+        conn.commit()
+    except Exception as e:
+        logger.debug(f"  更新速度数据失败 {ip}: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
 def calculate_composite_score(perf, current_latency=None):
     """
-    v3.0 综合评分算法
-    评分 = 延迟分(40%) + 成功率分(30%) + 稳定性分(20%) + 新鲜度分(10%)
-    分数越低越好（延迟低=分高）
+    v4.4 综合评分算法
+    评分 = 延迟分(25%) + 速度分(20%) + 成功率分(25%) + 稳定性分(20%) + 新鲜度分(10%)
+    分数越低越好（延迟低=分高，速度高=分高）
     """
     if perf is None or perf['total_tests'] == 0:
         # 新IP，给中等分数让它有机会表现
@@ -295,21 +318,38 @@ def calculate_composite_score(perf, current_latency=None):
     avg_lat = perf['avg_latency']
     consec_fails = perf['consecutive_fails']
     last_success = perf['last_success_time']
+    speed_mbps = perf.get('speed_mbps', 0.0) or 0.0
 
-    # 1. 延迟分（40%）：延迟越低分越高，0-100ms为满分，>500ms为0分
+    # 1. 延迟分（25%）：延迟越低分越高，0-100ms为满分，>500ms为0分
     if avg_lat > 0:
         latency_score = max(0, 100 * (1 - avg_lat / 500))
     else:
         latency_score = 50  # 无数据时给中等分
 
-    # 2. 成功率分（30%）
+    # 2. 速度分（20%）：下载速度越快分越高
+    if speed_mbps >= 50:
+        speed_score = 100
+    elif speed_mbps >= 30:
+        speed_score = 80
+    elif speed_mbps >= 10:
+        speed_score = 60
+    elif speed_mbps >= 5:
+        speed_score = 40
+    elif speed_mbps >= 1:
+        speed_score = 20
+    elif speed_mbps > 0:
+        speed_score = 10
+    else:
+        speed_score = 0  # 无速度数据
+
+    # 3. 成功率分（25%）
     success_rate = success / total if total > 0 else 0
     success_score = success_rate * 100
 
-    # 3. 稳定性分（20%）：连续失败会大幅扣分
+    # 4. 稳定性分（20%）：连续失败会大幅扣分
     stability_score = max(0, 100 - consec_fails * 20)
 
-    # 4. 新鲜度分（10%）：最近3天有成功记录得满分，否则递减
+    # 5. 新鲜度分（10%）：最近3天有成功记录得满分，否则递减
     freshness_score = 0
     if last_success:
         try:
@@ -322,6 +362,7 @@ def calculate_composite_score(perf, current_latency=None):
     # 加权总分
     total_score = (
         latency_score * SCORE_LATENCY_WEIGHT +
+        speed_score * SCORE_SPEED_WEIGHT +
         success_score * SCORE_SUCCESS_WEIGHT +
         stability_score * SCORE_STABILITY_WEIGHT +
         freshness_score * SCORE_FRESHNESS_WEIGHT
@@ -439,6 +480,33 @@ def http_latency_test(ip, port=443, timeout=5, test_url=None):
                 sock.close()
         except Exception:
             pass
+
+
+def tcp_speed_test(ip, port=443, timeout=10):
+    """TCP下载速度测试 - 通过CDN IP下载Cloudflare测速文件，返回速度(Mbps)"""
+    try:
+        import requests as req
+        start_time = time.time()
+        resp = req.get(
+            f"https://{ip}/__down?bytes=10000000",
+            headers={"Host": "speed.cloudflare.com"},
+            verify=False,
+            timeout=timeout,
+            stream=True
+        )
+        if resp.status_code != 200:
+            return 0.0
+        downloaded = 0
+        for chunk in resp.iter_content(chunk_size=65536):
+            if chunk:
+                downloaded += len(chunk)
+        elapsed = time.time() - start_time
+        if elapsed <= 0:
+            return 0.0
+        speed_mbps = (downloaded * 8) / (elapsed * 1000000)  # 转为 Mbps
+        return round(speed_mbps, 2)
+    except Exception:
+        return 0.0
 
 
 def resolve_dns(dns_name, dns_server=DNS_SERVER, timeout=10):
@@ -854,6 +922,11 @@ def fetch_cdn_ips():
             if success and latency is not None:
                 source_tag = 'local' if 'local' in info['sources'] else 'external'
                 record_ip_test(db_path, ip, latency, True, source=source_tag)
+                # v4.4 新增：对新IP做下载速度测试
+                speed_mbps = tcp_speed_test(ip, port=443, timeout=10)
+                if speed_mbps > 0:
+                    update_speed_mbps(db_path, ip, speed_mbps)
+                    logger.info(f"  {ip} 速度测试: {speed_mbps} Mbps")
                 perf = get_ip_performance(db_path, ip)
                 score = calculate_composite_score(perf)
                 tested_results.append({
@@ -1004,6 +1077,111 @@ def assign_and_save_ips(ips):
     logger.info(f"\n[OK] CDN优选IP已保存")
 
 
+# 健康评估间隔（秒）
+HEALTH_CHECK_INTERVAL = 21600  # 6小时
+
+
+def health_check(db_path):
+    """
+    v4.4 定期健康评估：
+    对所有存活IP执行完整评估（延迟+速度+成功率），
+    如果最优IP评分比上次健康评估时下降超过30%，触发IP池刷新
+    """
+    logger.info("\n>>> 定期健康评估开始")
+
+    # 获取当前所有存活IP
+    current_ips = get_current_cdn_ips_from_db()
+    if not current_ips:
+        logger.info("  无存活IP，跳过健康评估")
+        return None
+
+    best_score = 0
+    best_ip = None
+    evaluated_count = 0
+
+    for ip in current_ips:
+        # 完整评估：延迟测试
+        latency, success = http_latency_test(ip, port=443, timeout=5)
+        if success and latency is not None:
+            record_ip_test(db_path, ip, latency, True, source='health_check')
+        else:
+            record_ip_test(db_path, ip, 0, False, source='health_check')
+
+        # 速度测试
+        speed_mbps = tcp_speed_test(ip, port=443, timeout=10)
+        if speed_mbps > 0:
+            update_speed_mbps(db_path, ip, speed_mbps)
+
+        # 计算当前评分
+        perf = get_ip_performance(db_path, ip)
+        if perf:
+            score = calculate_composite_score(perf)
+            evaluated_count += 1
+            logger.info(f"  {ip}: 评分={score} 延迟={latency:.1f}ms 速度={speed_mbps}Mbps")
+            if score > best_score:
+                best_score = score
+                best_ip = ip
+
+        # 测试间隔，避免被识别为爬虫
+        time.sleep(random.uniform(1, 3))
+
+    logger.info(f"  健康评估完成: 评估{evaluated_count}个IP, 最优={best_ip} 评分={best_score}")
+
+    # 读取上次健康评估的最优评分
+    last_best_score = 0
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM cdn_settings WHERE key='last_health_best_score'")
+        row = cursor.fetchone()
+        if row and row[0]:
+            try:
+                last_best_score = float(row[0])
+            except ValueError:
+                last_best_score = 0
+    except Exception:
+        pass
+    finally:
+        if conn:
+            conn.close()
+
+    # 判断是否需要刷新IP池
+    need_refresh = False
+    if last_best_score > 0 and best_score > 0:
+        decline_ratio = (last_best_score - best_score) / last_best_score
+        if decline_ratio > 0.3:
+            logger.warning(f"  ⚠️ 最优IP评分下降{decline_ratio*100:.0f}% ({last_best_score:.1f} → {best_score:.1f})，触发IP池刷新")
+            need_refresh = True
+        else:
+            logger.info(f"  评分变化: {last_best_score:.1f} → {best_score:.1f} (下降{decline_ratio*100:.0f}%)，无需刷新")
+
+    # 保存本次最优评分
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)",
+                       ('last_health_best_score', str(best_score)))
+        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)",
+                       ('last_health_check_time', datetime.now().isoformat()))
+        conn.commit()
+    except Exception as e:
+        logger.debug(f"  保存健康评估结果失败: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    if need_refresh:
+        logger.info("  执行IP池刷新...")
+        new_ips = fetch_cdn_ips()
+        if new_ips:
+            assign_and_save_ips(new_ips)
+            logger.info(f"  IP池刷新完成: {new_ips}")
+
+    return best_score
+
+
 def run_once():
     logger.info("\n" + "="*50)
     logger.info(f"CDN监控启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1029,9 +1207,18 @@ if __name__ == '__main__':
         sys.exit(0)
 
     init_db()
+    last_health_check = 0
     while True:
         try:
             run_once()
+
+            # v4.4 定期健康评估：每6小时执行一次
+            now = time.time()
+            if now - last_health_check > HEALTH_CHECK_INTERVAL:
+                db_path = os.path.join(DATA_DIR, 'singbox.db')
+                health_check(db_path)
+                last_health_check = now
+
             time.sleep(CDN_MONITOR_INTERVAL)
         except KeyboardInterrupt:
             logger.info("CDN监控已停止")

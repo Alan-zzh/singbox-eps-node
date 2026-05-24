@@ -1,6 +1,44 @@
 # AI 调试历史与防Bug规则 (AI Debug History)
 
-##  最新排查（2026-05-22）
+## 最新排查（2026-05-24）
+
+### idle_timeout 导致 sing-box FATAL 崩溃 [TRAE SOLO CN]
+- **现象**: v2rayN 更新订阅后所有节点连不上，sing-box 持续重启 160+ 次
+- **报错**: `inbounds[1].idle_timeout: json: unknown field "idle_timeout"`
+- **根因**: `idle_timeout` 不是 sing-box 入站的合法字段。sing-box 1.13.0 支持的正确字段是 `tcp_keep_alive`（初始间隔，默认5m）和 `tcp_keep_alive_interval`（探测间隔，默认75s）。`idle_timeout` 是凭直觉猜测的错误字段名
+- **修复**: 
+  1. 从服务器 config.json 移除 3 个 `idle_timeout` 字段
+  2. 将 config_generator.py 中的 `idle_timeout` 替换为 `tcp_keep_alive: "30s"` + `tcp_keep_alive_interval: "15s"`
+  3. 同步到服务器，重新生成配置，sing-box 恢复正常
+- **教训**: 新增 sing-box 字段前必须先查官方文档（mcp_Context7_query-docs）确认字段合法性，不能凭直觉猜测字段名
+
+### VLESS-Reality 速度退化修复 [TRAE SOLO CN]
+- **现象**: JP-VLESS-Reality 节点长时间使用后速度变慢，切换节点再切回速度恢复
+- **根因**: 
+  1. `tcp_keepalive_time=600`（10分钟），NAT 超时后连接变"半死"
+  2. 缺少 `tcp_no_metrics_save=1`，旧连接 RTT/拥塞窗口缓存影响新连接
+  3. 客户端 VLESS-Reality 未显式禁用 multiplex（xtls-rprx-vision + mux 不兼容）
+- **修复**: install.sh 修正 keepalive 参数，客户端配置添加 multiplex.enabled=false + tcp_fast_open=true
+
+### 全协议暗病修复 [TRAE SOLO CN]
+- **现象**: VLESS-WS/HTTPUpgrade/Trojan-WS/Hysteria2 速度慢且有丢包风险
+- **根因**:
+  1. Hysteria2 UDP 缓冲区默认值只有 208KB（rmem_default/wmem_default），QUIC 窗口耗尽
+  2. CDN IP 池全是 104.16/104.17/104.19 段低质 IP
+  3. CDN 协议缺少 multiplex 禁用和 tcp_fast_open
+- **修复**: UDP 缓冲区增大到 2MB，CDN IP 替换为 8.39.125/162.159 段优质 IP，客户端配置统一添加 multiplex/tcp_fast_open
+
+### 全协议深度优化 + cfnew 完整落地 [TRAE SOLO CN]
+- **优化项**:
+  1. VLESS-Reality 入站添加 tcp_keep_alive=30s + tcp_keep_alive_interval=15s（与 CDN 协议一致）
+  2. Hysteria2 服务端入站添加 up_mbps=200 + down_mbps=200（匹配客户端 brutal 模式）
+  3. Trojan-WS 客户端添加 utls 指纹伪装（chrome）+ multiplex 禁用 + tls.alpn
+  4. 所有 CDN 协议客户端添加 tls.alpn=["http/1.1"]（显式匹配服务端）
+  5. install.sh 新增 UDP/QUIC 专用参数：rmem_max/wmem_max=16MB, optmem_max=65536, udp_mem, TFO 黑洞禁用
+  6. cdn_monitor 新增 TCP 下载速度测试（Cloudflare 10MB 测速文件），评分权重调整为延迟25%+速度20%+成功率25%+稳定性20%+新鲜度10%
+  7. cdn_monitor 新增定期健康评估（每6小时），最优IP评分下降30%触发IP池刷新
+
+## 最新排查（2026-05-22）
 
 ### CDN 阻断根因修复 [Trae CN]
 - **现象**: 日本/新加坡 CDN 节点同时被 Cloudflare 临时拦截（403/1020），持续约 30 分钟后自动恢复

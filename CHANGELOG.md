@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## v4.4.0 - 2026-05-24
+
+- 修复 idle_timeout 导致 sing-box FATAL 崩溃：替换为 tcp_keep_alive + tcp_keep_alive_interval
+- VLESS-Reality 速度退化修复：修正 keepalive 参数，客户端添加 multiplex 禁用 + tcp_fast_open
+- 全协议暗病修复：Hysteria2 UDP 缓冲区 208KB→2MB，CDN IP 替换为优质段，CDN 协议添加 multiplex/tcp_fast_open
+- VLESS-Reality 入站添加 tcp_keep_alive（防止空闲断连）
+- Hysteria2 服务端添加 up_mbps/down_mbps=200（匹配客户端 brutal 模式）
+- Trojan-WS 客户端添加 utls 指纹伪装 + multiplex 禁用 + tls.alpn
+- 所有 CDN 协议客户端添加 tls.alpn=["http/1.1"]（显式匹配服务端）
+- install.sh 新增 UDP/QUIC 参数：rmem_max/wmem_max=16MB, optmem_max, TFO 黑洞禁用
+- cdn_monitor 新增 TCP 下载速度测试（Cloudflare 10MB 测速文件纳入评分）
+- cdn_monitor 新增定期健康评估（每6小时，评分下降30%触发IP池刷新）
+- 新增 scripts/test_connection.py 连接测试工具
+- HY2 无感轮询验证：201 个 UDP DNAT 规则全部正常
+
 ## v4.3.9 - 2026-05-22
 
 - 修复 cdn_monitor 403 检测 Bug：HTTP 403/1020/1010 时返回 False（之前错误返回 True，导致被拦截 IP 被标记为存活）
