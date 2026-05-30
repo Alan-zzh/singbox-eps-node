@@ -1,5 +1,135 @@
 # CHANGELOG
 
+## v4.10.10 - 2026-05-30
+
+- [OpenCode] 修复 Clash MATCH 规则指向错误：`MATCH,自动选择` → `MATCH,节点选择`
+- [OpenCode] 策略组重构：`手动选择` 改为 `节点选择`(select)，包含 `自动选择` + 所有单节点
+- [OpenCode] 「节点选择」组里用户可自由选"自动选择"或固定单个节点
+- [OpenCode] AGENTS.md 新增 MATCH 规则纪律
+
+## v4.10.9 - 2026-05-30
+
+- [OpenCode] Clash url-test 优化：`lazy: false→true`、`interval: 60→600`、`tolerance: 50→150`，解决 Clash 自动切换导致发消息失败的问题
+- [OpenCode] Clash 所有节点显式禁用 multiplex（防御性加固）
+- [OpenCode] HY2 Clash 节点 `up/down` 从 `"200 Mbps"` 改为 `200`（整数兼容 Clash Meta 解析）
+- [OpenCode] 教训写入 AI_DEBUG_HISTORY.md + AGENTS.md 防止踩坑
+
+## v4.10.8 - 2026-05-30
+
+- [OpenCode] 修复部署：JP/SG服务器缺失的 subscription_service.py 修复同步
+- [OpenCode] global→nonlocal 修复：`/api/cdn-status` 从 500 恢复 200
+- [OpenCode] UnicodeEncodeError 修复：charset=utf-8 已确认生效
+- [OpenCode] 版本号统一为 v4.10.8，文档同步更新
+
+## v4.10.7 - 2026-05-30
+
+- [TRAE SOLO CN] 开启DEBUG日志监控：日志级别从INFO改为DEBUG，详细记录10次CDN优选探测
+
+## v4.10.6 - 2026-05-30
+
+- [TRAE SOLO CN] CDN优选评分激活用户路径+三网均衡：评分含用户路径延迟(25%)+速度(25%)+三网均衡度(15%，电信0.45/联通0.35/移动0.20)
+- [TRAE SOLO CN] 修复probe_user_network：TCP 443不通时ICMP ping代替，不再误判NAT
+- [TRAE SOLO CN] 三网均衡度改用API缓存数据替代前缀表，区分度从0提升到3档(50/60/80/100)
+- [TRAE SOLO CN] 记录爱快路由器凭据到.env
+- [TRAE SOLO CN] 修复probe_user_network NAT误判：VPS→用户IP直连改为NAT检测+CDN回源测速代替
+
+## v4.10.5 - 2026-05-30
+
+- [TRAE SOLO CN] 修复CDN优选系统TCP检测全部误判：cdn_ips_list JSON格式读取不兼容（4处split改为JSON解析+逗号降级）
+- [TRAE SOLO CN] 修复Clash/Singbox订阅配置UnicodeEncodeError：Response显式指定charset=utf-8
+
+## v4.10.4 - 2026-05-29
+
+- [TRAE SOLO CN] 修复 /api/cdn-status 500错误：`global` → `nonlocal` 修复作用域bug（详见AI_DEBUG_HISTORY）
+- [TRAE SOLO CN] 服务端路由规则添加私有地址拒绝（127.0.0.0/8等→block），阻止客户端TUN模式泄漏本地连接到代理隧道
+- [TRAE SOLO CN] JP服务器部署logrotate配置，清理374MB膨胀日志
+
+## v4.10.3 - 2026-05-28
+
+- [TRAE SOLO CN] 修复 cdn_quality_filter.py 评分权重总和不等于1：`cross_isp` 从 0.15 调整为 0.14，总和从1.01修正为1.00（详见AI_DEBUG_HISTORY）
+
+## v4.10.2 - 2026-05-28
+
+- [TRAE SOLO CN] 修复高延迟IP被分配给用户：IP筛选改为按评分排序取Top N，不再无脑保留存活IP（详见AI_DEBUG_HISTORY）
+- [TRAE SOLO CN] 协议IP分配改为按评分排序取前3名，不再从Top5随机选
+- [TRAE SOLO CN] cdn_ips_list改为JSON格式（含评分+延迟），订阅服务换IP时按评分选最高分
+
+## v4.10.1 - 2026-05-28
+
+- [TRAE SOLO CN] 修复订阅服务不返回优选IP：cdn_monitor更新IP后写信号文件，订阅服务检测到信号自动清缓存刷新（详见AI_DEBUG_HISTORY）
+- [TRAE SOLO CN] 修复USER_DDNS_DOMAIN读不到.env：config.py改为os.getenv()+_load_env_value()双重读取（详见AI_DEBUG_HISTORY）
+- [TRAE SOLO CN] 两台服务器.env已添加USER_DDNS_DOMAIN=zzpzgroup.com，域名测速生效
+
+## v4.10.0 - 2026-05-28
+
+- [TRAE SOLO CN] 简化评分逻辑：移除CDN→Google测速（不影响用户体验），只保留VPS→CDN延迟(40%)+速度(30%)+稳定性(30%)
+- [TRAE SOLO CN] 优先本地IP：排序逻辑改为来源优先（你投喂的PREFERRED_IPS排最前）→评分→延迟
+- [TRAE SOLO CN] 用户路径测速可选：只有配置USER_DDNS_DOMAIN才做，避免浪费资源
+- [TRAE SOLO CN] 修复"全部存活不更新"逻辑：保留v4.9修复，让候选IP始终对比
+- [TRAE SOLO CN] 健康检查间隔改为12小时，节省资源
+- [TRAE SOLO CN] 速度测试文件改为5MB，超时拉长到15秒，确保数据准确
+- [TRAE SOLO CN] 阶段化测速：获取候选IP时先测连通+延迟，只对前30个测速度，节省时间和流量
+
+## v4.9.0 - 2026-05-27
+
+- [TRAE SOLO CN] 三网API自动匹配：新增090227/001315联通+移动API，根据DDNS识别用户运营商自动调对应API获取专属IP池
+- [TRAE SOLO CN] 多维度端到端真实测速：test_user_path_latency()从TCP连接改为完整HTTPS测速（延迟+下载速度+丢包率）
+- [TRAE SOLO CN] CDN→Google真实测速：test_google_path_latency()从TCP连8.8.8.8改为通过CDN IP访问Google（延迟+速度）
+- [TRAE SOLO CN] 新五维综合评分：用户链路(35%)+VPS→CDN(25%)+CDN→Google(20%)+速度(10%)+稳定性(10%)，替代旧七维评分
+- [TRAE SOLO CN] 优选域名综合评分：select_best_domain()从只按延迟排序改为延迟+速度+可用性综合评分
+- [TRAE SOLO CN] 运营商匹配度评分：calculate_isp_match_score()基于THREE_ISP_OPTIMAL_PREFIXES计算IP与运营商的匹配度
+- [TRAE SOLO CN] 健康评估增强：health_check()集成CDN→Google测速+用户路径真实测速+新五维评分+多维度路径报告
+- [TRAE SOLO CN] 数据库新增字段：google_latency_ms/google_speed_mbps/user_isp_match/composite_score_v2
+
+## v4.8.0 - 2026-05-27
+
+- [TRAE SOLO CN] CDN三模式优选：CDN_MODE配置项（ip_optimized/domain_optimized/domain_default），替代旧的CDN_PREFER_IP_OVER_DOMAIN布尔值
+- [TRAE SOLO CN] 修复优选IP模式：纠正上一轮误判（curl -H只改HTTP头不改SNI），确认优选IP+正确SNI完全可用
+- [TRAE SOLO CN] 新增优选域名模式：支持icook.hk/cf.090227.xyz等第三方优选域名，cdn_monitor自动测速选最优
+- [TRAE SOLO CN] 新增多维度端到端测速：用户路径延迟（DDNS锚点）+ Google路径延迟
+- [TRAE SOLO CN] TLS检测增强：cdn_monitor新增tls_handshake_test()，TCP+TLS双重验证，SNI=CF_DOMAIN
+
+## v4.7.0 - 2026-05-27
+
+- [TRAE SOLO CN] CDN域名回退：新增CDN_PREFER_IP_OVER_DOMAIN配置，默认域名模式（后经v4.8纠正为优选IP模式）
+- [TRAE SOLO CN] subscription_service TLS握手验证：test_cdn_ip_connectivity()增加TLS层检测
+- [TRAE SOLO CN] cdn_monitor TLS检测：http_latency_test()区分ssl.SSLError和普通异常
+
+## v4.6.2 - 2026-05-27
+
+- [TRAE SOLO CN] 修复 cdn_monitor.py 数据库路径重复拼接：`db_path_check` 改用已有的 `db_path`，避免打开错位数据库导致评分计算为 0（详见 AI_DEBUG_HISTORY 2026-05-27）
+
+## v4.6.1 - 2026-05-27
+
+- [TRAE SOLO CN] 砍掉CDN降级直连：同一VPS降级无意义，移除degrade_to_direct/decide_cdn_recover/相关API
+- [TRAE SOLO CN] CDN优选逻辑收紧：迟滞机制（新IP必须好15%以上才换）+ CF防封（30秒间隔/单IP每分钟2次）+ 稳定期60秒
+- [TRAE SOLO CN] 直连节点配置优化：新增optimize_reality_config()，测试6个SNI的TLS握手速度，给出最优SNI+TCP调优建议
+- [TRAE SOLO CN] 新增 /api/direct-optimize 端点（GET），基于用户网络优化REALITY配置
+- [TRAE SOLO CN] 部署到日本+新加坡VPS，DDNS锚点识别正确（175.10.213.182/湖南电信）
+
+## v4.5.0 - 2026-05-27
+
+- [TRAE SOLO CN] CDN故障自愈：新增 CdnHealthMonitor + CdnFailoverController，支持健康监控、自动切换、IP冷却池、降级直连兜底
+- [TRAE SOLO CN] CDN直连回退：降级直连后每5分钟自动探测CDN恢复，有IP恢复健康立即切回CDN，支持手动触发恢复探测
+- [TRAE SOLO CN] 订阅服务新增 /api/cdn-status（GET）+ /api/cdn-recover（POST）+ /api/cdn-degrade（POST）三个端点
+- [TRAE SOLO CN] 直连节点筛选：新增 DirectNodeQualityFilter 类（五维评分+硬淘汰），节点<=2时硬淘汰改软淘汰（降权30%兜底）
+- [TRAE SOLO CN] 三网最优优选：新增 THREE_ISP_OPTIMAL_PREFIXES 配置 + probe_three_networks/cross_isp_score，评分扩到九维
+- [TRAE SOLO CN] config.py 新增 CDN_FAILOVER、DIRECT_NODE_HARD_REJECT、THREE_ISP_OPTIMAL_PREFIXES 配置
+
+## v4.4.4 - 2026-05-27
+
+- 修复 health_monitor.py 状态文件存储路径：从 `/tmp/` 改为 `data/` 目录，避免重启后丢失（详见 AI_DEBUG_HISTORY 2026-05-27）
+- 修复 subscription_service.py 重复导入：删除函数内重复的 `CDN_IP_HARD_REJECT` 导入（详见 AI_DEBUG_HISTORY 2026-05-27）
+
+## v4.4.2 - 2026-05-27
+
+- 修复 health_monitor.py KeyError：`check_service()` 新增 `status` 字段，避免访问不存在的字典键（详见 AI_DEBUG_HISTORY 2026-05-27）
+
+## v4.4.1 - 2026-05-26
+
+- 修复 VLESS-HTTPUpgrade Clash 不兼容：`network: httpupgrade` → `ws` + `v2ray-http-upgrade: true`（详见 AI_DEBUG_HISTORY 2026-05-26）
+- 两台服务器日志排查：sing-box 零重启，端口正常，journald 日志受控（47-71MB），内存充裕（215-216MB可用）
+
 ## v4.4.0 - 2026-05-24
 
 - 修复 idle_timeout 导致 sing-box FATAL 崩溃：替换为 tcp_keep_alive + tcp_keep_alive_interval

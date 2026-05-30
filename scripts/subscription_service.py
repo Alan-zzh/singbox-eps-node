@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v4.3.5
-Date: 2026-05-01
+Version: v4.10.9
+Date: 2026-05-30
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -64,7 +64,7 @@ try:
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
         AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR,
-        CDN_PREFERRED_IPS, CDN_IP_BLACKLIST
+        CDN_PREFERRED_IPS, CDN_IP_BLACKLIST, CDN_IP_HARD_REJECT, CDN_MODE, CDN_OPTIMIZED_DOMAINS
     )
     from logger import get_logger
 except ImportError:
@@ -98,6 +98,7 @@ except ImportError:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     CDN_PREFERRED_IPS = []
     CDN_IP_BLACKLIST = []
+    CDN_IP_HARD_REJECT = {'latency_ms': 500, 'packet_loss_rate': 0.3, 'download_speed_mbps': 5}
     def get_sub_domain():
         """降级：config.py导入失败时，用CF_DOMAIN或SERVER_IP作为订阅地址"""
         return CF_DOMAIN if CF_DOMAIN else SERVER_IP
@@ -122,11 +123,25 @@ def load_cdn_settings(conn):
     return {row[0]: row[1] for row in rows}
 
 
+def parse_cdn_ips_list(raw_value):
+    if not raw_value:
+        return []
+    raw = raw_value.strip()
+    if raw.startswith('['):
+        try:
+            items = json.loads(raw)
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                return [item['ip'] for item in items if isinstance(item, dict) and item.get('ip')]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    return [ip.strip() for ip in raw.split(',') if ip.strip()]
+
+
 def get_cdn_pool_state(conn):
     settings = load_cdn_settings(conn)
     current = {key: settings.get(key, '') for key in CDN_PROTOCOL_KEYS}
     pool_raw = settings.get('cdn_ips_list', '')
-    pool = [ip.strip() for ip in pool_raw.split(',') if ip.strip()]
+    pool = parse_cdn_ips_list(pool_raw)
     return settings, current, pool
 
 
@@ -287,6 +302,15 @@ TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
 HYSTERIA2_PASSWORD = os.getenv('HYSTERIA2_PASSWORD', '')
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
 EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
+
+COUNTRY_NAME_MAP = {
+    'SG': '新加坡', 'JP': '日本', 'US': '美国', 'UK': '英国',
+    'DE': '德国', 'HK': '香港', 'TW': '台湾', 'KR': '韩国',
+    'CA': '加拿大', 'AU': '澳洲', 'NL': '荷兰', 'FR': '法国',
+}
+
+def get_country_name():
+    return COUNTRY_NAME_MAP.get(COUNTRY_CODE, COUNTRY_CODE)
 
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -505,34 +529,76 @@ def format_traffic(bytes_count):
     else:
         return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
 
-# CDN IP 检测结果缓存：{ip: (result, timestamp)}
+# CDN IP 检测结果缓存：{ip: (result, timestamp, tls_ok)}
 _cdn_ip_cache = {}
-_CDN_IP_CACHE_TTL = 600  # 缓存有效期10分钟
+_CDN_IP_CACHE_TTL = 600
+_CDN_IP_CACHE_TTL_TLS_FAIL = 300
 
 def test_cdn_ip_connectivity(ip, port=443, timeout=3):
-    """测试CDN IP连通性（仅TCP层检测，带缓存）
-    【v4.3.9优化】：移除HTTP层403检测，减少请求特征暴露；增加10分钟缓存避免频繁重测
+    """测试CDN IP连通性（TCP + TLS握手验证，带缓存）
+    【v4.7修复】：增加TLS握手验证，Cloudflare已启用SNI严格验证，TCP通但TLS失败视为不可用
     """
-    # 查缓存
     now = time.time()
     if ip in _cdn_ip_cache:
-        cached_result, cached_time = _cdn_ip_cache[ip]
-        if now - cached_time < _CDN_IP_CACHE_TTL:
+        cached_result, cached_time, cached_tls_ok = _cdn_ip_cache[ip]
+        cache_ttl = _CDN_IP_CACHE_TTL if cached_tls_ok else _CDN_IP_CACHE_TTL_TLS_FAIL
+        if now - cached_time < cache_ttl:
             return cached_result
 
-    # TCP检测
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         result = sock.connect_ex((ip, port))
         sock.close()
-        ok = result == 0
+        if result != 0:
+            _cdn_ip_cache[ip] = (False, now, False)
+            return False
     except Exception:
-        ok = False
+        _cdn_ip_cache[ip] = (False, now, False)
+        return False
 
-    # 写缓存
-    _cdn_ip_cache[ip] = (ok, now)
+    tls_ok = False
+    try:
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.settimeout(timeout)
+        raw_sock.connect((ip, port))
+        ssock = ctx.wrap_socket(raw_sock, server_hostname=CF_DOMAIN if CF_DOMAIN else 'cloudflare.com')
+        ssock.close()
+        raw_sock.close()
+        tls_ok = True
+    except Exception:
+        tls_ok = False
+
+    ok = tls_ok
+    _cdn_ip_cache[ip] = (ok, now, tls_ok)
     return ok
+
+# v4.5 CDN质量筛选器（全局单例）
+_cdn_quality_filter = None
+def get_cdn_quality_filter():
+    """获取或初始化CDN质量筛选器"""
+    global _cdn_quality_filter
+    if _cdn_quality_filter is None:
+        try:
+            import sys
+            sys.path.insert(0, os.path.dirname(__file__))
+            from cdn_quality_filter import CdnQualityFilter
+            from config import USER_DDNS_DOMAIN, USER_EXPECTED_ISP, CDN_IP_HARD_REJECT, USER_QUALITY_THRESHOLD, HUNAN_CT_OPTIMAL_PREFIXES
+            _cdn_quality_filter = CdnQualityFilter(
+                db_path=DB_PATH,
+                ddns_domain=USER_DDNS_DOMAIN,
+                expected_isp=USER_EXPECTED_ISP,
+                hard_reject=CDN_IP_HARD_REJECT,
+                user_quality=USER_QUALITY_THRESHOLD,
+                optimal_prefixes=HUNAN_CT_OPTIMAL_PREFIXES,
+            )
+        except Exception as e:
+            logger.warning(f"无法初始化CdnQualityFilter: {e}")
+    return _cdn_quality_filter
 
 # 换IP冷却机制：连续失败3次后暂停15分钟
 _ip_switch_fail_count = 0
@@ -557,8 +623,20 @@ def get_cdn_ip_for_protocol(protocol_key):
     【v4.3.9优化】：
     - 换IP冷却机制：连续失败3次后暂停15分钟，避免频繁换IP加剧封禁
     - 当前IP可用时重置失败计数
+
+    【v4.10.1优化】：
+    - 检测cdn_monitor更新信号，自动清空缓存刷新IP
     """
-    global _ip_switch_fail_count, _ip_switch_cooldown_until
+    global _ip_switch_fail_count, _ip_switch_cooldown_until, _cdn_ip_cache
+
+    # [TRAE SOLO CN] v4.10.1 检测cdn_monitor更新信号，清空缓存
+    signal_file = os.path.join(DATA_DIR, '.cdn_ip_updated')
+    try:
+        if os.path.exists(signal_file):
+            _cdn_ip_cache.clear()
+            os.remove(signal_file)
+    except Exception:
+        pass
 
     conn = None
     try:
@@ -582,10 +660,33 @@ def get_cdn_ip_for_protocol(protocol_key):
 
         # 快速连通性检测
         if test_cdn_ip_connectivity(current_ip):
-            _ip_switch_fail_count = 0  # 重置失败计数
-            return current_ip  # 当前IP正常，直接用
-
-        # 当前IP被阻断，从cdn_ips_list中换一个
+            # v4.5 硬淘汰检查：即使连通，但延时/丢包/速度不达标也自动换
+            cursor.execute("SELECT avg_latency, success_count, total_tests, fail_count, consecutive_fails, speed_mbps FROM ip_performance WHERE ip = ?", (current_ip,))
+            perf_row = cursor.fetchone()
+            if perf_row and perf_row[2] >= 3:  # 至少3次测试数据
+                avg_lat, success_cnt, total_tests, fail_cnt, consec_fails, speed_mbps = perf_row
+                fail_rate = fail_cnt / total_tests if total_tests > 0 else 0
+                should_reject = False
+                reject_reason = ''
+                if avg_lat > 0 and avg_lat > CDN_IP_HARD_REJECT['latency_ms']:
+                    should_reject = True
+                    reject_reason = f'延时{avg_lat:.0f}ms>{CDN_IP_HARD_REJECT["latency_ms"]}ms'
+                elif fail_rate > CDN_IP_HARD_REJECT['packet_loss_rate']:
+                    should_reject = True
+                    reject_reason = f'失败率{fail_rate*100:.0f}%>{CDN_IP_HARD_REJECT["packet_loss_rate"]*100:.0f}%'
+                elif speed_mbps and speed_mbps > 0 and speed_mbps < CDN_IP_HARD_REJECT['download_speed_mbps']:
+                    should_reject = True
+                    reject_reason = f'速度{speed_mbps:.1f}Mbps<{CDN_IP_HARD_REJECT["download_speed_mbps"]}Mbps'
+                if should_reject:
+                    logger.warning(f"CDN IP {current_ip} 硬淘汰: {reject_reason}，自动换IP")
+                    # 不返回current_ip，继续执行换IP逻辑
+                else:
+                    _ip_switch_fail_count = 0
+                    return current_ip  # 当前IP正常，直接用
+            else:
+                _ip_switch_fail_count = 0
+                return current_ip  # 数据不足，暂不淘汰
+        # 当前IP被阻断或被硬淘汰，从cdn_ips_list中换一个
         logger.warning(f"CDN IP {current_ip} 被阻断，从池中换IP")
 
         # 获取cdn_ips_list
@@ -601,7 +702,20 @@ def get_cdn_ip_for_protocol(protocol_key):
                 _ip_switch_fail_count = 0
             return current_ip  # 返回当前IP，不返回None
 
-        all_ips = [ip.strip() for ip in row[0].split(',') if ip.strip()]
+        # [TRAE SOLO CN] v4.10.2 解析JSON格式的cdn_ips_list（含评分+延迟），按评分选IP
+        try:
+            ips_data = json.loads(row[0])
+            if isinstance(ips_data, list) and ips_data and isinstance(ips_data[0], dict):
+                all_ips = [item['ip'] for item in ips_data if item.get('ip')]
+                scored_available = [item for item in ips_data
+                                    if item.get('ip') and item['ip'] not in blacklist and item['ip'] != current_ip]
+                scored_available.sort(key=lambda x: -x.get('score', 0))
+            else:
+                all_ips = [ip.strip() for ip in row[0].split(',') if ip.strip()]
+                scored_available = None
+        except (json.JSONDecodeError, TypeError):
+            all_ips = [ip.strip() for ip in row[0].split(',') if ip.strip()]
+            scored_available = None
 
         # 过滤黑名单IP
         try:
@@ -622,9 +736,21 @@ def get_cdn_ip_for_protocol(protocol_key):
                 _ip_switch_fail_count = 0
             return current_ip  # 返回当前IP，不返回None
 
-        # 随机选一个IP（避免总是选同一个）
-        import random
-        new_ip = random.choice(available_ips)
+        # [TRAE SOLO CN] v4.10.2 优先按评分选IP，不再随机
+        new_ip = None
+        if scored_available:
+            new_ip = scored_available[0]['ip']
+            logger.info(f"从{len(scored_available)}个候选IP中按评分选择: {new_ip} (score={scored_available[0].get('score',0):.1f})")
+        elif cqf:
+            user_probe = cqf.probe_user_network()
+            ranked = cqf.filter_and_rank(available_ips, user_probe)
+            if ranked:
+                new_ip = ranked[0][0]
+                logger.info(f"从{len(ranked)}个合格IP中选择: {new_ip}")
+
+        # 兜底：随机选
+        if not new_ip:
+            new_ip = random.choice(available_ips)
 
         # 更新数据库
         cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", (protocol_key, new_ip))
@@ -644,28 +770,59 @@ def get_sub_address():
     """获取订阅服务地址（域名或IP）- 使用config.py统一逻辑"""
     return get_sub_domain()
 
+def get_cdn_optimized_domain():
+    """获取优选域名（从数据库读取cdn_monitor测速选出的最优域名）
+    [TRAE SOLO CN] v4.8：优选域名模式，走优化线路
+    """
+    try:
+        db_path = init_db()
+        if not db_path:
+            return None
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT value FROM config WHERE key='cdn_optimized_domain'")
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0].strip()
+    except Exception:
+        pass
+    if CDN_OPTIMIZED_DOMAINS:
+        return CDN_OPTIMIZED_DOMAINS[0]
+    return None
+
 def generate_all_links():
     """生成所有节点链接"""
     links = []
 
-    vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-    vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
-    trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
+    # CDN节点地址：根据CDN_MODE选择 [TRAE SOLO CN] v4.8
+    if CDN_MODE == 'domain_default':
+        vless_ws_addr = CF_DOMAIN
+        vless_upgrade_addr = CF_DOMAIN
+        trojan_ws_addr = CF_DOMAIN
+        cdn_suffix = "-CDN-D"
+        use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
+    elif CDN_MODE == 'domain_optimized':
+        optimized_domain = get_cdn_optimized_domain()
+        vless_ws_addr = optimized_domain or CF_DOMAIN
+        vless_upgrade_addr = optimized_domain or CF_DOMAIN
+        trojan_ws_addr = optimized_domain or CF_DOMAIN
+        cdn_suffix = "-CDN-O"
+        use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
+    else:
+        vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
+        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
+        trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
+        use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
+        cdn_suffix = "-CDN"
+        if not vless_ws_addr or vless_ws_addr == SERVER_IP:
+            vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
+            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
+            trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
-    # 判断是否使用CDN：有CDN IP且不是SERVER_IP
-    use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
-    cdn_suffix = "-CDN" if use_cdn else ""
-
-    # CDN节点的SNI：优先使用域名，没有域名则使用服务器IP
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
-
-    # 如果CDN IP不可用，回退到域名
-    if not vless_ws_addr or vless_ws_addr == SERVER_IP:
-        vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-    if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-        vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-    if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
-        trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
     # 1. VLESS-Reality (直连)
     params = {
@@ -740,9 +897,25 @@ def generate_all_links():
 
 def generate_singbox_config():
     """生成完整sing-box JSON配置（含自动路由规则）"""
-    vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-    vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
-    trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
+    if CDN_MODE == 'domain_default':
+        vless_ws_addr = CF_DOMAIN
+        vless_upgrade_addr = CF_DOMAIN
+        trojan_ws_addr = CF_DOMAIN
+    elif CDN_MODE == 'domain_optimized':
+        optimized_domain = get_cdn_optimized_domain()
+        vless_ws_addr = optimized_domain or CF_DOMAIN
+        vless_upgrade_addr = optimized_domain or CF_DOMAIN
+        trojan_ws_addr = optimized_domain or CF_DOMAIN
+    else:
+        vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
+        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
+        trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
+        if not vless_ws_addr or vless_ws_addr == SERVER_IP:
+            vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
+            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
+            trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
 
@@ -875,9 +1048,25 @@ def generate_singbox_config():
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
                     f"{COUNTRY_CODE}-Hysteria2",
+                    "ePS-Auto-Test",
                     "direct"
                 ],
                 "default": f"{COUNTRY_CODE}-VLESS-Reality"
+            },
+            # ePS-Auto-Test: 自动测速选优节点（urltest类型，每60秒测速一次）
+            {
+                "type": "urltest",
+                "tag": "ePS-Auto-Test",
+                "outbounds": [
+                    f"{COUNTRY_CODE}-VLESS-Reality",
+                    f"{COUNTRY_CODE}-VLESS-WS",
+                    f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
+                    f"{COUNTRY_CODE}-Trojan-WS",
+                    f"{COUNTRY_CODE}-Hysteria2",
+                ],
+                "interval": "60s",
+                "tolerance": 50,
+                "url": "https://www.google.com/generate_204"
             },
         ] + ([{
                 # ai-residential: 幕后路由出站，AI网站流量自动走此出站
@@ -913,6 +1102,9 @@ def generate_singbox_config():
                     "enabled": False
                 },
                 "tcp_fast_open": True,
+                "tcp_keep_alive": "30s",
+                "tcp_keep_alive_interval": "15s",
+                "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
                     "server_name": REALITY_SNI,
@@ -939,6 +1131,9 @@ def generate_singbox_config():
                     "enabled": False
                 },
                 "tcp_fast_open": True,
+                "tcp_keep_alive": "30s",
+                "tcp_keep_alive_interval": "15s",
+                "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
@@ -969,6 +1164,9 @@ def generate_singbox_config():
                     "enabled": False
                 },
                 "tcp_fast_open": True,
+                "tcp_keep_alive": "30s",
+                "tcp_keep_alive_interval": "15s",
+                "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
@@ -996,6 +1194,9 @@ def generate_singbox_config():
                     "enabled": False
                 },
                 "tcp_fast_open": True,
+                "tcp_keep_alive": "30s",
+                "tcp_keep_alive_interval": "15s",
+                "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
@@ -1035,8 +1236,11 @@ def generate_singbox_config():
                     "type": "salamander",
                     "password": HYSTERIA2_PASSWORD[:8]
                 },
-                "up_mbps": 100,
-                "down_mbps": 100
+                "tcp_keep_alive": "30s",
+                "tcp_keep_alive_interval": "15s",
+                "connect_timeout": "5s",
+                "up_mbps": 200,
+                "down_mbps": 200
             },
             # AI-SOCKS5代理池 - 多代理自动容错切换
             # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
@@ -1310,6 +1514,198 @@ def generate_singbox_config():
     config["outbounds"] = [ob for ob in config["outbounds"] if ob is not None]
     return config
 
+
+def generate_clash_config():
+    """生成Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
+    
+    ⚠️ Clash Meta v1.18.0+ 支持 VLESS-Reality 协议
+    Clash Verge Rev 内置 mihomo 内核，完全支持所有协议
+    配置自带url-test节点组，每60秒自动测速，断线3秒内自动切换
+    """
+    if CDN_MODE == 'domain_default':
+        vless_ws_addr = CF_DOMAIN
+        vless_upgrade_addr = CF_DOMAIN
+        trojan_ws_addr = CF_DOMAIN
+        use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
+    elif CDN_MODE == 'domain_optimized':
+        optimized_domain = get_cdn_optimized_domain()
+        vless_ws_addr = optimized_domain or CF_DOMAIN
+        vless_upgrade_addr = optimized_domain or CF_DOMAIN
+        trojan_ws_addr = optimized_domain or CF_DOMAIN
+        use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
+    else:
+        vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
+        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
+        trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
+        use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
+        if not vless_ws_addr or vless_ws_addr == SERVER_IP:
+            vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
+            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
+            trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+
+    cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+
+    proxies = []
+    
+    # 1. VLESS-Reality (直连) - Clash Meta v1.18.0+ 支持
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-VLESS-Reality",
+        "type": "vless",
+        "server": SERVER_IP,
+        "port": 443,
+        "uuid": VLESS_UUID,
+        "tls": True,
+        "udp": True,
+        "network": "tcp",
+        "flow": "xtls-rprx-vision",
+        "multiplex": {
+            "enabled": False
+        },
+        "reality-opts": {
+            "public-key": REALITY_PUBLIC_KEY,
+            "short-id": REALITY_SHORT_ID
+        },
+        "client-fingerprint": "chrome",
+        "servername": REALITY_SNI
+    })
+    
+    # 2. VLESS-WS (CDN) - Clash Meta支持
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-VLESS-WS",
+        "type": "vless",
+        "server": vless_ws_addr,
+        "port": VLESS_WS_PORT,
+        "uuid": VLESS_WS_UUID,
+        "tls": True,
+        "udp": True,
+        "network": "ws",
+        "multiplex": {
+            "enabled": False
+        },
+        "servername": cdn_sni,
+        "ws-opts": {
+            "path": "/vless-ws",
+            "headers": {"Host": cdn_sni}
+        },
+        "client-fingerprint": "chrome",
+        "skip-cert-verify": True
+    })
+    
+    # 3. VLESS-HTTPUpgrade (CDN) - Clash Meta通过ws-opts.v2ray-http-upgrade启用
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
+        "type": "vless",
+        "server": vless_upgrade_addr,
+        "port": VLESS_UPGRADE_PORT,
+        "uuid": VLESS_WS_UUID,
+        "tls": True,
+        "udp": True,
+        "network": "ws",
+        "multiplex": {
+            "enabled": False
+        },
+        "servername": cdn_sni,
+        "ws-opts": {
+            "path": "/vless-upgrade",
+            "headers": {"Host": cdn_sni},
+            "v2ray-http-upgrade": True
+        },
+        "client-fingerprint": "chrome",
+        "skip-cert-verify": True
+    })
+    
+    # 4. Trojan-WS (CDN) - Clash Meta支持
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-Trojan-WS",
+        "type": "trojan",
+        "server": trojan_ws_addr,
+        "port": TROJAN_WS_PORT,
+        "password": TROJAN_PASSWORD,
+        "udp": True,
+        "network": "ws",
+        "multiplex": {
+            "enabled": False
+        },
+        "sni": cdn_sni,
+        "ws-opts": {
+            "path": "/trojan-ws",
+            "headers": {"Host": cdn_sni}
+        },
+        "client-fingerprint": "chrome",
+        "skip-cert-verify": True,
+        "alpn": ["http/1.1"]
+    })
+    
+    # 5. Hysteria2 (直连) - Clash Meta支持
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-Hysteria2",
+        "type": "hysteria2",
+        "server": SERVER_IP,
+        "port": 443,
+        "password": HYSTERIA2_PASSWORD,
+        "udp": True,
+        "sni": REALITY_SNI,
+        "skip-cert-verify": True,
+        "obfs": "salamander",
+        "obfs-password": HYSTERIA2_PASSWORD[:8],
+        "ports": "443,21000-21200",
+        "up": 200,
+        "down": 200
+    })
+    
+    proxy_names = [p["name"] for p in proxies]
+    
+    config = {
+        "mixed-port": 7890,
+        "allow-lan": False,
+        "mode": "rule",
+        "log-level": "info",
+        "dns": {
+            "enable": True,
+            "listen": "0.0.0.0:1053",
+            "enhanced-mode": "fake-ip",
+            "fake-ip-range": "198.18.0.1/16",
+            "nameserver": [
+                "https://8.8.8.8/dns-query",
+                "https://1.1.1.1/dns-query"
+            ],
+            "fallback": [
+                "https://dns.alidns.com/dns-query"
+            ],
+            "fallback-filter": {
+                "geoip": True,
+                "ipcidr": ["240.0.0.0/4"]
+            }
+        },
+        "proxies": proxies,
+        "proxy-groups": [
+            {
+                "name": f"{COUNTRY_CODE}-节点选择",
+                "type": "select",
+                "proxies": [f"{COUNTRY_CODE}-自动选择"] + proxy_names
+            },
+            {
+                "name": f"{COUNTRY_CODE}-自动选择",
+                "type": "url-test",
+                "proxies": proxy_names,
+                "url": "http://cp.cloudflare.com/generate_204",
+                "interval": 60,
+                "tolerance": 150,
+                "lazy": False,
+                "timeout": 5000
+            }
+        ],
+        "rules": [
+            "GEOIP,CN,DIRECT",
+            "MATCH,{}".format(f"{COUNTRY_CODE}-节点选择")
+        ]
+    }
+    
+    return config
+
+
 def create_app():
     """创建Flask应用"""
     from flask import Flask, Response, jsonify, request
@@ -1359,6 +1755,69 @@ def create_app():
                 <p>域名: {domain}</p>
                 <p>使用HTTPS: 是</p>
             </div>
+            <div class="sub-box" id="cdn-test-section">
+                <p><strong>CDN延时测试：</strong></p>
+                <button onclick="runCdnTest()" style="padding:10px 20px;font-size:16px;background:#0066cc;color:white;border:none;border-radius:5px;cursor:pointer;">开始测速</button>
+                <div id="cdn-test-result" style="margin-top:15px;"></div>
+            </div>
+            <script>
+            async function runCdnTest() {{
+                const resultDiv = document.getElementById('cdn-test-result');
+                const btn = event.target;
+                btn.disabled = true;
+                btn.textContent = '测试中...';
+                resultDiv.innerHTML = '<p style="color:#666;">正在获取CDN IP列表...</p>';
+                try {{
+                    const resp = await fetch('/api/cdn-test');
+                    const data = await resp.json();
+                    if (data.code !== 200 || !data.data.ips.length) {{
+                        resultDiv.innerHTML = '<p style="color:red;">无可用CDN IP</p>';
+                        btn.disabled = false;
+                        btn.textContent = '开始测速';
+                        return;
+                    }}
+                    const ips = data.data.ips;
+                    resultDiv.innerHTML = '<p style="color:#666;">正在测试 ' + ips.length + ' 个CDN IP...</p>';
+                    const results = [];
+                    for (const ip of ips) {{
+                        const start = performance.now();
+                        let ok = false;
+                        try {{
+                            await fetch('https://' + ip + '/', {{
+                                method: 'HEAD', mode: 'no-cors',
+                                signal: AbortSignal.timeout(5000)
+                            }});
+                            ok = true;
+                        }} catch(e) {{ ok = false; }}
+                        const latency = Math.round(performance.now() - start);
+                        results.push({{ip: ip, latency: latency, ok: ok}});
+                    }}
+                    results.sort((a, b) => a.latency - b.latency);
+                    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+                    html += '<tr style="background:#e8f4fd;"><th style="padding:6px;border:1px solid #ddd;">IP</th><th style="padding:6px;border:1px solid #ddd;">延时</th><th style="padding:6px;border:1px solid #ddd;">状态</th></tr>';
+                    for (const r of results) {{
+                        const color = r.ok ? (r.latency < 200 ? 'green' : 'orange') : 'red';
+                        html += '<tr><td style="padding:4px;border:1px solid #ddd;">' + r.ip + '</td>';
+                        html += '<td style="padding:4px;border:1px solid #ddd;color:' + color + ';">' + (r.ok ? r.latency + 'ms' : '超时') + '</td>';
+                        html += '<td style="padding:4px;border:1px solid #ddd;color:' + color + ';">' + (r.ok ? '可用' : '不可用') + '</td></tr>';
+                    }}
+                    html += '</table>';
+                    // 回传结果到服务器
+                    try {{
+                        await fetch('/api/cdn-test', {{
+                            method: 'POST',
+                            headers: {{'Content-Type': 'application/json'}},
+                            body: JSON.stringify(results)
+                        }});
+                    }} catch(e) {{}}
+                    resultDiv.innerHTML = html;
+                }} catch(e) {{
+                    resultDiv.innerHTML = '<p style="color:red;">测试失败: ' + e.message + '</p>';
+                }}
+                btn.disabled = false;
+                btn.textContent = '开始测速';
+            }}
+            </script>
         </body>
         </html>
         """.format(
@@ -1402,7 +1861,8 @@ def create_app():
         sub_text = '\n'.join(links)
         sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
         traffic = get_traffic_stats()
-        userinfo = f"upload=0; download={traffic['bytes_used']}; total=-1; expire=0"
+        total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
+        userinfo = f"upload=0; download={traffic['bytes_used']}; total={total_bytes}; expire=0"
         return Response(sub_b64, mimetype='text/plain',
                         headers={'subscription-userinfo': userinfo})
 
@@ -1416,12 +1876,37 @@ def create_app():
         config = generate_singbox_config()
         config_json = json.dumps(config, indent=2, ensure_ascii=False)
         traffic = get_traffic_stats()
-        userinfo = f"upload=0; download={traffic['bytes_used']}; total=-1; expire=0"
+        total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
+        userinfo = f"upload=0; download={traffic['bytes_used']}; total={total_bytes}; expire=0"
         return Response(
             config_json,
-            mimetype='application/json',
+            mimetype='application/json; charset=utf-8',
             headers={
                 'Content-Disposition': 'attachment; filename=singbox-config.json',
+                'subscription-userinfo': userinfo
+            }
+        )
+
+    @app.route(f'/clash/{COUNTRY_CODE}')
+    @app.route(f'/clash/{COUNTRY_CODE.lower()}')
+    @app.route('/clash')
+    def get_clash_config():
+        """Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
+        ⚠️ 禁止加token认证！同/sub路由，直接访问。
+        ⚠️ Clash Meta v1.18.0+ 支持 Reality 协议
+        """
+        import yaml
+        config = generate_clash_config()
+        config_yaml = yaml.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        traffic = get_traffic_stats()
+        bytes_used = traffic['bytes_used']
+        total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
+        userinfo = f"upload=0; download={bytes_used}; total={total_bytes}; expire=0"
+        sub_name = f"{get_country_name()}订阅.yaml"
+        return Response(
+            config_yaml,
+            mimetype='text/plain; charset=utf-8',
+            headers={
                 'subscription-userinfo': userinfo
             }
         )
@@ -1574,7 +2059,212 @@ def create_app():
             if conn:
                 conn.close()
 
+    # v4.5 浏览器端CDN延时测试API
+    @app.route('/api/cdn-test', methods=['GET', 'POST'])
+    def cdn_test_api():
+        """
+        浏览器端CDN延时测试
+        GET: 返回CDN IP池列表供浏览器测试
+        POST: 接收浏览器端测试结果，写入评分数据库
+        """
+        if request.method == 'GET':
+            conn = None
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM cdn_settings WHERE key='cdn_ips_list'")
+                row = cursor.fetchone()
+                ips = parse_cdn_ips_list(row[0]) if row and row[0] else []
+                return jsonify({
+                    'code': 200,
+                    'data': {'ips': ips, 'count': len(ips)},
+                    'msg': 'success'
+                })
+            except Exception as e:
+                return jsonify({'code': 500, 'data': {}, 'msg': str(e)}), 500
+            finally:
+                if conn:
+                    conn.close()
+
+        # POST: 接收浏览器端测试结果
+        data = request.get_json(silent=True)
+        if not data or not isinstance(data, list):
+            return jsonify({'code': 400, 'data': {}, 'msg': '需要IP测试结果列表'}), 400
+
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            saved = 0
+            for item in data:
+                ip = str(item.get('ip', '')).strip()
+                latency = item.get('latency', -1)
+                ok = item.get('ok', False)
+                if not ip or latency < 0:
+                    continue
+                # 写入测试历史
+                now = datetime.now().isoformat()
+                cursor.execute(
+                    "INSERT INTO ip_test_history (ip, latency, success, test_time) VALUES (?, ?, ?, ?)",
+                    (ip, latency if ok else None, 1 if ok else 0, now)
+                )
+                # 更新性能数据
+                cursor.execute("SELECT * FROM ip_performance WHERE ip = ?", (ip,))
+                row = cursor.fetchone()
+                if row:
+                    total = row[1] + 1
+                    success_cnt = row[2] + (1 if ok else 0)
+                    fail_cnt = row[3] + (0 if ok else 1)
+                    consec_fails = (row[4] + 1) if not ok else 0
+                    old_avg = row[5]
+                    old_success_cnt = row[2]
+                    if ok and latency is not None:
+                        new_avg = (old_avg * old_success_cnt + latency) / (old_success_cnt + 1)
+                    else:
+                        new_avg = old_avg
+                    min_lat = min(row[6], latency) if ok and latency is not None else row[6]
+                    max_lat = max(row[7], latency) if ok and latency is not None else row[7]
+                    last_success = now if ok else row[9]
+                    cursor.execute("""
+                        UPDATE ip_performance SET
+                            total_tests=?, success_count=?, fail_count=?,
+                            consecutive_fails=?, avg_latency=?, min_latency=?,
+                            max_latency=?, last_test_time=?, last_success_time=?
+                        WHERE ip=?
+                    """, (total, success_cnt, fail_cnt, consec_fails, new_avg,
+                          min_lat, max_lat, now, last_success, ip))
+                else:
+                    cursor.execute("""
+                        INSERT INTO ip_performance
+                        (ip, total_tests, success_count, fail_count, consecutive_fails,
+                         avg_latency, min_latency, max_latency, last_test_time,
+                         last_success_time, first_seen, source)
+                        VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (ip, 1 if ok else 0, 0 if ok else 1, 0 if ok else 1,
+                          latency if ok else 0, latency if ok else 9999,
+                          latency if ok else 0, now, now if ok else None, now, 'browser'))
+                saved += 1
+            conn.commit()
+            return jsonify({
+                'code': 200,
+                'data': {'saved': saved},
+                'msg': 'success'
+            })
+        except Exception as e:
+            logger.error(f"CDN测试结果保存失败: {e}")
+            return jsonify({'code': 500, 'data': {}, 'msg': str(e)}), 500
+        finally:
+            if conn:
+                conn.close()
+
+    # ==================== v4.6 CDN故障自愈状态查询 ====================
+    _failover_controller = None
+    _health_monitor = None
+
+    @app.route('/api/cdn-status', methods=['GET'])
+    def cdn_status_api():
+        """
+        CDN健康状态查询
+        返回当前CDN IP的健康状态、冷却池、切换历史
+        """
+        nonlocal _failover_controller, _health_monitor
+
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+
+            # 获取各协议当前CDN IP
+            protocols = {
+                'vless-ws': 'vless_ws_cdn_ip',
+                'vless-httpupgrade': 'vless_upgrade_cdn_ip',
+                'trojan-ws': 'trojan_ws_cdn_ip',
+            }
+            current_ips = {}
+            for name, key in protocols.items():
+                cursor.execute("SELECT value FROM cdn_settings WHERE key=?", (key,))
+                row = cursor.fetchone()
+                current_ips[name] = row[0] if row else None
+
+            # 获取IP池
+            cursor.execute("SELECT value FROM cdn_settings WHERE key='cdn_ips_list'")
+            row = cursor.fetchone()
+            pool = parse_cdn_ips_list(row[0]) if row and row[0] else []
+
+            # 健康检查每个当前IP
+            health_checks = {}
+            if _health_monitor is None:
+                try:
+                    from cdn_quality_filter import CdnHealthMonitor
+                    _health_monitor = CdnHealthMonitor(db_path=DB_PATH)
+                except Exception:
+                    pass
+
+            if _health_monitor:
+                for name, ip in current_ips.items():
+                    if ip:
+                        health_checks[name] = _health_monitor.check_ip(ip)
+
+            # 故障切换控制器状态
+            failover_status = None
+            if _failover_controller:
+                failover_status = _failover_controller.get_status()
+
+            # 冷却池IP
+            cooldown_ips = [c['ip'] for c in failover_status['cooldown_pool']] if failover_status else []
+
+            return jsonify({
+                'code': 200,
+                'data': {
+                    'current_ips': current_ips,
+                    'health_checks': health_checks,
+                    'pool_total': len(pool),
+                    'pool_available': len([ip for ip in pool if ip not in cooldown_ips]),
+                    'cooldown_ips': cooldown_ips,
+                    'failover': failover_status,
+                },
+                'msg': 'success'
+            })
+        except Exception as e:
+            logger.error(f"CDN状态查询失败: {e}")
+            return jsonify({'code': 500, 'data': {}, 'msg': str(e)}), 500
+        finally:
+            if conn:
+                conn.close()
+
+    # ==================== v4.6.1 直连节点配置优化 ====================
+    @app.route('/api/direct-optimize', methods=['GET'])
+    def direct_optimize_api():
+        """
+        基于用户网络特征优化REALITY直连节点配置
+        测试不同SNI的TLS握手速度，给出最优SNI和TCP调优建议
+        """
+        try:
+            from direct_quality_filter import DirectNodeQualityFilter
+            dqf = DirectNodeQualityFilter(db_path=DB_PATH, ddns_domain=USER_DDNS_DOMAIN)
+
+            # 获取用户网络探测结果
+            user_probe = None
+            try:
+                from cdn_quality_filter import CdnQualityFilter
+                cqf = CdnQualityFilter(db_path=DB_PATH, ddns_domain=USER_DDNS_DOMAIN)
+                user_probe = cqf.probe_user_network()
+            except Exception:
+                pass
+
+            result = dqf.optimize_reality_config(user_probe)
+
+            return jsonify({
+                'code': 200,
+                'data': result,
+                'msg': 'success'
+            })
+        except Exception as e:
+            logger.error(f"直连优化失败: {e}")
+            return jsonify({'code': 500, 'data': {}, 'msg': str(e)}), 500
+
     return app
+
 
 if __name__ == '__main__':
     init_db()

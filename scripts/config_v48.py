@@ -385,7 +385,7 @@ CERT_VALIDITY_DAYS = 365
 
 # ============ 用户DDNS锚点配置（v4.5 区域化CDN优选）============
 # 用户DDNS域名（锚定用户位置和网络环境，服务器通过此域名感知用户网络状态）
-USER_DDNS_DOMAIN = os.getenv('USER_DDNS_DOMAIN', '') or _load_env_value('USER_DDNS_DOMAIN', '')
+USER_DDNS_DOMAIN = os.getenv('USER_DDNS_DOMAIN', '').strip()
 
 # 用户预期运营商（用于验证DDNS解析结果是否合理，如：电信/联通/移动）
 USER_EXPECTED_ISP = os.getenv('USER_EXPECTED_ISP', '电信').strip()
@@ -404,10 +404,10 @@ HUNAN_CT_OPTIMAL_PREFIXES = [
 
 # CDN IP硬淘汰阈值：不达标的IP直接淘汰，不进评分（严格标准，全自动无感切换）
 CDN_IP_HARD_REJECT = {
-    'latency_ms': 500,           # VPS→CF延时超过500ms直接淘汰（CDN回源延迟100-200ms正常，不能设太低）
-    'user_path_latency_ms': 500, # 通过CDN到用户路径延时超过500ms直接淘汰
+    'latency_ms': 100,           # VPS→CF延时超过100ms直接淘汰
+    'user_path_latency_ms': 100, # 通过CDN到用户路径延时超过100ms直接淘汰
     'packet_loss_rate': 0.1,     # 丢包率超过10%直接淘汰
-    'download_speed_mbps': 5,    # 下载速度低于5Mbps直接淘汰
+    'download_speed_mbps': 20,   # 下载速度低于20Mbps直接淘汰
 }
 
 # ============ CDN故障自愈配置（v4.6 多级回退）============

@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.3.9 | **更新**: 2026-05-22
+**版本**: v4.10.11 | **更新**: 2026-05-30
 
 ---
 
@@ -11,13 +11,20 @@
 |------|------|------|
 | singbox | ✅ | 代理内核，5个入站协议 |
 | singbox-sub | ✅ | HTTPS订阅服务，端口2087 |
-| singbox-cdn | ✅ | CDN优选IP学习系统（v4.3.9 阻断检测+多C段分散） |
+| singbox-cdn | ✅ | CDN优选IP学习系统（v4.10.2 评分排序筛选+订阅联动） |
 
 ### 核心功能
 - ✅ 5个代理协议：VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
-- ✅ CDN优选IP：v4.3.9 阻断检测+多C段分散（403/1020拦截检测+自动替换+IP池10-15个/服务器+冷却机制）
+- ✅ CDN三模式优选：CDN_MODE（ip_optimized/domain_optimized/domain_default），v4.8替代旧布尔配置
+- ✅ CDN优选IP：v4.8确认优选IP+正确SNI完全可用（纠正v4.7误判），TLS握手验证+SNI=CF_DOMAIN
+- ✅ CDN优选域名：v4.8新增domain_optimized模式，支持icook.hk/cf.090227.xyz等第三方优选域名自动测速
+- ✅ CDN三网自动匹配：v4.9根据DDNS识别用户运营商，自动调090227/001315对应API获取专属IP池
+- ✅ CDN多维度端到端测速：v4.9真实HTTPS测速（延迟+下载速度+丢包率），替代旧TCP连接测试
+- ✅ CDN简化综合评分：v4.10移除无效维度，只保留VPS→CDN延迟(40%)+速度(30%)+稳定性(30%)
+- ✅ CDN优先本地IP：v4.10排序逻辑改为来源优先（你投喂的PREFERRED_IPS排最前）→评分→延迟
 - ✅ CDN每小时自动更新：cdn_monitor.py while循环 + 进程锁防重复
-- ✅ CDN IP自动同步：cdn_monitor写数据库 → subscription_service实时读取 → 用户更新订阅即可
+- ✅ CDN IP自动同步：cdn_monitor写数据库+信号文件 → subscription_service检测信号清缓存 → 用户更新订阅即可
+- ✅ CDN IP评分排序筛选：存活≠质量好，按评分排序取Top N，高延迟IP自动淘汰
 - ✅ CDN纠错机制：subscription_service.py TCP连通检测（3秒超时），连不上自动换IP，10分钟缓存+15分钟冷却
 - ✅ 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
 - ✅ 存活检测：TCP端口连通性测试（3秒超时），不代替用户判断延迟质量
@@ -29,7 +36,7 @@
 - ✅ 故障转移：AI-SOCKS5不可用时自动fallback到direct
 - ✅ HY2端口跳跃：21000-21200→443，UDP+TCP双协议
 - ✅ SSL证书：fullchain.pem优先，降级cert.pem
-- ✅ `.env` 兼容读取：优先 `python-dotenv`，降级时兼容历史行内注释格式
+- ✅ `.env` 兼容读取：优先 `python-dotenv`，降级时兼容历史行内注释格式；config.py关键配置用os.getenv()+_load_env_value()双重读取
 - ✅ DNS配置已迁移到 sing-box 新格式，不再依赖 `ENABLE_DEPRECATED_*` 兼容开关
 - ✅ sing-box JSON 默认关闭 FakeIP，避免 TUN 模式下 `ping <1ms` 这类假延迟误导判断
 - ✅ 按月流量统计：iptables内核级计数器，持久化、重启不丢失
@@ -37,6 +44,9 @@
 - ✅ 旧面板彻底卸载：x-ui/marzban/3x-ui
 - ✅ 一键诊断脚本：diagnose.sh 18项检查
 - ✅ sing-box 1.13.9 完全兼容
+- ✅ CDN故障自愈：CdnHealthMonitor+CdnFailoverController，健康监控+自动切换+IP冷却+降级直连
+- ✅ 直连节点筛选：DirectNodeQualityFilter类，五维评分+硬淘汰，支持REALITY直连评估
+- ✅ 三网最优优选：THREE_ISP_OPTIMAL_PREFIXES+probe_three_networks，九维评分体系
 
 ### CDN优选IP学习系统（v4.1 存活优先模式）
 **核心理念：现有IP存活则不换，死亡才替换 + 用户反馈驱动**
@@ -150,6 +160,9 @@
 39. config.py必须定义所有被其他文件引用的变量，缺少定义会导致ImportError或NameError（Bug #83）
 40. install.sh禁止硬编码API Token/密码/密钥，必须从环境变量传入或交互式输入，否则推GitHub会泄露（Bug #84）
 41. singbox-cdn的systemd服务必须用Restart=on-failure而非Restart=always，因为cdn_monitor检测到已有实例运行时会正常退出(exit 0)，Restart=always会导致死循环重启。同时crontab中禁止加systemctl restart singbox-cdn（Bug #85）
+42. CDN→Google测速不影响用户体验，用户真实链路=用户→CDN→服务器，不应纳入评分（v4.10教训）
+43. 获取IP时不应强制过滤IP段，应先全部获取→测速筛选→反复不好的再淘汰，让数据说话（v4.10教训）
+44. 评分维度必须全部有效，无效维度等于白算且拉低区分度。v4.9五维评分3个维度白算（CDN→Google全0、ISP匹配全50、速度大量0），实际有效维度仅35%（v4.10教训）
 
 ---
 

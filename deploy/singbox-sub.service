@@ -1,0 +1,25 @@
+[Unit]
+Description=sing-box Subscription Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/singbox-eps-node
+EnvironmentFile=/root/singbox-eps-node/.env
+
+# 启动前清理：杀掉占用端口的残留进程，释放端口
+# 注意：不能用 pkill -f "subscription_service.py"，因为 pkill 命令行本身包含该字符串，会杀掉自己
+ExecStartPre=/bin/bash -c 'PID=$(fuser -k 2087/tcp 2>/dev/null) && [ -n "$PID" ] && echo "清理端口占用 PID=$PID" || true'
+ExecStartPre=/bin/sleep 2
+
+ExecStart=/usr/bin/python3 scripts/subscription_service.py
+Restart=always
+RestartSec=5
+
+# 日志
+StandardOutput=append:/var/log/subscription_service.log
+StandardError=append:/var/log/subscription_service.log
+
+[Install]
+WantedBy=multi-user.target

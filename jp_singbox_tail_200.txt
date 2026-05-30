@@ -1,0 +1,200 @@
++0800 2026-05-30 21:44:54 INFO [4283943830 153ms] inbound/vless[vless-upgrade]: inbound connection from 175.10.213.63:13036
++0800 2026-05-30 21:44:54 INFO [1768351915 156ms] inbound/vless[vless-ws]: inbound connection from 175.10.213.63:10867
++0800 2026-05-30 21:44:54 INFO [2014890089 155ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9732
++0800 2026-05-30 21:44:54 INFO [1447889343 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10224
++0800 2026-05-30 21:44:54 INFO [575601774 152ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13270
++0800 2026-05-30 21:44:54 INFO [631282951 332ms] inbound/vless[vless-upgrade]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:54 INFO [631282951 332ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:54 INFO [4283943830 314ms] inbound/vless[vless-upgrade]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:54 INFO [4283943830 314ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [3281619089 154ms] inbound/vless[vless-ws]: inbound connection from 175.10.213.63:10489
++0800 2026-05-30 21:44:55 INFO [1256392066 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12685
++0800 2026-05-30 21:44:55 INFO [575601774 294ms] inbound/trojan[trojan-ws]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [575601774 294ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [1768351915 331ms] inbound/vless[vless-ws]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [1768351915 331ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [1447889343 392ms] inbound/trojan[trojan-ws]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [1447889343 392ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [2014890089 432ms] inbound/trojan[trojan-ws]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [2014890089 432ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [1256392066 425ms] inbound/trojan[trojan-ws]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [1256392066 425ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [3281619089 698ms] inbound/vless[vless-ws]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:55 INFO [3281619089 698ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:56 INFO [258715190 0ms] inbound/vless[vless-reality]: inbound connection from 175.10.213.63:57392
++0800 2026-05-30 21:44:56 INFO [2755693116 1.98s] inbound/vless[vless-reality]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:56 INFO [2755693116 1.98s] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:56 INFO [258715190 293ms] inbound/vless[vless-reality]: [0] inbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:44:56 INFO [258715190 293ms] outbound/direct[direct]: outbound connection to cp.cloudflare.com:80
++0800 2026-05-30 21:45:09 INFO [2945835000 157ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12771
++0800 2026-05-30 21:45:09 INFO [2945835000 448ms] inbound/trojan[trojan-ws]: [0] inbound connection to optimizationguide-pa.googleapis.com:443
++0800 2026-05-30 21:45:09 INFO [2945835000 448ms] outbound/direct[direct]: outbound connection to optimizationguide-pa.googleapis.com:443
++0800 2026-05-30 21:45:09 INFO [3665066032 159ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11377
++0800 2026-05-30 21:45:09 INFO [3665066032 326ms] inbound/trojan[trojan-ws]: [0] inbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:09 INFO [3665066032 326ms] outbound/direct[direct]: outbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:09 INFO [3250231422 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11893
++0800 2026-05-30 21:45:09 INFO [3679366046 154ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9724
++0800 2026-05-30 21:45:09 INFO [3006530548 157ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11384
++0800 2026-05-30 21:45:09 INFO [294276009 152ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12698
++0800 2026-05-30 21:45:09 INFO [3250231422 294ms] inbound/trojan[trojan-ws]: [0] inbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:09 INFO [3250231422 294ms] outbound/direct[direct]: outbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:09 INFO [3317831615 148ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11662
++0800 2026-05-30 21:45:09 INFO [3006530548 308ms] inbound/trojan[trojan-ws]: [0] inbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:09 INFO [3006530548 308ms] outbound/direct[direct]: outbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:10 INFO [294276009 367ms] inbound/trojan[trojan-ws]: [0] inbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:10 INFO [294276009 368ms] outbound/direct[direct]: outbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:10 INFO [3679366046 447ms] inbound/trojan[trojan-ws]: [0] inbound connection to aplus.qwen.ai:443
++0800 2026-05-30 21:45:10 INFO [3679366046 447ms] outbound/direct[direct]: outbound connection to aplus.qwen.ai:443
++0800 2026-05-30 21:45:10 INFO [3317831615 432ms] inbound/trojan[trojan-ws]: [0] inbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:10 INFO [3317831615 432ms] outbound/direct[direct]: outbound connection to pbs.twimg.com:443
++0800 2026-05-30 21:45:12 INFO [3882057602 172ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9924
++0800 2026-05-30 21:45:12 INFO [4027802982 157ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9730
++0800 2026-05-30 21:45:12 INFO [3882057602 447ms] inbound/trojan[trojan-ws]: [0] inbound connection to abs.twimg.com:443
++0800 2026-05-30 21:45:12 INFO [3882057602 447ms] outbound/direct[direct]: outbound connection to abs.twimg.com:443
++0800 2026-05-30 21:45:12 INFO [3584009401 155ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12088
++0800 2026-05-30 21:45:12 INFO [4027802982 445ms] inbound/trojan[trojan-ws]: [0] inbound connection to abs.twimg.com:443
++0800 2026-05-30 21:45:12 INFO [4027802982 445ms] outbound/direct[direct]: outbound connection to abs.twimg.com:443
++0800 2026-05-30 21:45:12 INFO [3584009401 373ms] inbound/trojan[trojan-ws]: [0] inbound connection to abs.twimg.com:443
++0800 2026-05-30 21:45:12 INFO [3584009401 373ms] outbound/direct[direct]: outbound connection to abs.twimg.com:443
++0800 2026-05-30 21:45:14 INFO [4221010136 190ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9925
++0800 2026-05-30 21:45:14 INFO [4221010136 478ms] inbound/trojan[trojan-ws]: [0] inbound connection to ads-api.x.com:443
++0800 2026-05-30 21:45:14 INFO [4221010136 478ms] outbound/direct[direct]: outbound connection to ads-api.x.com:443
++0800 2026-05-30 21:45:22 INFO [967228035 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12206
++0800 2026-05-30 21:45:22 INFO [967228035 334ms] inbound/trojan[trojan-ws]: [0] inbound connection to video.twimg.com:443
++0800 2026-05-30 21:45:22 INFO [967228035 334ms] outbound/direct[direct]: outbound connection to video.twimg.com:443
++0800 2026-05-30 21:45:25 INFO [941883425 150ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13656
++0800 2026-05-30 21:45:26 INFO [941883425 395ms] inbound/trojan[trojan-ws]: [0] inbound connection to fansone.co:443
++0800 2026-05-30 21:45:26 INFO [941883425 395ms] outbound/direct[direct]: outbound connection to fansone.co:443
++0800 2026-05-30 21:45:38 INFO [978791276 138ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12070
++0800 2026-05-30 21:45:38 INFO [978791276 289ms] inbound/trojan[trojan-ws]: [0] inbound connection to discovery-v6-1.verysync.cn:443
++0800 2026-05-30 21:45:38 INFO [978791276 289ms] outbound/direct[direct]: outbound connection to discovery-v6-1.verysync.cn:443
++0800 2026-05-30 21:45:42 INFO [4017206799 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:14095
++0800 2026-05-30 21:45:43 INFO [4017206799 425ms] inbound/trojan[trojan-ws]: [0] inbound connection to challenges.cloudflare.com:443
++0800 2026-05-30 21:45:43 INFO [4017206799 425ms] outbound/direct[direct]: outbound connection to challenges.cloudflare.com:443
++0800 2026-05-30 21:45:43 ERROR [978791276 5.29s] connection: open connection to discovery-v6-1.verysync.cn:443 using outbound/direct[direct]: dial tcp [2a01:4f8:10b:35ee::103]:443: i/o timeout
++0800 2026-05-30 21:45:44 INFO [3716864931 154ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:14208
++0800 2026-05-30 21:45:44 INFO [3716864931 450ms] inbound/trojan[trojan-ws]: [0] inbound connection to challenges.cloudflare.com:443
++0800 2026-05-30 21:45:44 INFO [3716864931 450ms] outbound/direct[direct]: outbound connection to challenges.cloudflare.com:443
++0800 2026-05-30 21:46:04 INFO [3534914587 0ms] inbound/vless[vless-reality]: inbound connection from 172.70.206.157:14076
++0800 2026-05-30 21:46:04 ERROR [3534914587 239ms] inbound/vless[vless-reality]: process connection from 172.70.206.157:14076: TLS handshake: REALITY: processed invalid connection
++0800 2026-05-30 21:46:24 INFO [869281104 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13205
++0800 2026-05-30 21:46:24 INFO [658226582 7ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10439
++0800 2026-05-30 21:46:24 INFO [869281104 174ms] inbound/trojan[trojan-ws]: [0] inbound connection to 149.154.171.255:80
++0800 2026-05-30 21:46:24 INFO [869281104 174ms] outbound/direct[direct]: outbound connection to 149.154.171.255:80
++0800 2026-05-30 21:46:24 INFO [658226582 178ms] inbound/trojan[trojan-ws]: [0] inbound connection to 149.154.171.255:443
++0800 2026-05-30 21:46:24 INFO [658226582 178ms] outbound/direct[direct]: outbound connection to 149.154.171.255:443
++0800 2026-05-30 21:46:26 INFO [821649769 154ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:14204
++0800 2026-05-30 21:46:26 INFO [1701712547 8ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12052
++0800 2026-05-30 21:46:26 INFO [821649769 298ms] inbound/trojan[trojan-ws]: [0] inbound connection to video.twimg.com:443
++0800 2026-05-30 21:46:26 INFO [821649769 298ms] outbound/direct[direct]: outbound connection to video.twimg.com:443
++0800 2026-05-30 21:46:26 INFO [1701712547 178ms] inbound/trojan[trojan-ws]: [0] inbound connection to video.twimg.com:443
++0800 2026-05-30 21:46:26 INFO [1701712547 178ms] outbound/direct[direct]: outbound connection to video.twimg.com:443
++0800 2026-05-30 21:46:37 INFO [1590588344 149ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10538
++0800 2026-05-30 21:46:38 INFO [1590588344 380ms] inbound/trojan[trojan-ws]: [0] inbound connection to identity.bitwarden.com:443
++0800 2026-05-30 21:46:38 INFO [1590588344 380ms] outbound/direct[direct]: outbound connection to identity.bitwarden.com:443
++0800 2026-05-30 21:46:40 INFO [2865096518 152ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12768
++0800 2026-05-30 21:46:40 INFO [2865096518 298ms] inbound/trojan[trojan-ws]: [0] inbound connection to notifications.bitwarden.com:443
++0800 2026-05-30 21:46:40 INFO [2865096518 298ms] outbound/direct[direct]: outbound connection to notifications.bitwarden.com:443
++0800 2026-05-30 21:46:51 INFO [3024400910 155ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12672
++0800 2026-05-30 21:46:51 INFO [3024400910 768ms] inbound/trojan[trojan-ws]: [0] inbound connection to twitterxdownload.com:443
++0800 2026-05-30 21:46:51 INFO [3024400910 768ms] outbound/direct[direct]: outbound connection to twitterxdownload.com:443
++0800 2026-05-30 21:46:53 INFO [1355389965 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12676
++0800 2026-05-30 21:46:53 INFO [1355389965 758ms] inbound/trojan[trojan-ws]: [0] inbound connection to discovery-v6-1.verysync.cn:443
++0800 2026-05-30 21:46:53 INFO [1355389965 758ms] outbound/direct[direct]: outbound connection to discovery-v6-1.verysync.cn:443
++0800 2026-05-30 21:46:55 INFO [3041285453 7ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9378
++0800 2026-05-30 21:46:55 INFO [2860162418 149ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9871
++0800 2026-05-30 21:46:55 INFO [3041285453 157ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:55 INFO [3041285453 157ms] outbound/direct[direct]: outbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:55 INFO [3547951669 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:14242
++0800 2026-05-30 21:46:55 INFO [2860162418 308ms] inbound/trojan[trojan-ws]: [0] inbound connection to mtalk.google.com:5228
++0800 2026-05-30 21:46:55 INFO [2860162418 308ms] outbound/direct[direct]: outbound connection to mtalk.google.com:5228
++0800 2026-05-30 21:46:55 INFO [3991479549 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11732
++0800 2026-05-30 21:46:55 INFO [328806202 7ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10561
++0800 2026-05-30 21:46:55 INFO [3547951669 170ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:55 INFO [3547951669 170ms] outbound/direct[direct]: outbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:55 INFO [669293502 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12349
++0800 2026-05-30 21:46:55 INFO [3262064992 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10763
++0800 2026-05-30 21:46:55 INFO [328806202 167ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:55 INFO [328806202 167ms] outbound/direct[direct]: outbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:55 INFO [3991479549 362ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:55 INFO [3991479549 362ms] outbound/direct[direct]: outbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:55 INFO [4230751968 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13105
++0800 2026-05-30 21:46:55 INFO [825832118 153ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10371
++0800 2026-05-30 21:46:55 INFO [669293502 300ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:55 INFO [669293502 300ms] outbound/direct[direct]: outbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:55 INFO [4230751968 318ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:55 INFO [4230751968 318ms] outbound/direct[direct]: outbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:55 INFO [3262064992 389ms] inbound/trojan[trojan-ws]: [0] inbound connection to mtalk.google.com:5228
++0800 2026-05-30 21:46:55 INFO [3262064992 389ms] outbound/direct[direct]: outbound connection to mtalk.google.com:5228
++0800 2026-05-30 21:46:55 INFO [825832118 316ms] inbound/trojan[trojan-ws]: [0] inbound connection to mtalk.google.com:5228
++0800 2026-05-30 21:46:55 INFO [825832118 316ms] outbound/direct[direct]: outbound connection to mtalk.google.com:5228
++0800 2026-05-30 21:46:56 INFO [4166118705 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12666
++0800 2026-05-30 21:46:56 INFO [1968625801 159ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11791
++0800 2026-05-30 21:46:56 INFO [1968625801 358ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:56 INFO [1968625801 358ms] outbound/direct[direct]: outbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:56 INFO [1764963588 8ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13346
++0800 2026-05-30 21:46:56 INFO [1764963588 171ms] inbound/trojan[trojan-ws]: [0] inbound connection to client.wns.windows.com:443
++0800 2026-05-30 21:46:56 INFO [1764963588 171ms] outbound/direct[direct]: outbound connection to client.wns.windows.com:443
++0800 2026-05-30 21:46:57 INFO [565665241 156ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10048
++0800 2026-05-30 21:46:57 INFO [4166118705 560ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:57 INFO [4166118705 561ms] outbound/direct[direct]: outbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:57 INFO [565665241 315ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:57 INFO [565665241 315ms] outbound/direct[direct]: outbound connection to 91.108.56.191:443
++0800 2026-05-30 21:46:58 INFO [358009288 474ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12401
++0800 2026-05-30 21:46:59 ERROR [1355389965 6.10s] connection: open connection to discovery-v6-1.verysync.cn:443 using outbound/direct[direct]: dial tcp [2a01:4f8:10b:35ee::103]:443: i/o timeout
++0800 2026-05-30 21:46:59 INFO [358009288 1.8s] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.191:80
++0800 2026-05-30 21:46:59 INFO [358009288 1.8s] outbound/direct[direct]: outbound connection to 91.108.56.191:80
++0800 2026-05-30 21:47:03 INFO [3015424928 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10459
++0800 2026-05-30 21:47:03 INFO [440606240 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12254
++0800 2026-05-30 21:47:04 INFO [3015424928 167ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.144:443
++0800 2026-05-30 21:47:04 INFO [3015424928 167ms] outbound/direct[direct]: outbound connection to 91.108.56.144:443
++0800 2026-05-30 21:47:04 INFO [440606240 163ms] inbound/trojan[trojan-ws]: [0] inbound connection to 91.108.56.144:80
++0800 2026-05-30 21:47:04 INFO [440606240 163ms] outbound/direct[direct]: outbound connection to 91.108.56.144:80
++0800 2026-05-30 21:47:27 INFO [3632368823 0ms] inbound/hysteria2[hysteria2]: inbound connection from 175.10.213.63:5779
++0800 2026-05-30 21:47:27 INFO [3632368823 0ms] inbound/hysteria2[hysteria2]: inbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:27 INFO [3632368823 0ms] outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:27 INFO [2626693108 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13338
++0800 2026-05-30 21:47:27 INFO [2633910697 151ms] inbound/vless[vless-ws]: inbound connection from 175.10.213.63:10078
++0800 2026-05-30 21:47:28 INFO [2626693108 267ms] inbound/trojan[trojan-ws]: [0] inbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:28 INFO [2626693108 267ms] outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:28 INFO [2069016003 214ms] inbound/vless[vless-upgrade]: inbound connection from 175.10.213.63:12093
++0800 2026-05-30 21:47:28 INFO [2633910697 449ms] inbound/vless[vless-ws]: [0] inbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:28 INFO [2633910697 449ms] outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:29 INFO [2069016003 1.34s] inbound/vless[vless-upgrade]: [0] inbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:29 INFO [2069016003 1.34s] outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0800 2026-05-30 21:47:30 INFO [389179956 0ms] inbound/vless[vless-reality]: inbound connection from 175.10.213.63:55052
++0800 2026-05-30 21:47:32 ERROR [389179956 1.88s] inbound/vless[vless-reality]: process connection from 175.10.213.63:55052: TLS handshake: REALITY: processed invalid connection
++0800 2026-05-30 21:47:56 INFO [1334562580 142ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11862
++0800 2026-05-30 21:47:56 INFO [1334562580 389ms] inbound/trojan[trojan-ws]: [0] inbound connection to 172.18.0.1:1900
++0800 2026-05-30 21:47:56 INFO [1334562580 389ms] outbound/block[block]: blocked connection to 172.18.0.1:1900
++0800 2026-05-30 21:47:56 ERROR [1334562580 389ms] connection: open connection to 172.18.0.1:1900 using outbound/block[block]: operation not permitted
++0800 2026-05-30 21:48:01 INFO [3941599028 154ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:10525
++0800 2026-05-30 21:48:01 INFO [3941599028 353ms] inbound/trojan[trojan-ws]: [0] inbound connection to ipwho.is:443
++0800 2026-05-30 21:48:01 INFO [3941599028 353ms] outbound/direct[direct]: outbound connection to ipwho.is:443
++0800 2026-05-30 21:48:01 INFO [524825739 156ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13113
++0800 2026-05-30 21:48:02 INFO [524825739 450ms] inbound/trojan[trojan-ws]: [0] inbound connection to fansone.co:443
++0800 2026-05-30 21:48:02 INFO [524825739 450ms] outbound/direct[direct]: outbound connection to fansone.co:443
++0800 2026-05-30 21:48:02 INFO [1270976496 6ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11368
++0800 2026-05-30 21:48:02 INFO [1270976496 280ms] inbound/trojan[trojan-ws]: [0] inbound connection to get.geojs.io:443
++0800 2026-05-30 21:48:02 INFO [1270976496 280ms] outbound/direct[direct]: outbound connection to get.geojs.io:443
++0800 2026-05-30 21:48:03 INFO [3444363216 149ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13183
++0800 2026-05-30 21:48:03 INFO [2280612408 5ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:11224
++0800 2026-05-30 21:48:03 INFO [3444363216 430ms] inbound/trojan[trojan-ws]: [0] inbound connection to api.ipapi.is:443
++0800 2026-05-30 21:48:03 INFO [3444363216 430ms] outbound/direct[direct]: outbound connection to api.ipapi.is:443
++0800 2026-05-30 21:48:03 INFO [2280612408 201ms] inbound/trojan[trojan-ws]: [0] inbound connection to ip.api.skk.moe:443
++0800 2026-05-30 21:48:03 INFO [2280612408 201ms] outbound/direct[direct]: outbound connection to ip.api.skk.moe:443
++0800 2026-05-30 21:48:04 INFO [3938007436 151ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:13561
++0800 2026-05-30 21:48:04 INFO [3938007436 451ms] inbound/trojan[trojan-ws]: [0] inbound connection to ip.api.skk.moe:443
++0800 2026-05-30 21:48:04 INFO [3938007436 451ms] outbound/direct[direct]: outbound connection to ip.api.skk.moe:443
++0800 2026-05-30 21:48:06 INFO [1512237975 10ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:9719
++0800 2026-05-30 21:48:06 INFO [1512237975 226ms] inbound/trojan[trojan-ws]: [0] inbound connection to 172.18.0.200:37215
++0800 2026-05-30 21:48:06 INFO [1512237975 226ms] outbound/block[block]: blocked connection to 172.18.0.200:37215
++0800 2026-05-30 21:48:06 ERROR [1512237975 226ms] connection: open connection to 172.18.0.200:37215 using outbound/block[block]: operation not permitted
++0800 2026-05-30 21:48:07 INFO [1430204816 7ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:14225
++0800 2026-05-30 21:48:07 INFO [1430204816 274ms] inbound/trojan[trojan-ws]: [0] inbound connection to 172.18.0.1:1900
++0800 2026-05-30 21:48:07 INFO [1430204816 274ms] outbound/block[block]: blocked connection to 172.18.0.1:1900
++0800 2026-05-30 21:48:07 ERROR [1430204816 274ms] connection: open connection to 172.18.0.1:1900 using outbound/block[block]: operation not permitted
++0800 2026-05-30 21:48:08 INFO [4188846939 7ms] inbound/trojan[trojan-ws]: inbound connection from 175.10.213.63:12925
++0800 2026-05-30 21:48:09 INFO [4188846939 311ms] inbound/trojan[trojan-ws]: [0] inbound connection to discovery-v6-1.verysync.cn:443
++0800 2026-05-30 21:48:09 INFO [4188846939 311ms] outbound/direct[direct]: outbound connection to discovery-v6-1.verysync.cn:443
++0800 2026-05-30 21:48:14 ERROR [4188846939 5.31s] connection: open connection to discovery-v6-1.verysync.cn:443 using outbound/direct[direct]: dial tcp [2a01:4f8:10b:35ee::103]:443: i/o timeout

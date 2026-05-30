@@ -1,0 +1,131 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+  - https://8.8.8.8/dns-query
+  - https://1.1.1.1/dns-query
+  fallback:
+  - https://dns.alidns.com/dns-query
+  fallback-filter:
+    geoip: true
+    ipcidr:
+    - 240.0.0.0/4
+proxies:
+- name: JP-VLESS-Reality
+  type: vless
+  server: 52.195.179.240
+  port: 443
+  uuid: 6268fac9-6867-40eb-a048-c41963ef9144
+  tls: true
+  udp: true
+  network: tcp
+  flow: xtls-rprx-vision
+  multiplex:
+    enabled: false
+  reality-opts:
+    public-key: S8TwkhlGoIKKOgbUcgeQ_Pn0-aeHS3zUPUmOaFMC3Fg
+    short-id: abcd1234
+  client-fingerprint: chrome
+  servername: www.apple.com
+- name: JP-VLESS-WS
+  type: vless
+  server: 162.159.46.86
+  port: 8443
+  uuid: ebfd4bb8-9b96-4712-a71e-20cd5a8af178
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  servername: jp.290372913.xyz
+  ws-opts:
+    path: /vless-ws
+    headers:
+      Host: jp.290372913.xyz
+  client-fingerprint: chrome
+  skip-cert-verify: true
+- name: JP-VLESS-HTTPUpgrade
+  type: vless
+  server: 162.159.46.54
+  port: 2053
+  uuid: ebfd4bb8-9b96-4712-a71e-20cd5a8af178
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  servername: jp.290372913.xyz
+  ws-opts:
+    path: /vless-upgrade
+    headers:
+      Host: jp.290372913.xyz
+    v2ray-http-upgrade: true
+  client-fingerprint: chrome
+  skip-cert-verify: true
+- name: JP-Trojan-WS
+  type: trojan
+  server: 162.159.34.125
+  port: 2083
+  password: GgJL4cIGLWiDwwkp
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  sni: jp.290372913.xyz
+  ws-opts:
+    path: /trojan-ws
+    headers:
+      Host: jp.290372913.xyz
+  client-fingerprint: chrome
+  skip-cert-verify: true
+  alpn:
+  - http/1.1
+- name: JP-Hysteria2
+  type: hysteria2
+  server: 52.195.179.240
+  port: 443
+  password: m80xUFUU6TUsQyZU
+  udp: true
+  sni: www.apple.com
+  skip-cert-verify: true
+  obfs: salamander
+  obfs-password: m80xUFUU
+  ports: 443,21000-21200
+  up: 200
+  down: 200
+proxy-groups:
+- name: JP-节点选择
+  type: select
+  proxies:
+  - JP-自动选择
+  - JP-VLESS-Reality
+  - JP-VLESS-WS
+  - JP-VLESS-HTTPUpgrade
+  - JP-Trojan-WS
+  - JP-Hysteria2
+- name: JP-自动选择
+  type: url-test
+  proxies:
+  - JP-VLESS-Reality
+  - JP-VLESS-WS
+  - JP-VLESS-HTTPUpgrade
+  - JP-Trojan-WS
+  - JP-Hysteria2
+  url: https://www.gstatic.com/generate_204
+  interval: 600
+  tolerance: 150
+  lazy: true
+  expected_status:
+  - 200
+  - 204
+  - 301
+  - 302
+rules:
+- GEOIP,CN,DIRECT
+- MATCH,JP-节点选择

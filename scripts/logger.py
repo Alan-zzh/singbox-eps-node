@@ -20,7 +20,7 @@ LOG_FILE = os.path.join(LOG_DIR, 'singbox.log')
 MAX_LOG_SIZE = 50 * 1024 * 1024  # 50MB
 BACKUP_COUNT = 2  # 保留2个备份
 
-def setup_logger(name, log_file=None, level=logging.INFO):
+def setup_logger(name, log_file=None, level=logging.DEBUG):
     """创建日志记录器，带自动滚动功能"""
     if log_file is None:
         log_file = LOG_FILE

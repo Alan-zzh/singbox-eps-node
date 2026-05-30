@@ -1,0 +1,174 @@
+=== 服务器 generate_clash_config() ===
+        "server": vless_upgrade_addr,
+        "port": VLESS_UPGRADE_PORT,
+        "uuid": VLESS_WS_UUID,
+        "tls": True,
+        "udp": True,
+        "network": "ws",
+        "multiplex": {
+            "enabled": False
+        },
+        "servername": cdn_sni,
+        "ws-opts": {
+            "path": "/vless-upgrade",
+            "headers": {"Host": cdn_sni},
+            "v2ray-http-upgrade": True
+        },
+        "client-fingerprint": "chrome",
+        "skip-cert-verify": True
+    })
+    
+    # 4. Trojan-WS (CDN) - Clash Meta支持
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-Trojan-WS",
+        "type": "trojan",
+        "server": trojan_ws_addr,
+        "port": TROJAN_WS_PORT,
+        "password": TROJAN_PASSWORD,
+        "udp": True,
+        "network": "ws",
+        "multiplex": {
+            "enabled": False
+        },
+        "sni": cdn_sni,
+        "ws-opts": {
+            "path": "/trojan-ws",
+            "headers": {"Host": cdn_sni}
+        },
+        "client-fingerprint": "chrome",
+        "skip-cert-verify": True,
+        "alpn": ["http/1.1"]
+    })
+    
+    # 5. Hysteria2 (直连) - Clash Meta支持
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-Hysteria2",
+        "type": "hysteria2",
+        "server": SERVER_IP,
+        "port": 443,
+        "password": HYSTERIA2_PASSWORD,
+        "udp": True,
+        "sni": REALITY_SNI,
+        "skip-cert-verify": True,
+        "obfs": "salamander",
+        "obfs-password": HYSTERIA2_PASSWORD[:8],
+        "ports": "443,21000-21200",
+        "up": 200,
+        "down": 200
+    })
+    
+    proxy_names = [p["name"] for p in proxies]
+    
+    config = {
+        "mixed-port": 7890,
+        "allow-lan": False,
+        "mode": "rule",
+        "log-level": "info",
+        "dns": {
+            "enable": True,
+            "listen": "0.0.0.0:1053",
+            "enhanced-mode": "fake-ip",
+            "fake-ip-range": "198.18.0.1/16",
+            "nameserver": [
+                "https://8.8.8.8/dns-query",
+                "https://1.1.1.1/dns-query"
+            ],
+            "fallback": [
+                "https://dns.alidns.com/dns-query"
+            ],
+            "fallback-filter": {
+                "geoip": True,
+                "ipcidr": ["240.0.0.0/4"]
+            }
+        },
+        "proxies": proxies,
+        "proxy-groups": [
+            {
+                "name": f"{COUNTRY_CODE}-节点选择",
+                "type": "select",
+                "proxies": [f"{COUNTRY_CODE}-自动选择"] + proxy_names
+            },
+            {
+                "name": f"{COUNTRY_CODE}-自动选择",
+                "type": "url-test",
+                "proxies": proxy_names,
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": 600,
+                "tolerance": 150,
+                "lazy": True,
+                "expected_status": [200, 204, 301, 302]
+            }
+        ],
+        "rules": [
+            "GEOIP,CN,DIRECT",
+            "MATCH,{}".format(f"{COUNTRY_CODE}-节点选择")
+        ]
+    }
+    
+    return config
+
+
+def create_app():
+    """创建Flask应用"""
+    from flask import Flask, Response, jsonify, request
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def home():
+        # 获取当月流量统计
+        traffic = get_traffic_stats()
+        traffic_display = format_traffic(traffic['bytes_used'])
+
+        html = """
+        <html>
+        <head>
+            <title>Singbox订阅服务</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
+                h1 {{ color: #333; }}
+                .sub-box {{ background: #f5f5f5; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                .sub-link {{ font-size: 18px; color: #0066cc; word-break: break-all; }}
+                .info {{ color: #666; font-size: 14px; }}
+                .traffic-box {{ background: #e8f4fd; padding: 20px; border-radius: 10px; margin: 20px 0; border: 1px solid #b3d9f2; }}
+                .traffic-value {{ font-size: 28px; color: #0066cc; font-weight: bold; }}
+                .traffic-label {{ color: #666; font-size: 14px; margin-top: 5px; }}
+            </style>
+        </head>
+        <body>
+            <h1>Singbox 订阅服务</h1>
+            <div class="traffic-box">
+                <p><strong>当月流量统计</strong></p>
+                <p class="traffic-value">{traffic_display}</p>
+                <p class="traffic-label">统计月份：{month} | 每月{reset_day}号自动归零 | 上次重置：{last_reset}</p>
+            </div>
+            <div class="sub-box">
+                <p><strong>Base64订阅链接：</strong></p>
+                <p class="sub-link">https://{server}:{port}/sub/{country}</p>
+                <p class="info">（包含5个节点：{country}-VLESS-Reality、{country}-VLESS-WS、{country}-VLESS-HTTPUpgrade、{country}-Trojan-WS、{country}-Hysteria2）</p>
+            </div>
+            <div class="sub-box">
+                <p><strong>sing-box JSON配置（含自动路由）：</strong></p>
+                <p class="sub-link">https://{server}:{port}/singbox/{country}</p>
+
+
+=== 所有Clash引用 ===
+1334:                # selector类型允许后续手动切换（如通过Clash API），
+1507:            "clash_api": {
+1518:def generate_clash_config():
+1519:    """生成Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
+1521:    ⚠️ Clash Meta v1.18.0+ 支持 VLESS-Reality 协议
+1522:    Clash Verge Rev 内置 mihomo 内核，完全支持所有协议
+1552:    # 1. VLESS-Reality (直连) - Clash Meta v1.18.0+ 支持
+1574:    # 2. VLESS-WS (CDN) - Clash Meta支持
+1596:    # 3. VLESS-HTTPUpgrade (CDN) - Clash Meta通过ws-opts.v2ray-http-upgrade启用
+1619:    # 4. Trojan-WS (CDN) - Clash Meta支持
+1641:    # 5. Hysteria2 (直连) - Clash Meta支持
+1890:    @app.route(f'/clash/{COUNTRY_CODE}')
+1891:    @app.route(f'/clash/{COUNTRY_CODE.lower()}')
+1892:    @app.route('/clash')
+1893:    def get_clash_config():
+1894:        """Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
+1896:        ⚠️ Clash Meta v1.18.0+ 支持 Reality 协议
+1899:        config = generate_clash_config()
+

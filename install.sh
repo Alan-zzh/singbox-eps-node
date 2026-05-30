@@ -218,6 +218,40 @@ net.ipv4.tcp_fastopen_blackhole_timeout_sec=0"
     sysctl -p 2>/dev/null || true
     log_info "BBR+FQ+CAKE三合一加速已启用（即时生效，无需重启）"
 
+    # ============ 新增：内存与系统服务优化 ============
+    log_info "【系统优化】限制 journald 日志大小（防止日志堆积占满磁盘/内存）..."
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > /etc/systemd/journald.conf.d/size-limit.conf << 'JEOF'
+[Journal]
+SystemMaxUse=50M
+RuntimeMaxUse=20M
+MaxRetentionSec=7day
+Compress=yes
+JEOF
+    journalctl --vacuum-size=50M 2>/dev/null || true
+    systemctl restart systemd-journald 2>/dev/null || true
+    log_info "journald 日志限制为 50MB（永久生效，自动轮转覆盖）"
+
+    log_info "【系统优化】禁用不必要的系统服务（释放 ~30MB 内存）..."
+    for svc in networkd-dispatcher irqbalance apport apparmor rsyslog; do
+        if systemctl is-enabled "$svc" 2>/dev/null | grep -q enabled; then
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            log_info "  已禁用: $svc"
+        fi
+    done
+
+    log_info "【系统优化】启用 systemd 服务启动前端口清理..."
+    # 确保 singbox-sub.service 有 ExecStartPre 端口清理（在 setup_subscription_service 中添加）
+    # 这里只做通用优化：限制 conntrack 超时
+    grep -q "^net.netfilter.nf_conntrack_tcp_timeout_established=" /etc/sysctl.conf 2>/dev/null || \
+        echo "net.netfilter.nf_conntrack_tcp_timeout_established=432000" >> /etc/sysctl.conf
+    grep -q "^nf_conntrack_max=" /etc/sysctl.conf 2>/dev/null || \
+        echo "net.netfilter.nf_conntrack_max=1048576" >> /etc/sysctl.conf
+    sysctl -p 2>/dev/null || true
+    log_info "conntrack 连接跟踪已优化（支持 100 万并发连接）"
+    # ============ 优化结束 ============
+
     if ! grep -q "65535" /etc/security/limits.conf 2>/dev/null; then
         log_info "【阶段1-步骤4/4】提升文件描述符限制到65535..."
         cat >> /etc/security/limits.conf << 'EOF'
@@ -402,8 +436,8 @@ clone_repo() {
 setup_python_env() {
     log_step "配置Python环境..."
     cd "$BASE_DIR"
-    pip3 install --break-system-packages --quiet flask python-dotenv 2>/dev/null || pip3 install --quiet flask python-dotenv 2>/dev/null || apt-get install -y -qq python3-flask python3-dotenv 2>/dev/null || true
-    log_info "Python依赖已安装（flask + python-dotenv）"
+    pip3 install --break-system-packages --quiet flask python-dotenv pyyaml 2>/dev/null || pip3 install --quiet flask python-dotenv pyyaml 2>/dev/null || apt-get install -y -qq python3-flask python3-dotenv python3-yaml 2>/dev/null || true
+    log_info "Python依赖已安装（flask + python-dotenv + pyyaml）"
 }
 
 generate_uuids_and_passwords() {
@@ -501,6 +535,23 @@ create_env_file() {
     else
         log_info "跳过AI住宅代理配置（后续可手动编辑.env）"
     fi
+    # v4.5 用户DDNS锚点配置
+    if [ "${AUTO_YES:-0}" != "1" ]; then
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  用户DDNS域名配置（v4.5 区域化CDN优选）${NC}"
+        echo -e "${CYAN}  提供DDNS域名后，服务器可感知你的网络位置和质量${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -p "  用户DDNS域名（留空跳过）: " USER_DDNS_DOMAIN
+        if [ -n "$USER_DDNS_DOMAIN" ]; then
+            read -p "  用户预期运营商（默认：电信）: " USER_EXPECTED_ISP
+            USER_EXPECTED_ISP=${USER_EXPECTED_ISP:-电信}
+            log_info "DDNS锚点已配置: ${USER_DDNS_DOMAIN} (${USER_EXPECTED_ISP})"
+        else
+            USER_DDNS_DOMAIN=""
+            USER_EXPECTED_ISP="电信"
+        fi
+    fi
     CF_DOMAIN_INPUT="${CF_DEFAULT_DOMAIN}"
     CF_API_TOKEN_INPUT="${CF_DEFAULT_API_TOKEN}"
     if [ -f "$BASE_DIR/.env" ]; then
@@ -548,6 +599,12 @@ AI_SOCKS5_PASS=${AI_SOCKS5_PASS}
 AI_SOCKS5_ROUTING=${AI_SOCKS5_ROUTING}
 TG_BOT_TOKEN=
 TG_ADMIN_CHAT_ID=
+
+# ============ 用户DDNS锚点（v4.5 区域化CDN优选）============
+USER_DDNS_DOMAIN=${USER_DDNS_DOMAIN}
+USER_EXPECTED_ISP=${USER_EXPECTED_ISP:-电信}
+USER_PROBE_INTERVAL=300
+USER_LATENCY_SPIKE_THRESHOLD=0.5
 EOF
     chmod 600 "$BASE_DIR/.env"
     log_info ".env 已创建 (服务器IP: ${SERVER_IP:-未检测到，请手动填写})"

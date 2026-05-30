@@ -1,0 +1,15 @@
+[Unit]
+Description=sing-box Health Monitor & Alert
+After=singbox-sub.service
+Wants=singbox-sub.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/singbox-eps-node
+EnvironmentFile=/root/singbox-eps-node/.env
+ExecStart=/usr/bin/python3 scripts/health_monitor.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

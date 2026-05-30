@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.3.9`
+**当前版本**: `v4.10.10`
 
 这个项目的目标很简单：
 
@@ -17,7 +17,8 @@
 2. [AI_DEBUG_HISTORY.md](AI_DEBUG_HISTORY.md)
 3. [CHANGELOG.md](CHANGELOG.md)
 4. [VERSION.md](VERSION.md)
-5. [TECHNICAL_DOC.md](TECHNICAL_DOC.md)
+5. [AGENTS.md](AGENTS.md) — 项目级 AI 规则：Clash 订阅生成铁律、部署纪律
+6. [TECHNICAL_DOC.md](TECHNICAL_DOC.md)
 
 ## 文档分工
 
@@ -30,9 +31,11 @@
 - [CHANGELOG.md](CHANGELOG.md)
   正式更新日志，只写“这次版本改了什么”。
 - [VERSION.md](VERSION.md)
-  当前项目版本号，供脚本和接手排查时统一参考。
+   当前项目版本号，供脚本和接手排查时统一参考。
+- [AGENTS.md](AGENTS.md)
+   AI 行为铁律。Clash 订阅生成规范、部署纪律、防踩坑规则。
 - [TECHNICAL_DOC.md](TECHNICAL_DOC.md)
-  全量技术说明，包含架构、协议、配置、部署、诊断、编码铁律。
+   全量技术说明，包含架构、协议、配置、部署、诊断、编码铁律。
 
 ## 快速安装
 
@@ -53,8 +56,8 @@ bash install.sh optimize     # 只做系统优化（BBR + FQ-PIE/CAKE）
 
 - 5 协议：VLESS-Reality / VLESS-WS / VLESS-HTTPUpgrade / Trojan-WS / Hysteria2
 - HTTPS 订阅：Base64 + sing-box JSON
-- CDN 优选 IP 自动维护（IP 池 10-15 个/服务器，多 C 段分散）
-- CDN 阻断自动检测与切换（403/1020 拦截检测 + 冷却机制）
+- CDN 优选 IP 自动维护（IP 池 10-15 个/服务器，多 C 段分散，按评分排序淘汰高延迟IP，订阅自动同步优选IP）
+- CDN 阻断自动检测与切换（403/1020 拦截检测 + 冷却机制 + 信号文件联动订阅刷新）
 - 健康检查 + 一键诊断
 - 按月流量统计
 - 可选 AI SOCKS5 分流
