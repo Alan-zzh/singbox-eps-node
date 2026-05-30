@@ -1662,17 +1662,27 @@ def generate_clash_config():
         "allow-lan": False,
         "mode": "rule",
         "log-level": "info",
+        "ipv6": False,
+        "tcp-concurrent": True,
+        "unified-delay": True,
+        "keep-alive-interval": 15,
         "dns": {
             "enable": True,
             "listen": "0.0.0.0:1053",
             "enhanced-mode": "fake-ip",
             "fake-ip-range": "198.18.0.1/16",
+            "default-nameserver": [
+                "223.5.5.5",
+                "119.29.29.29"
+            ],
             "nameserver": [
-                "https://8.8.8.8/dns-query",
-                "https://1.1.1.1/dns-query"
+                "223.5.5.5",
+                "119.29.29.29",
+                "https://dns.alidns.com/dns-query"
             ],
             "fallback": [
-                "https://dns.alidns.com/dns-query"
+                "https://dns.google/dns-query",
+                "https://cloudflare-dns.com/dns-query"
             ],
             "fallback-filter": {
                 "geoip": True,

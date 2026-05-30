@@ -1,5 +1,22 @@
 # AI 调试历史与防Bug规则 (AI Debug History)
 
+## 最新排查（2026-05-31）
+
+### Clash 极致性能压榨与爱快保活调优 [OpenCode]
+- **现象**: 用户在自动选择和正常使用下，遇到断连和卡顿。
+- **根因**: 
+  1. 爱快（iKuai）路由器等普通 NAT 路由器的连接追踪表会将无流量的连接在 63 秒内过期剔除，导致后台连接（如推特 DM / WebSockets）无感中断，随后的回包由于无端口映射直接被丢弃（表现为 40% 丢包率）。
+  2. Clash DNS 的 nameserver 错误配置为 Google/Cloudflare DOH（已被国内屏蔽/强污染），在解析国内直连流量时产生长达数秒的超时延迟，严重拖慢整体浏览体验。
+  3. 电信用户的国际 IPv6 路由极其劣质，若开启 IPv6 会触发路由黑洞导致卡死。
+- **修复**:
+  1. 新增 `keep-alive-interval: 15`（15s 物理保活包），解决爱快路由器 63s 硬件断连暗刺。
+  2. nameserver 改用国内阿里/腾讯近源 DNS（支持 DOH），国内页面直接秒开。
+  3. 增加 `default-nameserver` 避免 DOH 自解析死锁，设置 `ipv6: false` 规避路由黑洞。
+  4. 开启 `tcp-concurrent: true` 并发，`unified-delay: true` 测量精准可用延迟。
+- **教训**: 
+  1. 必须根据用户的本地网络设备特征（如 iKuai NAT）专门加入物理保活参数。
+  2. nameserver 不能硬套国外安全 DNS，国内流量解析必须用最快的本地近源 DNS 组合，国外流量则通过 fake-ip 委托远端代理节点解析。
+
 ## 最新排查（2026-05-30）
 
 ### Clash MATCH 规则指向 url-test 导致手动选择无效 [OpenCode]

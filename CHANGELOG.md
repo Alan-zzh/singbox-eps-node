@@ -1,6 +1,17 @@
 # CHANGELOG
 
-## v4.10.10 - 2026-05-30
+## v4.10.12 - 2026-05-31
+
+- [OpenCode] Clash 极致性能压榨：
+  - `keep-alive-interval: 15`：15秒 TCP 物理保活，强行霸占爱快（iKuai）路由器 NAT 映射，彻底解决 63s 超时断连问题
+  - `tcp-concurrent: true`：开启并发 TCP 连接，多 IP 并行试探，直连网页秒开
+  - `unified-delay: true`：统一延迟算法，测速显示真实代理损耗
+  - `ipv6: false`：客户端彻底禁用 IPv6，规避国内运营商劣质国际 IPv6 路由黑洞
+- [OpenCode] Clash DNS 架构重构：
+  - nameserver 改为阿里 DNS DOH + 腾讯 DNS 物理极速组合，国内解析体验提升上百倍
+  - 新增 `default-nameserver` 配置，解决 DOH 域名自解析死锁导致的 DNS 卡死
+
+## v4.10.11 - 2026-05-30
 
 - [OpenCode] 修复 Clash MATCH 规则指向错误：`MATCH,自动选择` → `MATCH,节点选择`
 - [OpenCode] 策略组重构：`手动选择` 改为 `节点选择`(select)，包含 `自动选择` + 所有单节点
