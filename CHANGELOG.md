@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v4.10.13 - 2026-05-31
+
+- [Qoder] 修复 Clash url-test 配置回退导致的自动选择闪断问题：
+  - `interval: 600→60`：恢复 60 秒测速间隔，1 分钟内发现故障节点
+  - `lazy: true→false`：恢复后台持续测速，不再锁死坏节点
+  - `url: https://www.gstatic.com→http://cp.cloudflare.com`：改用 HTTP 避免 TLS 握手损耗
+  - 新增 `timeout: 5000`：5 秒超时快速判定节点故障
+  - 修复文件：server_clash_jp.yaml + server_subscription_service.py
+  - 根因：v4.10.9 错误修改导致 Clash 首次测速后停止后台测速，Reality 节点丢包 20-40% 时无法快速切换
+
 ## v4.10.12 - 2026-05-31
 
 - [OpenCode] Clash 极致性能压榨：

@@ -1690,10 +1690,11 @@ def generate_clash_config():
                 "name": f"{COUNTRY_CODE}-自动选择",
                 "type": "url-test",
                 "proxies": proxy_names,
-                "url": "https://www.gstatic.com/generate_204",
-                "interval": 600,
+                "url": "http://cp.cloudflare.com/generate_204",
+                "interval": 60,
                 "tolerance": 150,
-                "lazy": True,
+                "lazy": False,
+                "timeout": 5000,
                 "expected_status": [200, 204, 301, 302]
             }
         ],
