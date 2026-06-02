@@ -2,8 +2,8 @@
 """
 Singbox CDN优选IP学习系统
 Author: Alan
-Version: v4.3.5
-Date: 2026-05-07
+Version: v4.10.18
+Date: 2026-06-01
 
 架构设计：用户投喂 + 自动验证 + 历史评分 = 持续优化的CDN优选系统
 
@@ -92,7 +92,7 @@ try:
 except ImportError:
     def get_logger(name):
         import logging
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.INFO)
         return logging.getLogger(name)
     SERVER_IP = ''
     CF_DOMAIN = ''
@@ -157,17 +157,17 @@ DOH_SERVERS = [
 
 IPDB_API_URL = CDN_API_IPDB
 
-# [TRAE SOLO CN] v4.10.6 用户路径+三网均衡评分权重
-SCORE_VPS_CDN_WEIGHT = 0.15
-SCORE_VPS_SPEED_WEIGHT = 0.15
-SCORE_USER_PATH_LAT_WEIGHT = 0.25
-SCORE_USER_PATH_SPEED_WEIGHT = 0.25
-SCORE_CROSS_ISP_WEIGHT = 0.15
+# [TRAE SOLO CN] v4.10.16 用户路径优先评分权重
+SCORE_VPS_CDN_WEIGHT = 0.10
+SCORE_VPS_SPEED_WEIGHT = 0.10
+SCORE_USER_PATH_LAT_WEIGHT = 0.35
+SCORE_USER_PATH_SPEED_WEIGHT = 0.35
+SCORE_CROSS_ISP_WEIGHT = 0.05
 SCORE_STABILITY_WEIGHT = 0.05
 SCORE_VPS_CDN_WEIGHT_FALLBACK = 0.25
 SCORE_VPS_SPEED_WEIGHT_FALLBACK = 0.25
-SCORE_CROSS_ISP_WEIGHT_FALLBACK = 0.30
-SCORE_STABILITY_WEIGHT_FALLBACK = 0.20
+SCORE_CROSS_ISP_WEIGHT_FALLBACK = 0.20
+SCORE_STABILITY_WEIGHT_FALLBACK = 0.30
 CROSS_ISP_TELECOM_WEIGHT = 0.45
 CROSS_ISP_UNICOM_WEIGHT = 0.35
 CROSS_ISP_MOBILE_WEIGHT = 0.20
@@ -216,10 +216,9 @@ def init_db():
             cursor.execute("ALTER TABLE ip_performance ADD COLUMN speed_mbps REAL DEFAULT 0.0")
         except Exception:
             pass  # 列已存在，忽略
-        # v4.9 新增：CDN→Google延迟+速度+运营商匹配度+新评分
+        # v4.10.20 评分维度精简：只保留 user_isp_match + composite_score_v2
+        # google_latency_ms / google_speed_mbps 已废弃（数值永远 0，无评分贡献）
         for col_sql in [
-            "ALTER TABLE ip_performance ADD COLUMN google_latency_ms REAL DEFAULT 0",
-            "ALTER TABLE ip_performance ADD COLUMN google_speed_mbps REAL DEFAULT 0",
             "ALTER TABLE ip_performance ADD COLUMN user_isp_match REAL DEFAULT 0",
             "ALTER TABLE ip_performance ADD COLUMN composite_score_v2 REAL DEFAULT 0",
         ]:
@@ -227,6 +226,20 @@ def init_db():
                 cursor.execute(col_sql)
             except Exception:
                 pass
+        # v4.10.20 一次性 DROP 废弃列（SQLite 3.35+ 支持）
+        for drop_sql in [
+            "ALTER TABLE ip_performance DROP COLUMN google_latency_ms",
+            "ALTER TABLE ip_performance DROP COLUMN google_speed_mbps",
+        ]:
+            try:
+                cursor.execute(drop_sql)
+            except Exception:
+                pass  # 列不存在或 SQLite 版本太低，忽略
+        # v4.10.20 切换到 WAL 模式（多进程并发零阻塞）
+        try:
+            cursor.execute("PRAGMA journal_mode = WAL")
+        except Exception:
+            pass
         # v3.0 新增：每次测试的详细记录表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ip_test_history (
@@ -348,6 +361,7 @@ def probe_user_network(db_path):
     # [TRAE SOLO CN] v4.10.6 用户IP可ping通但无443服务，用ICMP代替TCP
     latencies = []
     use_icmp = False
+    packet_loss_rate = 0.0
     try:
         test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         test_sock.settimeout(3)
@@ -428,16 +442,16 @@ def probe_user_network(db_path):
     check_latency = avg_latency
     if avg_latency == 9999 and http_latency:
         check_latency = http_latency
-    if use_icmp and avg_latency > USER_QUALITY_THRESHOLD['latency_ms'] * 2:
+    if use_icmp and avg_latency < 9999 and avg_latency > USER_QUALITY_THRESHOLD['latency_ms']:
         quality_ok = False
-        logger.warning(f"  ⚠️ ICMP延时{avg_latency:.0f}ms超过阈值{USER_QUALITY_THRESHOLD['latency_ms']*2:.0f}ms")
+        logger.warning(f"  ⚠️ ICMP链路延时{avg_latency:.0f}ms超过阈值{USER_QUALITY_THRESHOLD['latency_ms']}ms")
     elif not use_icmp and avg_latency < 9999 and avg_latency > USER_QUALITY_THRESHOLD['latency_ms']:
         quality_ok = False
         logger.warning(f"  ⚠️ TCP延时{avg_latency:.0f}ms超过阈值{USER_QUALITY_THRESHOLD['latency_ms']}ms")
     elif avg_latency == 9999 and http_latency and http_latency > USER_QUALITY_THRESHOLD['latency_ms'] * 3:
         quality_ok = False
         logger.warning(f"  ⚠️ CDN回源延时{http_latency:.0f}ms超过阈值{USER_QUALITY_THRESHOLD['latency_ms']*3:.0f}ms")
-    if not use_icmp and avg_latency < 9999 and packet_loss_rate > USER_QUALITY_THRESHOLD['packet_loss_rate']:
+    if avg_latency < 9999 and packet_loss_rate > USER_QUALITY_THRESHOLD['packet_loss_rate']:
         quality_ok = False
         logger.warning(f"  ⚠️ 丢包率{packet_loss_rate*100:.0f}%超过阈值{USER_QUALITY_THRESHOLD['packet_loss_rate']*100:.0f}%")
 
@@ -744,11 +758,17 @@ def calculate_cross_isp_score(ip):
     优先使用三网API缓存数据，降级使用前缀表匹配
     三网都优质→100, 两网→80, 单网→60, 都不在→50
     权重：电信0.45+联通0.35+移动0.20
+    [TRAE SOLO CN] v4.10.18 增加C段前缀匹配，解决anycast IP精确匹配失败问题
     """
+    ip_prefix = '.'.join(ip.split('.')[:3])
     if _three_isp_cache:
         matched_isps = []
         for isp_key, ip_set in _three_isp_cache.items():
             if ip in ip_set:
+                matched_isps.append(isp_key)
+                continue
+            isp_prefixes = set('.'.join(i.split('.')[:3]) for i in ip_set)
+            if ip_prefix in isp_prefixes:
                 matched_isps.append(isp_key)
         if len(matched_isps) >= 3:
             base_score = 100
@@ -1025,8 +1045,8 @@ def select_best_domain(domains, port=443):
 
 def test_user_path_latency(cdn_ip, port=443, timeout=10):
     """
-    [TRAE SOLO CN] v4.9：通过CDN IP做完整HTTPS测速（延迟+速度+丢包）
-    模拟真实客户端: TLS握手(SNI=CF_DOMAIN) + HTTP请求 + 下载速度
+    [TRAE SOLO CN] v4.10.17：通过CDN IP做完整HTTPS测速（延迟+速度+丢包）
+    模拟CDN回源路径: TLS握手(SNI=CF_DOMAIN) + HTTP请求(Host=用户域名) + 下载速度
     返回: {
         'latency_ms': float,       # TLS握手+首字节延迟
         'speed_mbps': float,       # 真实下载速度
@@ -1035,6 +1055,7 @@ def test_user_path_latency(cdn_ip, port=443, timeout=10):
     } 或 None
     """
     sni_host = CF_DOMAIN if CF_DOMAIN else 'cloudflare.com'
+    # [TRAE SOLO CN] v4.10.19 SNI=CF_DOMAIN 仅测TCP+TLS握手延迟，不发HTTP请求（CDN 443端口不提供HTTP服务）
     result = {'latency_ms': 0, 'speed_mbps': 0.0, 'packet_loss_rate': 0.0, 'success': False}
 
     fail_count = 0
@@ -1057,29 +1078,11 @@ def test_user_path_latency(cdn_ip, port=443, timeout=10):
         ctx.verify_mode = ssl.CERT_NONE
         ssock = ctx.wrap_socket(sock, server_hostname=sni_host)
         connect_time = (time.time() - start) * 1000
-
-        request = f"GET / HTTP/1.1\r\nHost: {sni_host}\r\nUser-Agent: {random.choice(RANDOM_USER_AGENTS)}\r\nConnection: close\r\n\r\n"
-        ssock.sendall(request.encode())
-
-        response = b""
-        while b"\r\n\r\n" not in response:
-            chunk = ssock.recv(4096)
-            if not chunk:
-                break
-            response += chunk
-
-        elapsed = (time.time() - start) * 1000
-        result['latency_ms'] = elapsed
-
-        if response:
-            status_line = response.decode('utf-8', errors='ignore').split('\r\n')[0]
-            status_code = status_line.split()[1] if len(status_line.split()) >= 2 else '000'
-            if status_code in ('403', '1020', '1010'):
-                result['success'] = False
-                return result
-
+        result['latency_ms'] = connect_time
         result['success'] = True
-    except ssl.SSLError:
+        logger.debug(f"  CDN测速 {cdn_ip}: SNI={sni_host} TLS握手成功 {connect_time:.1f}ms")
+    except ssl.SSLError as e:
+        logger.debug(f"  CDN测速 {cdn_ip}: SSL握手失败 SNI={sni_host} 错误={e}")
         result['success'] = False
         return result
     except Exception:
@@ -1267,10 +1270,14 @@ def http_latency_test(ip, port=443, timeout=5, test_url=None):
             status_line = response.decode('utf-8', errors='ignore').split('\r\n')[0]
             status_code = status_line.split()[1] if len(status_line.split()) >= 2 else '000'
             
-            # 403/1020/1010 = Cloudflare拦截，标记为不可用（由cdn_monitor替换）
+            # 403/1020/1010 说明已经成功连到 Cloudflare 边缘并收到 HTTP 响应。
+            # 对当前项目的 CDN 候选探测来说，这种状态不能再被当成“IP 死亡”，
+            # 否则会把大量其实可达的候选全部错杀，导致候选池清空、体感上像“CDN 全断”。
+            # 这里保留日志，但视为“可连通、可继续参与排序”，把真正的淘汰交给后续
+            # 用户路径测速和硬淘汰规则去做，而不是在 HTTP 状态码这一层提前清零。
             if status_code in ('403', '1020', '1010'):
-                logger.warning(f"  HTTP测试 {ip} 返回{status_code}，Cloudflare拦截，标记为不可用")
-                return elapsed, False
+                logger.warning(f"  HTTP测试 {ip} 返回{status_code}，Cloudflare受限响应，保留为可达候选")
+                return elapsed, True
         
         if response:
             status_line = response.decode('utf-8', errors='ignore').split('\r\n')[0]
@@ -2108,6 +2115,21 @@ def fetch_cdn_ips():
                     u_lat = user_path_result.get('latency_ms', 0)
                     u_spd = user_path_result.get('speed_mbps', 0)
                     logger.info(f"  {ip} 用户路径: 延迟={u_lat:.1f}ms 速度={u_spd:.1f}Mbps")
+                    if u_lat > CDN_IP_HARD_REJECT['user_path_latency_ms']:
+                        logger.info(f"  {ip} 硬淘汰: 用户路径延时{u_lat:.1f}ms超过{CDN_IP_HARD_REJECT['user_path_latency_ms']}ms")
+                        continue
+                    if user_path_result.get('packet_loss_rate', 0) > CDN_IP_HARD_REJECT['packet_loss_rate']:
+                        logger.info(
+                            f"  {ip} 硬淘汰: 用户路径丢包{user_path_result.get('packet_loss_rate', 0)*100:.0f}%超过"
+                            f"{CDN_IP_HARD_REJECT['packet_loss_rate']*100:.0f}%"
+                        )
+                        continue
+                    if u_spd > 0 and u_spd < CDN_IP_HARD_REJECT['download_speed_mbps']:
+                        logger.info(
+                            f"  {ip} 硬淘汰: 用户路径速度{u_spd:.1f}Mbps低于"
+                            f"{CDN_IP_HARD_REJECT['download_speed_mbps']}Mbps"
+                        )
+                        continue
             
             # [TRAE SOLO CN] v4.10.6 三网均衡度
             cross_isp = calculate_cross_isp_score(ip)
@@ -2249,20 +2271,32 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown'):
 
     db_path = os.path.join(DATA_DIR, 'singbox.db')
 
-    # [TRAE SOLO CN] v4.10.2 按评分排序直接取前3名分配，不再随机
-    # 之前random.sample(Top5,3)导致高延迟IP可能被选中
+    # 这里必须信任 fetch_cdn_ips() 已经产出的顺序。
+    # 上游排序已经综合了用户路径测速、跨运营商和稳定性，不能在这里再用弱化信息重排一次，
+    # 否则会把阶段化测速选出的最优IP换成次优甚至更差的IP。
     if len(ips) >= 3:
+        selected_ips = list(ips[:3])
         scored_ips = []
         for ip in ips:
             perf = get_ip_performance(db_path, ip)
-            score = calculate_composite_score(perf, user_probe_result=user_probe_result,
-                                             isp_type=isp_type) if perf else 50.0
+            score = calculate_composite_score(
+                perf,
+                user_probe_result=user_probe_result,
+                isp_type=isp_type
+            ) if perf else 50.0
             scored_ips.append((ip, score))
-        scored_ips.sort(key=lambda x: -x[1])
-        selected_ips = [ip for ip, score in scored_ips[:3]]
-        logger.info(f"  评分排名: {', '.join(f'{ip}({score:.1f})' for ip, score in scored_ips[:5])}")
+        logger.info(f"  使用上游排序前3名分配: {', '.join(selected_ips)}")
     else:
         selected_ips = list(ips)
+        scored_ips = []
+        for ip in ips:
+            perf = get_ip_performance(db_path, ip)
+            score = calculate_composite_score(
+                perf,
+                user_probe_result=user_probe_result,
+                isp_type=isp_type
+            ) if perf else 50.0
+            scored_ips.append((ip, score))
         while len(selected_ips) < 3:
             selected_ips.append(ips[len(selected_ips) % len(ips)] if ips else '0.0.0.0')
     vless_ws_ip = selected_ips[0]
@@ -2321,6 +2355,20 @@ def health_check(db_path):
     """
     logger.info("\n>>> 定期健康评估开始")
 
+    # [TRAE SOLO CN] v4.10.16 健康评估前刷新三网缓存
+    global _three_isp_cache
+    if not _three_isp_cache:
+        try:
+            ct_ips = fetch_from_090227_ct() + fetch_from_001315_ct()
+            _three_isp_cache['telecom'] = set(ct_ips)
+            cu_ips = fetch_from_090227_cu() + fetch_from_001315_cu()
+            _three_isp_cache['unicom'] = set(cu_ips)
+            cmcc_ips = fetch_from_090227_cmcc() + fetch_from_001315_cmcc()
+            _three_isp_cache['mobile'] = set(cmcc_ips)
+            logger.info(f"  三网缓存已刷新: 电信{len(_three_isp_cache['telecom'])} 联通{len(_three_isp_cache['unicom'])} 移动{len(_three_isp_cache['mobile'])}")
+        except Exception as e:
+            logger.debug(f"  三网缓存刷新失败: {e}")
+
     # v4.9 用户运营商识别
     isp_type = detect_user_isp(db_path)
     logger.info(f"  用户运营商类型: {isp_type}")
@@ -2337,6 +2385,7 @@ def health_check(db_path):
     best_score = 0
     best_ip = None
     evaluated_count = 0
+    hard_reject_hits = []
 
     for ip in current_ips:
         # 完整评估：延迟测试，超时拉长到8秒确保准确
@@ -2355,6 +2404,28 @@ def health_check(db_path):
         user_path_result = None
         if USER_DDNS_DOMAIN:
             user_path_result = test_user_path_latency(cdn_ip=ip, port=443, timeout=15)
+
+        reject_reason = ""
+        if user_path_result and user_path_result.get('success'):
+            user_latency = user_path_result.get('latency_ms', 0) or 0
+            user_speed = user_path_result.get('speed_mbps', 0) or 0
+            user_loss = user_path_result.get('packet_loss_rate', 0) or 0
+            if user_latency > CDN_IP_HARD_REJECT['user_path_latency_ms']:
+                reject_reason = f"用户路径延时{user_latency:.1f}ms超过{CDN_IP_HARD_REJECT['user_path_latency_ms']}ms"
+            elif user_loss > CDN_IP_HARD_REJECT['packet_loss_rate']:
+                reject_reason = (
+                    f"用户路径丢包{user_loss*100:.0f}%超过"
+                    f"{CDN_IP_HARD_REJECT['packet_loss_rate']*100:.0f}%"
+                )
+            elif user_speed > 0 and user_speed < CDN_IP_HARD_REJECT['download_speed_mbps']:
+                reject_reason = (
+                    f"用户路径速度{user_speed:.1f}Mbps低于"
+                    f"{CDN_IP_HARD_REJECT['download_speed_mbps']}Mbps"
+                )
+
+        if reject_reason:
+            hard_reject_hits.append((ip, reject_reason))
+            logger.warning(f"  ⚠️ 健康评估发现当前CDN IP不达标: {ip} {reject_reason}")
 
         # 计算当前评分
         perf = get_ip_performance(db_path, ip)
@@ -2416,6 +2487,12 @@ def health_check(db_path):
 
     # 判断是否需要刷新IP池
     need_refresh = False
+    if hard_reject_hits:
+        need_refresh = True
+        logger.warning(
+            "  ⚠️ 当前CDN IP中存在用户路径不达标节点，触发IP池刷新: "
+            + "; ".join(f"{ip}({reason})" for ip, reason in hard_reject_hits[:5])
+        )
     if last_best_score > 0 and best_score > 0:
         decline_ratio = (last_best_score - best_score) / last_best_score
         if decline_ratio > 0.3:
@@ -2446,6 +2523,27 @@ def health_check(db_path):
         if new_ips:
             assign_and_save_ips(new_ips, isp_type=refresh_isp_type)
             logger.info(f"  IP池刷新完成: {new_ips}")
+
+    # [TRAE SOLO CN] v4.10.18 清理死亡IP记录+VACUUM压缩
+    conn_clean = None
+    try:
+        conn_clean = sqlite3.connect(db_path)
+        cursor_clean = conn_clean.cursor()
+        cursor_clean.execute("SELECT COUNT(*) FROM ip_performance WHERE consecutive_fails > 5 AND composite_score_v2 < 10")
+        dead_count = cursor_clean.fetchone()[0]
+        if dead_count > 0:
+            cursor_clean.execute("DELETE FROM ip_performance WHERE consecutive_fails > 5 AND composite_score_v2 < 10")
+            conn_clean.commit()
+            logger.info(f"  清理死亡IP记录: 删除{dead_count}条 (连续失败>5且评分<10)")
+            cursor_clean.execute("VACUUM")
+            logger.info(f"  数据库VACUUM压缩完成")
+        else:
+            logger.info(f"  无需清理死亡IP记录")
+    except Exception as e:
+        logger.debug(f"  数据库清理失败: {e}")
+    finally:
+        if conn_clean:
+            conn_clean.close()
 
     return best_score
 
@@ -2493,4 +2591,4 @@ if __name__ == '__main__':
             break
         except Exception as e:
             logger.error(f"[ERROR] {e}")
-            time.sleep(60)
+            time.sleep(60)

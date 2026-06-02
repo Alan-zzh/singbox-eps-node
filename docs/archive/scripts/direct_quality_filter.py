@@ -318,12 +318,13 @@ class DirectNodeQualityFilter:
 
         # TCP调优建议（基于用户网络特征）
         tcp_tuning = {
-            'tcp_fast_open': True,           # 开启TFO
+            # 直连闪断排查中已确认，先回退 TFO 更稳妥，避免在高丢包/NAT 抖动场景放大半死连接问题。
+            'tcp_fast_open': False,
             'tcp_multi_path': False,         # MPTCP暂不建议
             'tcp_congestion': 'bbr',         # BBR拥塞控制
             'tcp_window_size': 'auto',       # 自动窗口
             'singbox_sniff': True,           # 开启流量嗅探
-            'singbox_tcp_fast_open': True,    # sing-box TFO
+            'singbox_tcp_fast_open': False,
         }
 
         # 用户路径质量参考

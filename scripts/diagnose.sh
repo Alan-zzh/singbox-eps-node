@@ -439,12 +439,12 @@ check_crontab() {
 }
 
 # ============================================================
-# 13. BBR/FQ/CAKE qdisc 状态
+# 13. BBR/FQ qdisc 状态
 # ============================================================
 check_bbr_qdisc() {
     echo ""
     echo "=========================================="
-    echo "【13/18】BBR/FQ/CAKE qdisc 状态"
+    echo "【13/18】BBR/FQ qdisc 状态"
     echo "=========================================="
 
     CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
@@ -455,10 +455,10 @@ check_bbr_qdisc() {
     fi
 
     QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-    if [ "$QDISC" = "cake" ] || [ "$QDISC" = "fq" ] || [ "$QDISC" = "fq_pie" ]; then
+    if [ "$QDISC" = "fq" ] || [ "$QDISC" = "cake" ] || [ "$QDISC" = "fq_pie" ]; then
         mark_pass "默认队列规则: $QDISC"
     else
-        mark_warn "默认队列规则: ${QDISC:-未设置} (推荐cake/fq_pie/fq)"
+        mark_warn "默认队列规则: ${QDISC:-未设置} (推荐 fq，兼容场景可接受 cake/fq_pie)"
     fi
 
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
@@ -467,9 +467,9 @@ check_bbr_qdisc() {
         if echo "$TC_QDISC" | grep -qi "cake"; then
             mark_pass "网卡 $MAIN_IF qdisc: CAKE"
         elif echo "$TC_QDISC" | grep -qi "fq_pie"; then
-            mark_pass "网卡 $MAIN_IF qdisc: FQ-PIE (CAKE降级方案)"
+            mark_pass "网卡 $MAIN_IF qdisc: FQ-PIE (兼容降级方案)"
         elif echo "$TC_QDISC" | grep -qi "fq"; then
-            mark_warn "网卡 $MAIN_IF qdisc: FQ (可用，但cake/fq_pie更优)"
+            mark_pass "网卡 $MAIN_IF qdisc: FQ (当前项目基线)"
         else
             mark_warn "网卡 $MAIN_IF qdisc: $TC_QDISC"
         fi

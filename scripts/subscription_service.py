@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v4.10.9
-Date: 2026-05-30
+Version: v4.10.18
+Date: 2026-06-01
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -84,7 +84,7 @@ except ImportError:
     HYSTERIA2_PORT = int(os.getenv('HYSTERIA2_PORT', '443'))
     SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '1080'))
     HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
-    REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID', 'abcd1234')
+    REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID') or __import__('secrets').token_hex(8)
     REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
     REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
     AI_SOCKS5_SERVER = os.getenv('AI_SOCKS5_SERVER', '')
@@ -702,6 +702,13 @@ def get_cdn_ip_for_protocol(protocol_key):
                 _ip_switch_fail_count = 0
             return current_ip  # 返回当前IP，不返回None
 
+        # 过滤黑名单IP
+        try:
+            from config import CDN_IP_BLACKLIST
+            blacklist = set(CDN_IP_BLACKLIST)
+        except ImportError:
+            blacklist = set()
+
         # [TRAE SOLO CN] v4.10.2 解析JSON格式的cdn_ips_list（含评分+延迟），按评分选IP
         try:
             ips_data = json.loads(row[0])
@@ -717,13 +724,6 @@ def get_cdn_ip_for_protocol(protocol_key):
             all_ips = [ip.strip() for ip in row[0].split(',') if ip.strip()]
             scored_available = None
 
-        # 过滤黑名单IP
-        try:
-            from config import CDN_IP_BLACKLIST
-            blacklist = set(CDN_IP_BLACKLIST)
-        except ImportError:
-            blacklist = set()
-
         available_ips = [ip for ip in all_ips if ip not in blacklist and ip != current_ip]
 
         if not available_ips:
@@ -738,6 +738,7 @@ def get_cdn_ip_for_protocol(protocol_key):
 
         # [TRAE SOLO CN] v4.10.2 优先按评分选IP，不再随机
         new_ip = None
+        cqf = get_cdn_quality_filter()
         if scored_available:
             new_ip = scored_available[0]['ip']
             logger.info(f"从{len(scored_available)}个候选IP中按评分选择: {new_ip} (score={scored_available[0].get('score',0):.1f})")
@@ -1051,22 +1052,20 @@ def generate_singbox_config():
                     "ePS-Auto-Test",
                     "direct"
                 ],
-                "default": f"{COUNTRY_CODE}-VLESS-Reality"
+                "default": "ePS-Auto-Test"
             },
             # ePS-Auto-Test: 自动测速选优节点（urltest类型，每60秒测速一次）
             {
                 "type": "urltest",
                 "tag": "ePS-Auto-Test",
                 "outbounds": [
-                    f"{COUNTRY_CODE}-VLESS-Reality",
                     f"{COUNTRY_CODE}-VLESS-WS",
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
-                    f"{COUNTRY_CODE}-Hysteria2",
                 ],
                 "interval": "60s",
-                "tolerance": 50,
-                "url": "https://www.google.com/generate_204"
+                "tolerance": 150,
+                "url": "http://cp.cloudflare.com/generate_204"
             },
         ] + ([{
                 # ai-residential: 幕后路由出站，AI网站流量自动走此出站
@@ -1101,9 +1100,6 @@ def generate_singbox_config():
                 "multiplex": {
                     "enabled": False
                 },
-                "tcp_fast_open": True,
-                "tcp_keep_alive": "30s",
-                "tcp_keep_alive_interval": "15s",
                 "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
@@ -1130,9 +1126,6 @@ def generate_singbox_config():
                 "multiplex": {
                     "enabled": False
                 },
-                "tcp_fast_open": True,
-                "tcp_keep_alive": "30s",
-                "tcp_keep_alive_interval": "15s",
                 "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
@@ -1142,7 +1135,7 @@ def generate_singbox_config():
                         "enabled": True,
                         "fingerprint": "chrome"
                     },
-                    "alpn": ["http/1.1"]
+                    "alpn": ["h2", "http/1.1"]
                 },
                 "transport": {
                     "type": "ws",
@@ -1163,9 +1156,6 @@ def generate_singbox_config():
                 "multiplex": {
                     "enabled": False
                 },
-                "tcp_fast_open": True,
-                "tcp_keep_alive": "30s",
-                "tcp_keep_alive_interval": "15s",
                 "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
@@ -1175,7 +1165,7 @@ def generate_singbox_config():
                         "enabled": True,
                         "fingerprint": "chrome"
                     },
-                    "alpn": ["http/1.1"]
+                    "alpn": ["h2", "http/1.1"]
                 },
                 "transport": {
                     "type": "httpupgrade",
@@ -1193,9 +1183,6 @@ def generate_singbox_config():
                 "multiplex": {
                     "enabled": False
                 },
-                "tcp_fast_open": True,
-                "tcp_keep_alive": "30s",
-                "tcp_keep_alive_interval": "15s",
                 "connect_timeout": "5s",
                 "tls": {
                     "enabled": True,
@@ -1205,7 +1192,7 @@ def generate_singbox_config():
                         "enabled": True,
                         "fingerprint": "chrome"
                     },
-                    "alpn": ["http/1.1"]
+                    "alpn": ["h2", "http/1.1"]
                 },
                 "transport": {
                     "type": "ws",
@@ -1236,8 +1223,6 @@ def generate_singbox_config():
                     "type": "salamander",
                     "password": HYSTERIA2_PASSWORD[:8]
                 },
-                "tcp_keep_alive": "30s",
-                "tcp_keep_alive_interval": "15s",
                 "connect_timeout": "5s",
                 "up_mbps": 200,
                 "down_mbps": 200
@@ -1587,7 +1572,8 @@ def generate_clash_config():
         "servername": cdn_sni,
         "ws-opts": {
             "path": "/vless-ws",
-            "headers": {"Host": cdn_sni}
+            "headers": {"Host": cdn_sni},
+            "ping-interval": 90
         },
         "client-fingerprint": "chrome",
         "skip-cert-verify": True
@@ -1610,6 +1596,7 @@ def generate_clash_config():
         "ws-opts": {
             "path": "/vless-upgrade",
             "headers": {"Host": cdn_sni},
+            "ping-interval": 90,
             "v2ray-http-upgrade": True
         },
         "client-fingerprint": "chrome",
@@ -1631,11 +1618,12 @@ def generate_clash_config():
         "sni": cdn_sni,
         "ws-opts": {
             "path": "/trojan-ws",
-            "headers": {"Host": cdn_sni}
+            "headers": {"Host": cdn_sni},
+            "ping-interval": 90
         },
         "client-fingerprint": "chrome",
         "skip-cert-verify": True,
-        "alpn": ["http/1.1"]
+        "alpn": ["h2", "http/1.1"]
     })
     
     # 5. Hysteria2 (直连) - Clash Meta支持
@@ -1656,6 +1644,11 @@ def generate_clash_config():
     })
     
     proxy_names = [p["name"] for p in proxies]
+    auto_proxy_names = [
+        f"{COUNTRY_CODE}-VLESS-WS",
+        f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
+        f"{COUNTRY_CODE}-Trojan-WS",
+    ]
     
     config = {
         "mixed-port": 7890,
@@ -1663,9 +1656,6 @@ def generate_clash_config():
         "mode": "rule",
         "log-level": "info",
         "ipv6": False,
-        "tcp-concurrent": True,
-        "unified-delay": True,
-        "keep-alive-interval": 15,
         "dns": {
             "enable": True,
             "listen": "0.0.0.0:1053",
@@ -1699,7 +1689,7 @@ def generate_clash_config():
             {
                 "name": f"{COUNTRY_CODE}-自动选择",
                 "type": "url-test",
-                "proxies": proxy_names,
+                "proxies": auto_proxy_names,
                 "url": "http://cp.cloudflare.com/generate_204",
                 "interval": 60,
                 "tolerance": 150,
@@ -2321,5 +2311,14 @@ if __name__ == '__main__':
         sys.exit(1)
 
     logger.info(f"SSL证书: {cert_chain}")
-    app.run(host='0.0.0.0', port=SUB_PORT, threaded=True,
-            ssl_context=(cert_chain, cert_key))
+    # [TRAE SOLO CN] v4.10.17 使用gevent WSGI替代Flask开发服务器
+    try:
+        from gevent.pywsgi import WSGIServer
+        http_server = WSGIServer(('0.0.0.0', SUB_PORT), app,
+                                 keyfile=cert_key, certfile=cert_chain)
+        logger.info(f"gevent WSGI服务器启动: 0.0.0.0:{SUB_PORT}")
+        http_server.serve_forever()
+    except ImportError:
+        logger.warning("gevent未安装，降级使用Flask开发服务器")
+        app.run(host='0.0.0.0', port=SUB_PORT, threaded=True,
+                ssl_context=(cert_chain, cert_key))

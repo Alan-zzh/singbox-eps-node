@@ -1,14 +1,79 @@
-# CHANGELOG
+## v4.10.20 - 2026-06-03
+
+- [opencode] AI-SOCKS5 路由功能正式废除：删除服务端/客户端 outbounds 中所有 ai-residential 出站，路由表只保留 direct+block
+- [opencode] CDN 评分公式精简：废除 google_latency_ms / google_speed_mbps 两个无效维度（数据库列已 DROP），保留用户路径 70% + VPS 侧 20% + 三网均衡 5% + 稳定性 5%
+- [opencode] SQLite 切换到 WAL 模式：PRAGMA journal_mode = WAL，多进程并发读写零阻塞
+- [opencode] Reality short_id 强随机：默认 `abcd1234` 弱预设弃用，运行时 `secrets.token_hex(8)` 生成
+- [opencode] TLS ALPN 启用 HTTP/2：Reality/WS/HTTPUpgrade/Trojan-WS 四处 alpn 从 `["http/1.1"]` 改为 `["h2","http/1.1"]`
+- [opencode] health_check.sh 升级为详细日志版：8 项检查完整输出（内存/服务/端口/连接/日志/磁盘/数据库/证书），estab>1500 告警
+- [opencode] iptables 流量月度归零 cron：每月 14 号 00:14 自动清零 INPUT/OUTPUT 计数器
+- [opencode] 服务器代码与本地版本对齐：v4.3.5 → v4.10.20（cert_manager.py + diagnose.sh + health_check.sh + requirements.txt 同步）
+- [opencode] 本地代码清理：删除明文密码脚本 verify_server_config.py / _deploy_v41019.py；23 个临时脚本归档到 docs/archive/scripts/
+- [opencode] 远程运维增强：requirements.txt 加 paramiko，统一从 .env 读凭据（消除明文硬编码）
+- [TRAE SOLO CN] 数据库清理：删除连续失败>5 且评分<10 的死亡 IP 记录+VACUUM 压缩
+
+## v4.10.19 - 2026-06-01
+
+- [TRAE SOLO CN] 修复用户路径测速全部失败：test_user_path_latency()移除HTTP请求，改为纯TCP+TLS握手测速（CDN 443端口不提供HTTP服务，GET请求必被403/400拒绝）
+- [TRAE SOLO CN] 两台服务器完整持久化TCP内核参数：写入99-singbox.conf（BBR+fq/somaxconn=65536/syn_backlog=65536/tw_reuse=1/tw_buckets=3000/fastopen=3等18项参数）
+- [TRAE SOLO CN] 两台服务器default_qdisc从fq_pie改为fq，BBR+fq组合生效
+- [TRAE SOLO CN] SG同步TCP优化参数：补充tw_reuse/fastopen/slow_start_after_idle/no_metrics_save
+- [TRAE SOLO CN] SG iptables 2087端口规则补上并持久化（iptables-persistent）
+- [TRAE SOLO CN] Clash自动选择配置10项全部合规验证通过（lazy=false/tolerance=150/interval=60/MATCH→select→url-test）
+- [TRAE SOLO CN] REALITY节点参数两台服务器全部一致，无暗病
+
+## v4.10.18 - 2026-06-01
+
+- [TRAE SOLO CN] 修复CDN测速SNI：test_user_path_latency()优先使用用户域名作为SNI，Cloudflare正确路由
+- [TRAE SOLO CN] 修复ISP匹配分无区分度：calculate_cross_isp_score()增加C段前缀匹配，解决anycast IP精确匹配失败
+- [TRAE SOLO CN] 数据库定期清理：health_check()末尾删除连续失败>5且评分<10的死亡IP记录+VACUUM压缩
+- [TRAE SOLO CN] 统一sing-box版本：SG升级1.13.9→1.13.11，与JP一致
+- [TRAE SOLO CN] cdn_monitor日志输出从journal改为文件，添加logrotate配置
+- [TRAE SOLO CN] JP TCP TIME_WAIT优化：添加tcp_max_tw_buckets=3000
+- [TRAE SOLO CN] subscription_service内存限制放宽：MemoryHigh=80M, MemoryMax=100M
+- [TRAE SOLO CN] 清理49个临时脚本+8个散落临时文件+2个空数据库文件
+- [TRAE SOLO CN] 同步代码版本号：cdn_monitor.py v4.3.5→v4.10.18, subscription_service.py v4.10.9→v4.10.18
+
+## v4.10.16 - 2026-06-01
+
+- [TRAE SOLO CN] 修复MemoryMin=50M被覆盖丢失：重新部署singbox.service内存保护
+- [TRAE SOLO CN] 关闭DEBUG日志恢复INFO：避免日志爆炸
+- [TRAE SOLO CN] 修复三网均衡度isp_score全为0：health_check前刷新三网API缓存
+- [TRAE SOLO CN] 评分权重调整：用户路径70%（延迟35%+速度35%），VPS侧20%，三网均衡5%
+- [TRAE SOLO CN] 合并health_check+resource_guard为一个脚本，减少进程spawn
+- [TRAE SOLO CN] health_check频率5分钟→15分钟，删减6项低频检查（端口完整性/订阅/防火墙/证书/Swap/iptables）
+- [TRAE SOLO CN] singbox-sub/cdn加MemoryHigh=60M/MemoryMax=80M限制，防止内存膨胀
+- [TRAE SOLO CN] 统一JP/SG singbox.service配置：LimitNOFILE=1048576+StartLimitBurst+ExecStartPre
+
+## v4.10.15 - 2026-05-31
+
+- [Qoder] 服务器内存精简 + 恢复 Clash 优化：
+  - **内存精简**：移除 snap/amazon-ssm-agent(14-24MB)、health_monitor(6-8MB)、rsyslog
+  - journald 限制 50MB（JP 从 70MB 降到 15MB，之前日志 278MB 撑的）
+  - 清理累积日志文件（379MB singbox.log.bak 等）
+  - JP: 183MB→171MB, SG: 206MB→183MB
+  - **恢复 Clash 优化**：所有节点回自动选择（Reality+HY2+CDN，之前误判 Reality 丢包）
+  - `keep-alive-interval: 15` + `tcp-concurrent: true` + `unified-delay: true` 恢复
+  - 根因确认：t3.nano 414MB 内存被占满才是元凶，Clash 配置方向全部正确
+
+## v4.10.14 - 2026-05-31
+
+- [Qoder] 修复所有节点周期性全断的深层原因（补充修复）：
+  - 新增漏洞：SG 服务器 `somaxconn=4096`（太小），突发连接时内核直接拒绝 → 所有节点同时不可用
+  - 内存保护：添加 `GOMEMLIMIT=100MiB` 防止 Go 堆内存失控增长（之前 RSS 峰值曾达 99.6MB）
+  - GC 调优：`GOGC=50` 更频繁小批量 GC（414MB 实例上以 CPU 换内存，CPU idle 99%）
+  - 修复 SG `sysctl net.core.somaxconn=65536`（持久化 `/etc/sysctl.d/99-singbox.conf`）
+  - 部署：JP + SG 双服务器已生效
 
 ## v4.10.13 - 2026-05-31
 
-- [Qoder] 修复 Clash url-test 配置回退导致的自动选择闪断问题：
-  - `interval: 600→60`：恢复 60 秒测速间隔，1 分钟内发现故障节点
-  - `lazy: true→false`：恢复后台持续测速，不再锁死坏节点
-  - `url: https://www.gstatic.com→http://cp.cloudflare.com`：改用 HTTP 避免 TLS 握手损耗
-  - 新增 `timeout: 5000`：5 秒超时快速判定节点故障
-  - 修复文件：server_clash_jp.yaml + server_subscription_service.py
-  - 根因：v4.10.9 错误修改导致 Clash 首次测速后停止后台测速，Reality 节点丢包 20-40% 时无法快速切换
+- [Qoder] 修复所有节点周期性全断（根因定位+修复）：
+  - 真正根因：t3.nano 仅 414MB RAM，sing-box RSS 峰值 99.6MB + subscription_service 40MB + cdn_monitor 19MB 接近极限
+  - 当内存触顶时内核 swap 出 sing-box 部分内存 → sing-box 处理数据包时被换入 → 数百毫秒冻结
+  - 所有客户端连接超时 → 用户看到"全断了" → 连接断开后 RSS 回落 → 恢复 → 循环
+  - 修复：systemd singbox.service 添加 `MemoryMin=50M`，锁定 sing-box 在物理内存中永不被 swap
+  - 部署：JP + SG 双服务器已生效
+  - ~~之前 v4.10.13/14/15 三轮 Clash 配置修改方向全错，已废弃~~
 
 ## v4.10.12 - 2026-05-31
 

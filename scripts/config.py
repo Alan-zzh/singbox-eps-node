@@ -154,7 +154,7 @@ HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
 #    - 禁止只设UDP或只设TCP，必须双协议，否则一种被封则HY2完全不可用
 #    - 历史教训：v1.0.45曾错误移除TCP规则，导致UDP被封时HY2无兜底
 
-REALITY_SHORT_ID = 'abcd1234'
+REALITY_SHORT_ID = 'abcd1234'  # v4.10.20 弱预设已弃用，安装时通过 openssl rand -hex 8 写入 .env
 REALITY_DEST = 'www.apple.com:443'
 REALITY_SNI = 'www.apple.com'
 
@@ -404,10 +404,10 @@ HUNAN_CT_OPTIMAL_PREFIXES = [
 
 # CDN IP硬淘汰阈值：不达标的IP直接淘汰，不进评分（严格标准，全自动无感切换）
 CDN_IP_HARD_REJECT = {
-    'latency_ms': 500,           # VPS→CF延时超过500ms直接淘汰（CDN回源延迟100-200ms正常，不能设太低）
-    'user_path_latency_ms': 500, # 通过CDN到用户路径延时超过500ms直接淘汰
-    'packet_loss_rate': 0.1,     # 丢包率超过10%直接淘汰
-    'download_speed_mbps': 5,    # 下载速度低于5Mbps直接淘汰
+    'latency_ms': 180,           # VPS→CF延时超过180ms直接淘汰，避免高延时边缘节点混入
+    'user_path_latency_ms': 120, # 通过CDN到用户路径延时超过120ms直接淘汰
+    'packet_loss_rate': 0.08,    # 丢包率超过8%直接淘汰
+    'download_speed_mbps': 20,   # 下载速度低于20Mbps直接淘汰
 }
 
 # ============ CDN故障自愈配置（v4.6 多级回退）============
@@ -606,4 +606,4 @@ def load_all_config():
         'reality_dest': get_env('REALITY_DEST', REALITY_DEST),
         'reality_sni': get_env('REALITY_SNI', REALITY_SNI),
     }
-    return config
+    return config

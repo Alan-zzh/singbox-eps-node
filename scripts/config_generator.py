@@ -14,6 +14,7 @@ import uuid
 import json
 import random
 import string
+import secrets
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,7 +44,7 @@ vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
 trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 hysteria2_pass = env_vars.get('HYSTERIA2_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
-reality_short_id = env_vars.get('REALITY_SHORT_ID', 'abcd1234')
+reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
 server_ip = env_vars.get('SERVER_IP', '')
 cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
 socks5_user = env_vars.get('SOCKS5_USER', '')
@@ -142,8 +143,6 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 443,
             "users": [{"uuid": vless_uuid, "flow": "xtls-rprx-vision"}],
-            "tcp_keep_alive": "30s",
-            "tcp_keep_alive_interval": "15s",
             "tls": {
                 "enabled": True,
                 "server_name": "www.apple.com",
@@ -161,8 +160,6 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 8443,
             "users": [{"uuid": vless_ws_uuid}],
-            "tcp_keep_alive": "30s",
-            "tcp_keep_alive_interval": "15s",
             "transport": {
                 "type": "ws",
                 "path": "/vless-ws",
@@ -173,7 +170,7 @@ config = {
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                "alpn": ["http/1.1"]
+                    "alpn": ["h2", "http/1.1"]
             }
         },
         {
@@ -182,8 +179,6 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 2053,
             "users": [{"uuid": vless_ws_uuid}],
-            "tcp_keep_alive": "30s",
-            "tcp_keep_alive_interval": "15s",
             "transport": {
                 "type": "httpupgrade",
                 "path": "/vless-upgrade",
@@ -194,7 +189,7 @@ config = {
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                "alpn": ["http/1.1"]
+                    "alpn": ["h2", "http/1.1"]
             }
         },
         {
@@ -203,8 +198,6 @@ config = {
             "listen": "0.0.0.0",
             "listen_port": 2083,
             "users": [{"password": trojan_pass}],
-            "tcp_keep_alive": "30s",
-            "tcp_keep_alive_interval": "15s",
             "transport": {
                 "type": "ws",
                 "path": "/trojan-ws",
@@ -215,7 +208,7 @@ config = {
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                "alpn": ["http/1.1"]
+                    "alpn": ["h2", "http/1.1"]
             }
         },
         {

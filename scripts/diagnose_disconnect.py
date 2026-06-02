@@ -16,8 +16,14 @@ import re
 import sys
 import argparse
 import subprocess
+import socket
 from datetime import datetime, timedelta
 from collections import defaultdict
+
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
 
 # ============================================================
 # 常量定义
@@ -75,9 +81,59 @@ CF_BLOCK_PATTERNS = [
     r'cloudflare',
 ]
 
+EMOJI_MAP = {
+    '🔍': '[INFO]',
+    '✅': '[OK]',
+    '❌': '[FAIL]',
+    '⚠️': '[WARN]',
+    '⚠': '[WARN]',
+    '💡': '[TIP]',
+    'ℹ️': '[INFO]',
+    'ℹ': '[INFO]',
+    '🇯🇵': 'JP',
+    '🇸🇬': 'SG',
+}
+
 # ============================================================
 # 工具函数
 # ============================================================
+
+def configure_stdout():
+    """在Windows等非UTF-8终端中尽量避免UnicodeEncodeError。"""
+    for stream_name in ('stdout', 'stderr'):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+            except Exception:
+                pass
+
+
+def safe_text(text):
+    normalized = str(text)
+    for src, target in EMOJI_MAP.items():
+        normalized = normalized.replace(src, target)
+    return normalized
+
+
+def resolve_related_ip(env):
+    candidate = (
+        env.get('USER_PUBLIC_IP')
+        or env.get('USER_IP')
+        or env.get('CLIENT_PUBLIC_IP')
+        or env.get('RELATED_IP')
+    )
+    if candidate:
+        return candidate.strip()
+
+    ddns_domain = env.get('USER_DDNS_DOMAIN', '').strip()
+    if not ddns_domain:
+        return ''
+
+    try:
+        return socket.gethostbyname(ddns_domain)
+    except OSError:
+        return ''
 
 def load_env():
     """从项目根目录的.env文件加载环境变量"""
@@ -103,7 +159,39 @@ def load_env():
 
 
 def ssh_run(host, command, user='root', timeout=30):
-    """通过subprocess执行SSH远程命令，返回(stdout, stderr, returncode)"""
+    """优先通过paramiko执行SSH远程命令，失败再回退到ssh子进程。"""
+    if paramiko is not None:
+        env = load_env()
+        credential_candidates = [
+            (env.get('JP_SSH_IP'), env.get('JP_SSH_USER', 'root'), env.get('JP_SSH_PASS', '')),
+            (env.get('SG_SSH_IP'), env.get('SG_SSH_USER', 'root'), env.get('SG_SSH_PASS', '')),
+            (env.get('US_SSH_IP'), env.get('US_SSH_USER', 'root'), env.get('US_SSH_PASS', '')),
+        ]
+        matched = next((item for item in credential_candidates if item[0] == host and item[2]), None)
+        if matched:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(
+                    host,
+                    username=matched[1] or user,
+                    password=matched[2],
+                    timeout=min(timeout, 15),
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+                stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+                rc = stdout.channel.recv_exit_status()
+                return (
+                    stdout.read().decode('utf-8', 'replace').strip(),
+                    stderr.read().decode('utf-8', 'replace').strip(),
+                    rc,
+                )
+            except Exception:
+                pass
+            finally:
+                client.close()
+
     ssh_cmd = [
         'ssh',
         '-o', 'StrictHostKeyChecking=no',
@@ -172,7 +260,7 @@ def resolve_server(target):
     if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', target):
         return [target]
 
-    print(f'⚠️ 无法识别服务器目标: {target}')
+    print(safe_text(f'⚠️ 无法识别服务器目标: {target}'))
     return []
 
 
@@ -200,6 +288,12 @@ def analyze_disconnect_events(host, user='root', hours=6):
         'total_disconnects': 0,
         'time_distribution': defaultdict(int),
         'sample_lines': [],
+        'invalid_reality_count': 0,
+        'unexpected_eof_count': 0,
+        'eof_count': 0,
+        'reset_timeout_count': 0,
+        'related_ip': '',
+        'related_ip_samples': [],
     }
 
     # 构建grep模式：匹配断线关键词
@@ -230,6 +324,17 @@ def analyze_disconnect_events(host, user='root', hours=6):
     lines = out.split('\n')
     result['total_disconnects'] = len(lines)
 
+    for line in lines:
+        line_lower = line.lower()
+        if 'processed invalid connection' in line_lower:
+            result['invalid_reality_count'] += 1
+        if 'unexpected eof' in line_lower:
+            result['unexpected_eof_count'] += 1
+        if re.search(r'(^|[^a-z])eof([^a-z]|$)', line_lower):
+            result['eof_count'] += 1
+        if any(token in line_lower for token in ('reset', 'timeout', 'broken pipe', 'i/o timeout')):
+            result['reset_timeout_count'] += 1
+
     # 按协议分类统计
     for proto_key, proto_info in PROTOCOLS.items():
         port = proto_info['port']
@@ -258,6 +363,17 @@ def analyze_disconnect_events(host, user='root', hours=6):
     # 保留样本行（最多10条）
     result['sample_lines'] = lines[:10]
 
+    return result
+
+
+def attach_related_ip_samples(result, related_ip):
+    """将与用户公网IP相关的断线样本附加到统计结果。"""
+    result['related_ip'] = related_ip or ''
+    if not related_ip:
+        return result
+
+    matched = [line for line in result.get('sample_lines', []) if related_ip in line]
+    result['related_ip_samples'] = matched[:5]
     return result
 
 
@@ -475,6 +591,8 @@ def generate_report(host, server_info, user, hours):
     """对单台服务器生成完整诊断报告"""
     label = server_info.get('label', host) if server_info else host
     domain = server_info.get('domain', 'N/A') if server_info else 'N/A'
+    env = load_env()
+    related_ip = resolve_related_ip(env)
 
     print(f'\n{"#" * 60}')
     print(f'# {label} 服务器诊断报告')
@@ -487,19 +605,24 @@ def generate_report(host, server_info, user, hours):
     print_section('1. SSH 连通性检查')
     ok, msg = check_ssh_connectivity(host, user=user)
     if not ok:
-        print(f'  ❌ {msg}')
-        print(f'  ⚠️ 后续检查全部跳过，请先解决SSH连接问题')
+        print(safe_text(f'  ❌ {msg}'))
+        print(safe_text(f'  ⚠️ 后续检查全部跳过，请先解决SSH连接问题'))
         return
-    print(f'  ✅ {msg}')
+    print(safe_text(f'  ✅ {msg}'))
 
     # 2. 断线事件分析
     print_section('2. 断线事件分析（按协议）')
     disconnect = analyze_disconnect_events(host, user=user, hours=hours)
+    attach_related_ip_samples(disconnect, related_ip)
 
     if disconnect.get('note'):
-        print(f'  ℹ️ {disconnect["note"]}')
+        print(safe_text(f'  ℹ️ {disconnect["note"]}'))
     else:
         print_kv('断线事件总数', disconnect['total_disconnects'])
+        print_kv('REALITY invalid connection', disconnect['invalid_reality_count'])
+        print_kv('unexpected EOF', disconnect['unexpected_eof_count'])
+        print_kv('EOF 总数', disconnect['eof_count'])
+        print_kv('reset/timeout 总数', disconnect['reset_timeout_count'])
 
         if disconnect['by_protocol']:
             print(f'\n  按协议分布:')
@@ -514,7 +637,7 @@ def generate_report(host, server_info, user, hours):
                 bar = '█' * int(pct / 5) + '░' * (20 - int(pct / 5))
                 print(f'    {info["label"]:20s} (:{info["port"]}): {info["count"]:5d} 次  {bar} {pct:.1f}%')
         else:
-            print(f'  ℹ️ 无法按协议分类（日志中未匹配到端口/协议标识）')
+            print(safe_text(f'  ℹ️ 无法按协议分类（日志中未匹配到端口/协议标识）'))
 
         # 3. 时间模式分析
         print_section('3. 断线时间模式分析')
@@ -533,14 +656,14 @@ def generate_report(host, server_info, user, hours):
 
             # 模式解读
             if pattern_type == '集中爆发':
-                print(f'\n  ⚠️ 检测到集中断线模式！可能原因：')
+                print(safe_text(f'\n  ⚠️ 检测到集中断线模式！可能原因：'))
                 print(f'     - 服务器网络抖动/路由变更')
                 print(f'     - 运营商间歇性封锁')
                 print(f'     - 服务器资源耗尽（OOM/CPU）')
             elif pattern_type == '部分集中':
-                print(f'\n  💡 断线存在部分集中趋势，建议关注峰值时段的网络状况')
+                print(safe_text(f'\n  💡 断线存在部分集中趋势，建议关注峰值时段的网络状况'))
             else:
-                print(f'\n  ✅ 断线呈随机分散模式，通常为正常客户端行为')
+                print(safe_text(f'\n  ✅ 断线呈随机分散模式，通常为正常客户端行为'))
 
         # 样本行
         if disconnect.get('sample_lines'):
@@ -549,20 +672,27 @@ def generate_report(host, server_info, user, hours):
                 # 截断过长行
                 display = line[:120] + '...' if len(line) > 120 else line
                 print(f'    {display}')
+        if disconnect.get('related_ip'):
+            print_kv('related_ip', disconnect['related_ip'])
+            if disconnect.get('related_ip_samples'):
+                print(f'\n  与用户公网IP相关的样本:')
+                for line in disconnect['related_ip_samples'][:5]:
+                    display = line[:120] + '...' if len(line) > 120 else line
+                    print(f'    {display}')
 
     # 4. Cloudflare阻断检测
     print_section('4. Cloudflare 阻断检测')
     cf_result = detect_cf_blocking(host, user=user, hours=hours)
 
     if cf_result['cf_block_total'] == 0:
-        print(f'  ✅ 未检测到 Cloudflare 403/1020 阻断事件')
+        print(safe_text(f'  ✅ 未检测到 Cloudflare 403/1020 阻断事件'))
     else:
         print_kv('CF 403 事件数', cf_result['cf_403_count'])
         print_kv('CF 1020 事件数', cf_result['cf_1020_count'])
         print_kv('阻断事件总计', cf_result['cf_block_total'])
 
         if cf_result['cf_1020_count'] > 0:
-            print(f'\n  ⚠️ 检测到 1020 错误码！这是 Cloudflare WAF 拦截，说明：')
+            print(safe_text(f'\n  ⚠️ 检测到 1020 错误码！这是 Cloudflare WAF 拦截，说明：'))
             print(f'     - CDN IP 可能被 Cloudflare 标记为可疑')
             print(f'     - 建议运行 cdn_monitor.py 更换优选IP')
 
@@ -577,7 +707,7 @@ def generate_report(host, server_info, user, hours):
     oom_result = check_oom_events(host, user=user)
 
     if oom_result['oom_found']:
-        print(f'  ❌ 检测到 OOM 事件！')
+        print(safe_text(f'  ❌ 检测到 OOM 事件！'))
         for detail in oom_result['oom_details'][:5]:
             display = detail[:120] + '...' if len(detail) > 120 else detail
             print(f'    {display}')
@@ -585,7 +715,7 @@ def generate_report(host, server_info, user, hours):
         print(f'     - 增加 Swap: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile')
         print(f'     - 减少连接数限制或优化 sing-box 配置')
     else:
-        print(f'  ✅ 未检测到 OOM 事件')
+        print(safe_text(f'  ✅ 未检测到 OOM 事件'))
 
     # 6. sysctl参数
     print_section('6. 内核网络参数检查')
@@ -593,9 +723,9 @@ def generate_report(host, server_info, user, hours):
 
     # 关键参数与建议值
     param_recommend = {
-        'tcp_keepalive_time': ('7200', '建议 ≤ 600（10分钟），过长会导致僵尸连接堆积'),
-        'tcp_keepalive_intvl': ('75', '建议 ≤ 30，加快检测死连接'),
-        'tcp_keepalive_probes': ('9', '建议 3-5，减少探测次数'),
+        'tcp_keepalive_time': ('30', '建议保持 30 秒，避免 NAT 超时后连接长期半死不活'),
+        'tcp_keepalive_intvl': ('10', '建议保持 10 秒，加快发现坏连接'),
+        'tcp_keepalive_probes': ('3', '建议保持 3 次，在移动网络/高丢包场景更快完成判死'),
         'conntrack_max': ('', '建议 ≥ 65536，小内存VPS至少32768'),
         'conntrack_usage_pct': ('', '使用率 > 80% 时需增大 conntrack_max'),
         'tcp_tw_reuse': ('0', '建议设为 2（允许复用TIME_WAIT连接）'),
@@ -613,8 +743,8 @@ def generate_report(host, server_info, user, hours):
         if label == 'tcp_keepalive_time' and value != 'N/A':
             try:
                 v = int(value)
-                if v > 600:
-                    status = '⚠️ 过大'
+                if v != 30:
+                    status = '⚠️ 偏离基线'
                     warnings.append(f'tcp_keepalive_time={v}，{advice}')
                 else:
                     status = '✅'
@@ -623,9 +753,19 @@ def generate_report(host, server_info, user, hours):
         elif label == 'tcp_keepalive_intvl' and value != 'N/A':
             try:
                 v = int(value)
-                if v > 30:
-                    status = '⚠️ 偏大'
+                if v != 10:
+                    status = '⚠️ 偏离基线'
                     warnings.append(f'tcp_keepalive_intvl={v}，{advice}')
+                else:
+                    status = '✅'
+            except ValueError:
+                status = ''
+        elif label == 'tcp_keepalive_probes' and value != 'N/A':
+            try:
+                v = int(value)
+                if v != 3:
+                    status = '⚠️ 偏离基线'
+                    warnings.append(f'tcp_keepalive_probes={v}，{advice}')
                 else:
                     status = '✅'
             except ValueError:
@@ -656,7 +796,7 @@ def generate_report(host, server_info, user, hours):
     if warnings:
         print(f'\n  优化建议:')
         for w in warnings:
-            print(f'    ⚠️ {w}')
+            print(safe_text(f'    ⚠️ {w}'))
 
     # 7. sing-box服务重启
     print_section('7. sing-box 服务重启检查')
@@ -668,7 +808,7 @@ def generate_report(host, server_info, user, hours):
     print_kv(f'最近{hours}小时重启次数', restart_result['restart_count'])
 
     if restart_result['restart_count'] > 3:
-        print(f'\n  ⚠️ 重启次数偏多！可能原因：')
+        print(safe_text(f'\n  ⚠️ 重启次数偏多！可能原因：'))
         print(f'     - OOM killer 杀进程（检查上方OOM报告）')
         print(f'     - sing-box 配置错误导致反复崩溃')
         print(f'     - health_check.sh 检测到异常后自动重启')
@@ -686,6 +826,7 @@ def generate_report(host, server_info, user, hours):
 # ============================================================
 
 def main():
+    configure_stdout()
     parser = argparse.ArgumentParser(
         description='sing-box 断线诊断脚本 - 分析服务器断线模式',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -722,11 +863,11 @@ def main():
     # 解析服务器目标
     targets = resolve_server(args.server)
     if not targets:
-        print('❌ 未找到可诊断的服务器，请检查参数')
+        print(safe_text('❌ 未找到可诊断的服务器，请检查参数'))
         print(f'   可用目标: jp, sg, all, 或直接输入IP地址')
         sys.exit(1)
 
-    print(f'🔍 sing-box 断线诊断工具')
+    print(safe_text(f'🔍 sing-box 断线诊断工具'))
     print(f'   目标服务器: {", ".join(targets)}')
     print(f'   分析范围: 最近 {args.hours} 小时')
     print(f'   SSH用户: {ssh_user}')
@@ -737,10 +878,10 @@ def main():
         try:
             generate_report(host, server_info, ssh_user, args.hours)
         except KeyboardInterrupt:
-            print(f'\n\n⚠️ 用户中断，跳过 {host}')
+            print(safe_text(f'\n\n⚠️ 用户中断，跳过 {host}'))
             continue
         except Exception as e:
-            print(f'\n❌ 诊断 {host} 时发生异常: {e}')
+            print(safe_text(f'\n❌ 诊断 {host} 时发生异常: {e}'))
 
     # 总结
     print(f'\n{"#" * 60}')

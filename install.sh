@@ -9,7 +9,7 @@
 # 阶段1-系统准备（全自动，无需用户操作）：
 #   1. 系统更新：apt upgrade + 语言包 + 时区
 #   2. 安装依赖：curl/wget/python3/openssl/sqlite3等
-#   3. BBR+FQ+CAKE三合一加速（即时生效，无需重启）
+#   3. BBR+FQ 网络加速（即时生效，无需重启）
 #   4. 系统优化：文件描述符+内核参数
 # 阶段2-部署服务（交互式配置）：
 #   5. 卸载旧面板 → 安装singbox → 部署项目
@@ -103,67 +103,65 @@ uninstall_old_panels() {
 }
 
 set_default_qdisc_cake() {
+    # 兼容旧调用名，当前项目基线统一为 FQ。
+    set_default_qdisc_fq
+}
+
+set_default_qdisc_fq() {
     if grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null; then
-        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=cake|' /etc/sysctl.conf
+        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf
     else
-        echo "net.core.default_qdisc=cake" >> /etc/sysctl.conf
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     fi
 }
 
-set_default_qdisc_fq_pie() {
-    if grep -q "^net.core.default_qdisc=" /etc/sysctl.conf 2>/dev/null; then
-        sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq_pie|' /etc/sysctl.conf
-    else
-        echo "net.core.default_qdisc=fq_pie" >> /etc/sysctl.conf
-    fi
-}
-
-setup_fq_pie_qdisc() {
+setup_fq_qdisc() {
     local iface="${1:-$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)}"
     iface=${iface:-eth0}
 
-    set_default_qdisc_fq_pie
+    set_default_qdisc_fq
 
     if ! command -v tc &>/dev/null; then
         log_warn "tc命令不可用，仅设置sysctl默认队列"
         return
     fi
 
-    FQ_PIE_OK=false
-    tc qdisc replace dev "$iface" root fq_pie 2>/dev/null && FQ_PIE_OK=true || true
+    FQ_OK=false
+    tc qdisc replace dev "$iface" root fq 2>/dev/null && FQ_OK=true || true
 
-    if [ "$FQ_PIE_OK" = true ]; then
-        log_info "FQ-PIE队列已应用到 $iface（降级方案，仍可与BBR配合）"
+    if [ "$FQ_OK" = true ]; then
+        log_info "FQ队列已应用到 $iface（BBR推荐组合）"
     else
-        log_warn "FQ-PIE应用失败，仅设置sysctl默认队列"
+        log_warn "FQ应用失败，仅设置sysctl默认队列"
         return
     fi
 
-    cat > /etc/systemd/system/fq-pie-qdisc.service << 'EOF'
+    rm -f /etc/systemd/system/fq-pie-qdisc.service "/etc/systemd/system/fq-pie-qdisc@${iface}.service" 2>/dev/null || true
+
+    cat > /etc/systemd/system/fq-qdisc@.service << 'EOF'
 [Unit]
-Description=FQ-PIE Queue Discipline (CAKE降级方案)
+Description=FQ Queue Discipline (BBR推荐组合)
 After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/tc qdisc replace dev %i root fq_pie
+ExecStart=/sbin/tc qdisc replace dev %i root fq
 ExecStop=/sbin/tc qdisc del dev %i root 2>/dev/null || true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    ln -sf /etc/systemd/system/fq-pie-qdisc.service "/etc/systemd/system/fq-pie-qdisc@${iface}.service" 2>/dev/null || true
-
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable "fq-pie-qdisc@${iface}" 2>/dev/null || true
-    log_info "FQ-PIE持久化服务已创建（fq-pie-qdisc@$iface，重启自动恢复）"
+    systemctl disable "fq-pie-qdisc@${iface}" 2>/dev/null || true
+    systemctl enable "fq-qdisc@${iface}" 2>/dev/null || true
+    log_info "FQ持久化服务已创建（fq-qdisc@$iface，重启自动恢复）"
 }
 
 optimize_system() {
-    log_step "【阶段1-步骤3/4】启用BBR+FQ+CAKE三合一网络加速..."
+    log_step "【阶段1-步骤3/4】启用BBR+FQ网络加速..."
 
     if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
         log_info "加速1/3：启用BBR（Google拥塞控制，不依赖丢包，主动探测带宽+RTT）..."
@@ -173,10 +171,10 @@ optimize_system() {
     fi
 
     log_info "加速2/3：启用FQ公平队列（为每个TCP连接独立缓冲，BBR的pacing依赖FQ）..."
-    set_default_qdisc_cake
+    set_default_qdisc_fq
 
-    log_info "加速3/3：启用CAKE队列管理（集成FQ+PIE，防止缓冲区膨胀，抗丢包）..."
-    setup_cake_qdisc
+    log_info "加速3/3：固化网卡FQ队列（避免旧qdisc残留覆盖当前基线）..."
+    setup_fq_qdisc
 
     log_info "TCP调优（缓冲区+连接队列+保活+BBR高丢包参数）..."
     TCP_PARAMS="net.ipv4.tcp_fastopen=3
@@ -216,7 +214,7 @@ net.ipv4.tcp_fastopen_blackhole_timeout_sec=0"
     done
 
     sysctl -p 2>/dev/null || true
-    log_info "BBR+FQ+CAKE三合一加速已启用（即时生效，无需重启）"
+    log_info "BBR+FQ网络加速已启用（即时生效，无需重启）"
 
     # ============ 新增：内存与系统服务优化 ============
     log_info "【系统优化】限制 journald 日志大小（防止日志堆积占满磁盘/内存）..."
@@ -262,85 +260,14 @@ root hard nofile 65535
 EOF
     fi
 
-    log_info "阶段1完成：系统更新+依赖+BBR+FQ+CAKE三合一+优化（全部即时生效，无需重启）"
+    log_info "阶段1完成：系统更新+依赖+BBR+FQ+优化（全部即时生效，无需重启）"
 }
 
 setup_cake_qdisc() {
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1) || true
     MAIN_IF=${MAIN_IF:-eth0}
-    CAKE_FAIL_REASON=""
-
-    if ! command -v tc &>/dev/null; then
-        log_info "安装iproute2（tc命令依赖）..."
-        DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 2>/dev/null || true
-    fi
-
-    if ! command -v tc &>/dev/null; then
-        log_warn "tc命令不可用，降级使用FQ-PIE"
-        CAKE_FAIL_REASON="no_tc_command"
-        setup_fq_pie_qdisc "$MAIN_IF"
-        return
-    fi
-
-    CAKE_SUPPORTED=false
-    if modprobe sch_cake 2>/dev/null; then
-        CAKE_SUPPORTED=true
-    elif tc qdisc add dev "$MAIN_IF" root handle 1: cake 2>/dev/null; then
-        tc qdisc del dev "$MAIN_IF" root 2>/dev/null || true
-        CAKE_SUPPORTED=true
-    fi
-
-    if [ "$CAKE_SUPPORTED" = false ]; then
-        log_info "尝试安装CAKE内核模块（linux-modules-extra-$(uname -r)）..."
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "linux-modules-extra-$(uname -r)" 2>/dev/null || true
-        if modprobe sch_cake 2>/dev/null; then
-            CAKE_SUPPORTED=true
-            CAKE_FAIL_REASON=""
-            log_info "安装linux-modules-extra后CAKE模块可用"
-        fi
-    fi
-
-    if [ "$CAKE_SUPPORTED" = false ]; then
-        CAKE_FAIL_REASON="kernel_no_module"
-        log_warn "内核不支持CAKE，降级使用FQ-PIE（仍可与BBR配合）"
-        setup_fq_pie_qdisc "$MAIN_IF"
-        return
-    fi
-
-    CAKE_OK=false
-    tc qdisc replace dev "$MAIN_IF" root handle 1: cake bandwidth 1000mbit flowmode triple-isolate 2>/dev/null && CAKE_OK=true || true
-
-    if [ "$CAKE_OK" = true ]; then
-        log_info "CAKE队列已应用到 $MAIN_IF（flowmode=triple-isolate，带宽1000mbit）"
-    else
-        CAKE_FAIL_REASON="tc_apply_failed"
-        log_warn "CAKE应用失败，降级使用FQ-PIE"
-        setup_fq_pie_qdisc "$MAIN_IF"
-        return
-    fi
-
-    cat > /etc/systemd/system/cake-qdisc.service << 'EOF'
-[Unit]
-Description=CAKE Queue Discipline (BBR+FQ+CAKE三合一加速)
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/sbin/tc qdisc replace dev %i root handle 1: cake bandwidth 1000mbit flowmode triple-isolate
-ExecStop=/sbin/tc qdisc del dev %i root 2>/dev/null || true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    mkdir -p /etc/systemd/system/cake-qdisc.service.wants 2>/dev/null || true
-    ln -sf /etc/systemd/system/cake-qdisc.service "/etc/systemd/system/cake-qdisc@${MAIN_IF}.service" 2>/dev/null || true
-
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable "cake-qdisc@${MAIN_IF}" 2>/dev/null || true
-    log_info "CAKE持久化服务已创建（cake-qdisc@$MAIN_IF，重启自动恢复）"
+    log_warn "setup_cake_qdisc 已退役，当前统一改为 FQ 基线"
+    setup_fq_qdisc "$MAIN_IF"
 }
 
 install_singbox() {
@@ -699,7 +626,7 @@ setup_firewall() {
 setup_health_check_cron() {
     log_step "配置定时任务..."
     chmod +x "${BASE_DIR}/scripts/health_check.sh" "${BASE_DIR}/scripts/diagnose.sh" 2>/dev/null || true
-    (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/5 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
+    (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/15 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
     (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * /usr/bin/python3 ${BASE_DIR}/scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
     log_info "定时任务已配置（健康检查每5分钟 + 证书续签每月1号凌晨3点）"
 }
@@ -853,14 +780,10 @@ verify_installation() {
     fi
     VERIFY_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
     VERIFY_IF=${VERIFY_IF:-eth0}
-    if tc qdisc show dev "$VERIFY_IF" 2>/dev/null | grep -q "cake"; then
-        echo -e "    ${GREEN}✅${NC} CAKE队列: 已启用（$VERIFY_IF）"
-    elif tc qdisc show dev "$VERIFY_IF" 2>/dev/null | grep -q "fq_pie"; then
-        echo -e "    ${GREEN}✅${NC} CAKE队列: 降级为FQ-PIE（$VERIFY_IF，内核不支持CAKE，FQ-PIE仍可与BBR配合）"
-    elif modprobe sch_cake 2>/dev/null; then
-        echo -e "    ${YELLOW}⚠️${NC} CAKE队列: 未启用（tc qdisc应用失败，已降级FQ-PIE）"
+    if tc qdisc show dev "$VERIFY_IF" 2>/dev/null | grep -q "fq"; then
+        echo -e "    ${GREEN}✅${NC} FQ队列: 已启用（$VERIFY_IF）"
     else
-        echo -e "    ${YELLOW}⚠️${NC} CAKE队列: 未启用（内核缺少sch_cake模块，已降级FQ-PIE）"
+        echo -e "    ${YELLOW}⚠️${NC} FQ队列: 未启用（建议重新运行 optimize）"
     fi
     echo ""
     if [ "$ALL_OK" = true ]; then
@@ -910,12 +833,10 @@ print_summary() {
     echo "  FQ公平队列:   已启用（为每个TCP连接独立缓冲）"
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1) || true
     MAIN_IF=${MAIN_IF:-eth0}
-    if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "cake"; then
-        echo "  CAKE队列:     已启用（集成FQ+PIE，抗丢包防膨胀，网卡$MAIN_IF）"
-    elif tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "fq_pie"; then
-        echo "  CAKE队列:     降级为FQ-PIE（内核不支持CAKE，FQ-PIE仍可与BBR配合，网卡$MAIN_IF）"
+    if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "fq"; then
+        echo "  FQ队列:       已启用（BBR推荐组合，网卡$MAIN_IF）"
     else
-        echo "  CAKE队列:     未启用（建议运行 bash install.sh optimize 重新优化）"
+        echo "  FQ队列:       未启用（建议运行 bash install.sh optimize 重新优化）"
     fi
     echo "  TCP调优:       已优化（含BBR高丢包参数）"
     echo "  文件描述符:    65535"
@@ -1049,28 +970,26 @@ cmd_reinstall() {
 cmd_optimize() {
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  一键优化系统（BBR+FQ+CAKE三合一加速）${NC}"
+    echo -e "${CYAN}  一键优化系统（BBR+FQ 网络加速）${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  1. BBR加速  — Google拥塞控制，不依赖丢包，主动探测带宽+RTT"
     echo -e "  2. FQ公平队列 — 为每个TCP连接独立缓冲，BBR的pacing依赖FQ"
-    echo -e "  3. CAKE队列  — 集成FQ+PIE，防止缓冲区膨胀，抗丢包"
+    echo -e "  3. FQ队列    — 为每个TCP连接独立排队，贴合BBR pacing"
     echo -e "  即时生效，无需重启服务器"
     echo ""
     check_root
     update_system
     optimize_system
     echo ""
-    echo -e "${GREEN}✅ 系统优化完成！BBR+FQ+CAKE三合一加速已启用（即时生效，无需重启）：${NC}"
+    echo -e "${GREEN}✅ 系统优化完成！BBR+FQ 网络加速已启用（即时生效，无需重启）：${NC}"
     echo -e "  BBR加速:      $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo '未知')"
     echo -e "  默认队列:     $(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}' || echo '未知')"
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
     MAIN_IF=${MAIN_IF:-eth0}
-    if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "cake"; then
-        echo -e "  CAKE队列:     已启用（$MAIN_IF，集成FQ+PIE，抗丢包防膨胀）"
-    elif tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "fq_pie"; then
-        echo -e "  CAKE队列:     降级为FQ-PIE（$MAIN_IF，内核不支持CAKE，FQ-PIE仍可与BBR配合）"
+    if tc qdisc show dev "$MAIN_IF" 2>/dev/null | grep -q "fq"; then
+        echo -e "  FQ队列:       已启用（$MAIN_IF，BBR推荐组合）"
     else
-        echo -e "  CAKE队列:     未启用（$MAIN_IF，建议检查内核模块）"
+        echo -e "  FQ队列:       未启用（$MAIN_IF，建议检查 tc 配置）"
     fi
     echo -e "  文件描述符:    65535"
     echo -e "  时区:          Asia/Shanghai"
@@ -1085,7 +1004,7 @@ cmd_help() {
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
     echo "  bash install.sh reinstall    一键重装操作系统（需输入root密码，装完自动重启）"
     echo "  bash install.sh reset        一键重装singbox（保留配置和数据，客户端无需重配）"
-    echo "  bash install.sh optimize     一键优化系统（BBR+FQ+CAKE三合一，即时生效无需重启）"
+    echo "  bash install.sh optimize     一键优化系统（BBR+FQ，即时生效无需重启）"
     echo "  bash install.sh help         显示此帮助"
     echo ""
     echo "子命令说明:"
@@ -1098,15 +1017,14 @@ cmd_help() {
     echo "             - 保留流量统计数据和证书"
     echo ""
     echo "安装流程（全自动，无需手动操作）："
-    echo "  阶段1: 系统更新 → 安装依赖 → BBR+FQ+CAKE三合一加速 → 系统优化"
+    echo "  阶段1: 系统更新 → 安装依赖 → BBR+FQ 网络加速 → 系统优化"
     echo "  阶段2: 卸载旧面板 → 安装singbox → 交互式配置 → 启动服务"
     echo ""
-    echo "BBR+FQ+CAKE三合一加速（海外代理最优方案）："
+    echo "BBR+FQ 网络加速（当前项目基线）："
     echo "  1. BBR加速   — Google拥塞控制，不依赖丢包，主动探测带宽+RTT"
     echo "  2. FQ公平队列 — 为每个TCP连接独立缓冲，BBR的pacing依赖FQ"
-    echo "  3. CAKE队列  — 集成FQ+PIE，防止缓冲区膨胀，抗丢包"
+    echo "  3. FQ队列    — 为每个TCP连接独立排队，减少相互挤压"
     echo "  ⚠️ 即时生效，无需重启服务器"
-    echo "  ⚠️ 内核不支持CAKE时自动降级为FQ-PIE（比FQ更适应高丢包环境）"
     echo ""
 }
 

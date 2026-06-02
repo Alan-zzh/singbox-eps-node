@@ -1,1 +1,1 @@
-v4.10.12 - Clash 极致性能压榨调优：15s物理保活，国内DNS秒开，禁用IPv6
+v4.10.20 - 服务器代码对齐v4.10.20+AI路由废除+评分精简+ALPN h2+short_id强随机+WAL模式+health_check.sh详细日志版
