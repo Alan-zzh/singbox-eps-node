@@ -1111,7 +1111,7 @@ def generate_singbox_config():
                     "reality": {
                         "enabled": True,
                         "public_key": REALITY_PUBLIC_KEY,
-                        "short_id": REALITY_SHORT_ID
+                        "short_id": list(dict.fromkeys([REALITY_SHORT_ID, 'abcd1234']))
                     }
                 }
             },

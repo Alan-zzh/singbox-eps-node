@@ -1,6 +1,15 @@
 # AI 调试历史与防Bug规则
 
-## 最新排查（2026-06-03 v4.10.20）
+## 最新排查（2026-06-03 v4.10.20.2）
+
+### Reality 断连 — short_id 数组只放新值导致老客户端不通
+- **现象**: 用户客户端用 abcd1234（v4.10.19 之前订阅），v4.10.20 把 short_id 改成新值后整站 Reality 断连
+- **根因**: 改 short_id 时只用了 `secrets.token_hex(8)`，没保留旧 abcd1234 作为并存过渡
+- **修复**: 远程直接重写 config.json 数组为 `["新值", "abcd1234"]`；本地代码加 `REALITY_SHORT_ID_LEGACY='abcd1234'` 并存逻辑
+- **教训**: 任何"硬编码"值（密码/UUID/short_id/salt）变更时，必须先用**并存过渡**——新值加进去，旧值保留，**N 个版本后**再删旧值
+- **端到端验证**: 发 TLS ClientHello with short_id=abcd1234 → TCP 0.08s + recv 超时（=Reality 协商中）= 匹配成功
+
+## 历史排查（2026-06-03 v4.10.20）
 
 ### 服务器与本地代码脱节 4 个版本（v4.3.5 vs v4.10.20）
 - **现象**: 服务器 VERSION=v4.3.5，本地=v4.10.20。subscription_service.py/cdn_monitor.py MD5 一致，但 cert_manager.py 和 diagnose.sh 差异

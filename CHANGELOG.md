@@ -7,6 +7,13 @@
 - [opencode] TLS ALPN 启用 HTTP/2：Reality/WS/HTTPUpgrade/Trojan-WS 四处 alpn 从 `["http/1.1"]` 改为 `["h2","http/1.1"]`
 - [opencode] health_check.sh 升级为详细日志版：8 项检查完整输出（内存/服务/端口/连接/日志/磁盘/数据库/证书），estab>1500 告警
 - [opencode] iptables 流量月度归零 cron：每月 3 号 00:03 自动清零 INPUT/OUTPUT 计数器
+
+## v4.10.20.2 - 2026-06-03
+
+- [opencode] **紧急修复 Reality 断连**：v4.10.20 short_id 数组只放新值，客户端仍在用旧值 abcd1234 → 不通。修复：short_id 数组同时保留 `["新值", "abcd1234"]`，老客户端 + 新订阅全部兼容
+- [opencode] config_generator.py / subscription_service.py 加 `REALITY_SHORT_ID_LEGACY='abcd1234'` 并存逻辑（dict.fromkeys 去重保序）
+- [opencode] JP+SG 服务器直接重写 config.json 数组并重启 singbox
+- [opencode] 端到端测试：Python 发 TLS ClientHello + abcd1234 short_id，TCP 0.08s + 握手进入 Reality 协商 = 匹配成功
 - [opencode] 服务器代码与本地版本对齐：v4.3.5 → v4.10.20（cert_manager.py + diagnose.sh + health_check.sh + requirements.txt 同步）
 - [opencode] 本地代码清理：删除明文密码脚本 verify_server_config.py / _deploy_v41019.py；23 个临时脚本归档到 docs/archive/scripts/
 - [opencode] 远程运维增强：requirements.txt 加 paramiko，统一从 .env 读凭据（消除明文硬编码）
