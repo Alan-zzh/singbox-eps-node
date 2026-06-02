@@ -55,7 +55,7 @@
 |------|------|------|
 | health_check.sh | 每15分钟 | 内存/服务/端口/config自愈/磁盘/日志/estab连接告警/iptables 完整 8 项 |
 | cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签 |
-| iptables -Z INPUT/OUTPUT | 每月14号 00:14 | 流量计数器月度归零 |
+| iptables -Z INPUT/OUTPUT | 每月3号 00:03 | 流量计数器月度归零 |
 
 ### 路由规则顺序（服务端）
 1. 私有地址拒绝（127/8/10/8/172.16/12/192.168/16/fd00::/8/::1/128 → block）

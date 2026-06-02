@@ -6,7 +6,7 @@
 - [opencode] Reality short_id 强随机：默认 `abcd1234` 弱预设弃用，运行时 `secrets.token_hex(8)` 生成
 - [opencode] TLS ALPN 启用 HTTP/2：Reality/WS/HTTPUpgrade/Trojan-WS 四处 alpn 从 `["http/1.1"]` 改为 `["h2","http/1.1"]`
 - [opencode] health_check.sh 升级为详细日志版：8 项检查完整输出（内存/服务/端口/连接/日志/磁盘/数据库/证书），estab>1500 告警
-- [opencode] iptables 流量月度归零 cron：每月 14 号 00:14 自动清零 INPUT/OUTPUT 计数器
+- [opencode] iptables 流量月度归零 cron：每月 3 号 00:03 自动清零 INPUT/OUTPUT 计数器
 - [opencode] 服务器代码与本地版本对齐：v4.3.5 → v4.10.20（cert_manager.py + diagnose.sh + health_check.sh + requirements.txt 同步）
 - [opencode] 本地代码清理：删除明文密码脚本 verify_server_config.py / _deploy_v41019.py；23 个临时脚本归档到 docs/archive/scripts/
 - [opencode] 远程运维增强：requirements.txt 加 paramiko，统一从 .env 读凭据（消除明文硬编码）
