@@ -227,10 +227,6 @@ config = {
                 "key_path": _cert_key,
                 "alpn": ["h3"]
             },
-            "obfs": {
-                "type": "salamander",
-                "password": hysteria2_pass[:8]
-            },
             "up_mbps": 200,
             "down_mbps": 200
         }

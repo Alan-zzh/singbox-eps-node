@@ -883,12 +883,10 @@ def generate_all_links():
 
     # 5. Hysteria2 (直连) - 端口443，iptables端口跳跃21000-21200→443
     # ⚠️ mport范围必须与cert_manager.py中setup_hysteria2_port_hopping()一致
-    # ⚠️ obfs=salamander用于规避QUIC检测，obfs-password取HY2密码前8位
+    # 注意：obfs已移除，因为Shadowrocket对salamander支持有限
     params = {
         'sni': REALITY_SNI,
         'insecure': '1',
-        'obfs': 'salamander',
-        'obfs-password': HYSTERIA2_PASSWORD[:8],
         'mport': '443,21000-21200'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
@@ -1218,10 +1216,6 @@ def generate_singbox_config():
                     "enabled": True,
                     "server_name": REALITY_SNI,
                     "insecure": True
-                },
-                "obfs": {
-                    "type": "salamander",
-                    "password": HYSTERIA2_PASSWORD[:8]
                 },
                 "connect_timeout": "5s",
                 "up_mbps": 200,
@@ -1636,8 +1630,6 @@ def generate_clash_config():
         "udp": True,
         "sni": REALITY_SNI,
         "skip-cert-verify": True,
-        "obfs": "salamander",
-        "obfs-password": HYSTERIA2_PASSWORD[:8],
         "ports": "443,21000-21200",
         "up": 200,
         "down": 200

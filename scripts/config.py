@@ -142,13 +142,12 @@ COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 
 HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
 
-# ⚠️ HY2规避配置说明（必须完整保留，禁止删减任何一项）：
-# 1. obfs=salamander：规避QUIC/UDP流量特征检测
-# 2. obfs-password：取HY2密码前8位，必须与singbox配置一致
-# 3. 端口跳跃21000-21200：iptables DNAT转发到443，扩大端口范围规避封锁
-# 4. mport参数：客户端使用的多端口范围，必须与iptables规则一致
-# 5. alpn=["h3"]：HY2使用QUIC协议，必须设置h3
-# 6. ⚠️ 端口跳跃必须同时设置UDP和TCP规则（双协议保障）：
+# ⚠️ HY2配置说明：
+# 1. obfs已移除：Shadowrocket对salamander支持有限，移除后兼容性更好
+# 2. 端口跳跃21000-21200：iptables DNAT转发到443，扩大端口范围规避封锁
+# 3. mport参数：客户端使用的多端口范围，必须与iptables规则一致
+# 4. alpn=["h3"]：HY2使用QUIC协议，必须设置h3
+# 5. ⚠️ 端口跳跃必须同时设置UDP和TCP规则（双协议保障）：
 #    - UDP：HY2核心协议(QUIC)，主要流量走UDP
 #    - TCP：降级兜底，UDP被封或不稳定时HY2可降级使用TCP
 #    - 禁止只设UDP或只设TCP，必须双协议，否则一种被封则HY2完全不可用
