@@ -797,31 +797,19 @@ def generate_all_links():
     links = []
 
     # CDN节点地址：根据CDN_MODE选择 [TRAE SOLO CN] v4.8
-    if CDN_MODE == 'domain_default':
+    # 强制使用域名，避免直连IP被墙
+    if CF_DOMAIN and CF_DOMAIN.strip():
         vless_ws_addr = CF_DOMAIN
         vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
-        cdn_suffix = "-CDN-D"
-        use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
-    elif CDN_MODE == 'domain_optimized':
-        optimized_domain = get_cdn_optimized_domain()
-        vless_ws_addr = optimized_domain or CF_DOMAIN
-        vless_upgrade_addr = optimized_domain or CF_DOMAIN
-        trojan_ws_addr = optimized_domain or CF_DOMAIN
-        cdn_suffix = "-CDN-O"
-        use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
-    else:
-        vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
-        trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
-        use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
         cdn_suffix = "-CDN"
-        if not vless_ws_addr or vless_ws_addr == SERVER_IP:
-            vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
-            trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        use_cdn = True
+    else:
+        vless_ws_addr = SERVER_IP
+        vless_upgrade_addr = SERVER_IP
+        trojan_ws_addr = SERVER_IP
+        cdn_suffix = ""
+        use_cdn = False
 
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
 
@@ -896,25 +884,15 @@ def generate_all_links():
 
 def generate_singbox_config():
     """生成完整sing-box JSON配置（含自动路由规则）"""
-    if CDN_MODE == 'domain_default':
+    # 强制使用域名，避免直连IP被墙
+    if CF_DOMAIN and CF_DOMAIN.strip():
         vless_ws_addr = CF_DOMAIN
         vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
-    elif CDN_MODE == 'domain_optimized':
-        optimized_domain = get_cdn_optimized_domain()
-        vless_ws_addr = optimized_domain or CF_DOMAIN
-        vless_upgrade_addr = optimized_domain or CF_DOMAIN
-        trojan_ws_addr = optimized_domain or CF_DOMAIN
     else:
-        vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
-        trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
-        if not vless_ws_addr or vless_ws_addr == SERVER_IP:
-            vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
-            trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        vless_ws_addr = SERVER_IP
+        vless_upgrade_addr = SERVER_IP
+        trojan_ws_addr = SERVER_IP
 
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
 
@@ -1501,28 +1479,19 @@ def generate_clash_config():
     Clash Verge Rev 内置 mihomo 内核，完全支持所有协议
     配置自带url-test节点组，每60秒自动测速，断线3秒内自动切换
     """
-    if CDN_MODE == 'domain_default':
+    # 强制使用域名，避免直连IP被墙
+    # 直连Cloudflare IP（如162.159.45.x）在部分地区被封
+    # 使用域名让客户端自动解析到可用的Cloudflare IP
+    if CF_DOMAIN and CF_DOMAIN.strip():
         vless_ws_addr = CF_DOMAIN
         vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
-        use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
-    elif CDN_MODE == 'domain_optimized':
-        optimized_domain = get_cdn_optimized_domain()
-        vless_ws_addr = optimized_domain or CF_DOMAIN
-        vless_upgrade_addr = optimized_domain or CF_DOMAIN
-        trojan_ws_addr = optimized_domain or CF_DOMAIN
-        use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
+        use_cdn = True
     else:
-        vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
-        trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
-        use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
-        if not vless_ws_addr or vless_ws_addr == SERVER_IP:
-            vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
-            trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        vless_ws_addr = SERVER_IP
+        vless_upgrade_addr = SERVER_IP
+        trojan_ws_addr = SERVER_IP
+        use_cdn = False
 
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
 
