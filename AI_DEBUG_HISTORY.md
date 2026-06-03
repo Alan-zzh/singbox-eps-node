@@ -2,6 +2,13 @@
 
 ## 最新排查（2026-06-03 v4.10.20.2）
 
+### Cloudflare WAF 拦截用户IP导致日/新/港CDN全断
+- **症状**: 日本+新加坡+香港三个域名的CDN协议全部连不上，Reality/HY2直连正常。域名访问返回Cloudflare 403拦截页
+- **根因**: Cloudflare安全等级为medium，自动化WAF标记了用户公网IP（175.10.212.20 - 湖南电信），拦截所有走CF代理的域名请求。`--resolve` 强制CDN IP+SNI也被拦
+- **修复**: 通过Cloudflare API：1) Security Level → essentially_off（zone级，三个域名全部生效） 2) IP 175.10.212.20 加入WAF whitelist
+- **验证**: 修复前jp/sg域名2087返回403；修复后三个域名全部200 OK（jp 1.79s, sg 5.64s, hk 1.77s）
+- **教训**: Cloudflare免费版的medium安全等级会自动拦截代理流量来源IP，必须设为essentially_off或用API加白名单。用户IP是动态的，所以zone级关防护才是根本解
+
 ### Reality 断连 — short_id 数组只放新值导致老客户端不通
 - **现象**: 用户客户端用 abcd1234（v4.10.19 之前订阅），v4.10.20 把 short_id 改成新值后整站 Reality 断连
 - **根因**: 改 short_id 时只用了 `secrets.token_hex(8)`，没保留旧 abcd1234 作为并存过渡
