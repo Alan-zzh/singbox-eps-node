@@ -1,3 +1,7 @@
+## v4.10.20.3 - 2026-06-03
+
+- [opencode] **紧急修复 Cloudflare WAF 拦截CDN全断**：CF安全等级medium自动封禁用户IP 175.10.212.20，导致jp/sg/hk三个域名CDN全部403。通过CF API将Security Level降为essentially_off + IP加whitelist，三站全部恢复200 OK
+
 ## v4.10.20 - 2026-06-03
 
 - [opencode] AI-SOCKS5 路由功能正式废除：删除服务端/客户端 outbounds 中所有 ai-residential 出站，路由表只保留 direct+block

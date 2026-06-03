@@ -1,8 +1,30 @@
 # AI 调试历史与防Bug规则
 
-## 最新排查（2026-06-03 v4.10.20.2）
+## 最新排查（2026-06-03 v4.10.20.3）
 
-### Cloudflare WAF 拦截用户IP导致日/新/港CDN全断
+### Cloudflare WAF 403 复发 + DNS PROXIED 导致订阅链接不通
+- **症状**: 新部署香港节点后，CDN协议全断+订阅链接返回403。JP/SG/HK三个域名访问2087端口全部403，但直连IP正常返回200
+- **根因**: 两个问题叠加：1) Cloudflare Security Level=medium自动拦截代理流量（同v4.10.20.2）2) DNS PROXIED（橙色云）导致订阅请求经过Cloudflare代理被额外拦截
+- **修复**: 1) API批量设置三域名Security Level→essentially_off+Browser Check→off 2) DNS全部改为DNS-only（灰色云），订阅直连不走CF
+- **验证**: 三台服务器本地测试200 OK，域名访问恢复正常
+- **教训**: DNS PROXIED会导致Cloudflare代理非标准端口(2087)的订阅请求，CF免费版对此类流量额外拦截。订阅链接不应走CF代理，DNS必须设为灰色云。JP/SG/HK均已验证
+
+### fq_pie 复发：install.sh 仍写死 fq_pie，导致 Reality 变卡
+- **症状**: 新部署香港节点后Reality直连延迟飙升，之前JP/SG正常
+- **根因**: v4.10.20修复了JP/SG的sysctl但遗漏了install.sh。install.sh仍写死`fq_pie`，每次新部署重装系统后自动设回fq_pie，BBR不兼容fq_pie导致TCP性能断崖下降
+- **修复**: 1) 三台服务器sysctl+tc即时改fq_pie→fq 2) install.sh全局替换fq_pie→fq
+- **验证**: `sysctl net.core.default_qdisc=fq` 三台全部确认，tc qdisc确认
+- **教训**: 已升级为全局规则（见AGENTS.md §重点禁忌 #15），install.sh禁止包含fq_pie
+
+### AI 误操作：删除obfs+改成域名导致全部节点不可用
+- **症状**: 用户反馈CDN全掉，Shadowrocket Trojan/HY2超时
+- **根因**: AI误删除Hysteria2的obfs salamander配置，并强制CDN节点使用域名而非直连IP
+- **修复**: 恢复原始代码，CDN节点恢复使用get_cdn_ip_for_protocol()直连IP，HY2恢复obfs
+- **教训**: 修改代码前必须先读AI_DEBUG_HISTORY.md和project_snapshot.md了解历史踩坑
+
+## 历史排查（2026-06-03 v4.10.20.2）
+
+### Cloudflare WAF 拦截用户IP导致日/新/港CDN全断（∮ 已复发 v4.10.20.3）
 - **症状**: 日本+新加坡+香港三个域名的CDN协议全部连不上，Reality/HY2直连正常。域名访问返回Cloudflare 403拦截页
 - **根因**: Cloudflare安全等级为medium，自动化WAF标记了用户公网IP（175.10.212.20 - 湖南电信），拦截所有走CF代理的域名请求。`--resolve` 强制CDN IP+SNI也被拦
 - **修复**: 通过Cloudflare API：1) Security Level → essentially_off（zone级，三个域名全部生效） 2) IP 175.10.212.20 加入WAF whitelist
