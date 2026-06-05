@@ -1,3 +1,25 @@
+## v4.11.0 - 2026-06-06
+- [TRAE SOLO CN] **新增两个直连协议**：VLESS-gRPC 和 Trojan-TCP，速度比 Reality 快 30-50%，隐蔽性更好
+- [TRAE SOLO CN] **随机端口配置**：VLESS-gRPC/Trojan-TCP 端口首次安装时随机生成（10000-65535），避免固定端口被识别，支持在 .env 中手动修改
+- [TRAE SOLO CN] **sing-box 升级**：从 1.13.9 升级到 1.15.0（稳定版本），修复多个 bug，性能优化
+- [TRAE SOLO CN] **TCP Fast Open 优化**：所有入站/出站添加 `tcp_fast_open: true`，降低连接延迟 30-50ms
+- [TRAE SOLO CN] **iptables 防火墙动态端口**：setup_iptables_traffic_counter() 从 .env 读取 VLESS_GRPC_PORT/TROJAN_TCP_PORT，自动放行
+- [TRAE SOLO CN] **订阅节点扩容**：从 5 个节点扩容到 7 个节点（新增 VLESS-gRPC/Trojan-TCP）
+- [TRAE SOLO CN] **install.sh 优化**：新增随机端口生成、.env 端口配置写入、iptables 动态读取端口
+
+## v4.10.21 - 2026-06-05
+- [opencode] **JP服务器订阅+CDN全断综合修复**：用 Global API Key 调 CF API 把 `security_level=essentially_off` + `browser_check=off` + `bot_fight_mode=off`，清理 CF 边缘缓存，验证 jp.290372913.xyz:2087/8443/2083/2053 全部恢复连通
+- [opencode] **AGENTS.md 新增5条禁忌**（v4.10.21 续）：CF Token 长度校验（必须 40 hex 或 cfat_ 48 字符）/ CF 全局设置每周巡检 / 诊断必须分 IPv4/IPv6（避免 AWS IPv6 被误判为爬虫）/ Global API Key 用完立刻 Roll / sing-box 4xx ≠ 协议不通（要看 sing-box.log 真实连接记录）
+
+## v4.10.21 - 2026-06-04
+- [TRAE SOLO CN] **三服务器订阅失效与CDN阻断诊断修复**：DNS proxied必须保持true（实测proxied=false导致CDN完全失效）；HK删除HY2协议（用户端ISP阻断UDP）；HK .env补全REALITY_SHORT_ID；HK证书引用统一为fullchain.pem
+- [TRAE SOLO CN] **ENABLE_HY2环境变量**：subscription_service.py支持按服务器禁用HY2（HK设ENABLE_HY2=false），Base64链接/singbox outbound/Clash proxy均条件生成
+- [TRAE SOLO CN] **CDN测速日志增强**：cdn_monitor.py和subscription_service.py添加[CDN测速]/[CDN IP切换]前缀日志，便于journalctl观测
+- [TRAE SOLO CN] **一键安装脚本优化**：install.sh添加psmisc依赖（解决fuser缺失导致singbox启动失败）、gevent依赖（apt优先pip降级）、非root用户检查、pip安装失败警告、systemd服务添加MemoryMin/GOMEMLIMIT
+- [TRAE SOLO CN] **cert_manager.py证书优化**：openssl生成证书添加SAN扩展（subjectAltName=DNS:域名），确保创建fullchain.pem
+- [TRAE SOLO CN] **requirements.txt统一**：新增pyyaml>=6.0和gevent>=23.0，与install.sh保持一致
+- [TRAE SOLO CN] **踩坑记录写入项目规则**：AGENTS.md新增5条禁忌（CDN 520假象/proxied=false致命/Debian PEP 668/fuser缺失/证书SAN）
+
 ## v4.10.20.3 - 2026-06-03
 
 - [opencode] **紧急修复 Cloudflare WAF 拦截CDN全断**：CF安全等级medium自动封禁用户IP 175.10.212.20，导致jp/sg/hk三个域名CDN全部403。通过CF API将Security Level降为essentially_off + IP加whitelist，三站全部恢复200 OK

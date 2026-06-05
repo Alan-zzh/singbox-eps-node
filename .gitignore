@@ -19,10 +19,13 @@ venv/
 deploy.py
 deploy_server.py
 deploy_*.py
+deploy_all_servers.ps1
+deploy_all_servers.py
 # 一次性调试脚本
 check_*.py
 do_*.py
 fix_*.py
+temp_*.py
 # IDE 配置
 .trae/
 .idea/

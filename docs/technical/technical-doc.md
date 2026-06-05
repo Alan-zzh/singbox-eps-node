@@ -1,9 +1,9 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v4.10.19 | **更新**: 2026-06-02
+**版本**: v4.11.0 | **更新**: 2026-06-06
 
 > 注意：本文档从根目录 TECHNICAL_DOC.md 迁移而来，原版本标注为 v4.3.6 已严重过时。
-> 当前项目实际版本为 v4.10.19，本文档中的架构和模块说明仍具参考价值，但版本历史部分请以 CHANGELOG.md 为准。
+> 当前项目实际版本为 v4.11.0，本文档中的架构和模块说明仍具参考价值，但版本历史部分请以 CHANGELOG.md 为准。
 
 ---
 
@@ -11,7 +11,7 @@
 
 全自动CDN优选IP管理 + 多协议代理订阅生成系统。一条命令完成部署，客户端导入订阅即可使用。
 
-- **代理内核**: sing-box 1.10.0
+- **代理内核**: sing-box 1.15.0
 - **后端**: Python 3 + Flask
 - **数据库**: SQLite
 - **CDN**: Cloudflare
@@ -24,7 +24,7 @@
 ### 服务列表
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| singbox | 443, 8443, 2053, 2083 | 代理内核 |
+| singbox | 443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT | 代理内核 |
 | singbox-sub | 2087 | HTTPS订阅（走CDN） |
 | singbox-cdn | - | CDN优选IP监控（v4.0 用户反馈驱动版，每小时存活检测） |
 
@@ -32,6 +32,8 @@
 | 节点 | 地址 | 方式 |
 |------|------|------|
 | {CC}-VLESS-Reality | {IP}:443 | 直连 |
+| {CC}-VLESS-gRPC | {IP}:VLESS_GRPC_PORT | 直连 |
+| {CC}-Trojan-TCP | {IP}:TROJAN_TCP_PORT | 直连 |
 | {CC}-VLESS-WS-CDN | 优选IP:8443 | CDN |
 | {CC}-VLESS-HTTPUpgrade-CDN | 优选IP:2053 | CDN |
 | {CC}-Trojan-WS-CDN | 优选IP:2083 | CDN |
@@ -47,6 +49,8 @@
 | 2083 | Trojan-WS-CDN | ✅ |
 | 2087 | 订阅服务 | ✅ |
 | 8443 | VLESS-WS-CDN | ✅ |
+| VLESS_GRPC_PORT | VLESS-gRPC（随机10000-65535） | ❌ |
+| TROJAN_TCP_PORT | Trojan-TCP（随机10000-65535） | ❌ |
 | 1080 | SOCKS5本地代理 | ❌ |
 | 21000-21200 | HY2端口跳跃→443 | ❌ |
 

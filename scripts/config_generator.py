@@ -51,7 +51,11 @@ REALITY_SHORT_ID_LEGACY = 'abcd1234'
 server_ip = env_vars.get('SERVER_IP', '')
 cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
 socks5_user = env_vars.get('SOCKS5_USER', '')
-socks5_pass = env_vars.get('SOCKS5_PASS', '')
+socks5_pass = env_vars.get('SOCKS5_PASSWORD', '')
+
+# 读取协议端口配置（从环境变量或使用默认值）
+vless_grpc_port = int(env_vars.get('VLESS_GRPC_PORT', '50051'))
+trojan_tcp_port = int(env_vars.get('TROJAN_TCP_PORT', '50443'))
 
 ai_socks5_server = env_vars.get('AI_SOCKS5_SERVER', '')
 ai_socks5_port = env_vars.get('AI_SOCKS5_PORT', '')
@@ -145,6 +149,8 @@ config = {
             "tag": "vless-reality",
             "listen": "0.0.0.0",
             "listen_port": 443,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
             "users": [{"uuid": vless_uuid, "flow": "xtls-rprx-vision"}],
             "tls": {
                 "enabled": True,
@@ -162,6 +168,8 @@ config = {
             "tag": "vless-ws",
             "listen": "0.0.0.0",
             "listen_port": 8443,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
             "users": [{"uuid": vless_ws_uuid}],
             "transport": {
                 "type": "ws",
@@ -181,6 +189,8 @@ config = {
             "tag": "vless-upgrade",
             "listen": "0.0.0.0",
             "listen_port": 2053,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
             "users": [{"uuid": vless_ws_uuid}],
             "transport": {
                 "type": "httpupgrade",
@@ -200,6 +210,8 @@ config = {
             "tag": "trojan-ws",
             "listen": "0.0.0.0",
             "listen_port": 2083,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
             "users": [{"password": trojan_pass}],
             "transport": {
                 "type": "ws",
@@ -219,6 +231,8 @@ config = {
             "tag": "hysteria2",
             "listen": "0.0.0.0",
             "listen_port": 443,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
             "users": [{"password": hysteria2_pass}],
             "tls": {
                 "enabled": True,
@@ -233,6 +247,42 @@ config = {
             },
             "up_mbps": 200,
             "down_mbps": 200
+        },
+        {
+            "type": "vless",
+            "tag": "vless-grpc",
+            "listen": "0.0.0.0",
+            "listen_port": vless_grpc_port,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
+            "users": [{"uuid": vless_uuid}],
+            "transport": {
+                "type": "grpc",
+                "service_name": "gun"
+            },
+            "tls": {
+                "enabled": True,
+                "server_name": cf_domain or server_ip,
+                "certificate_path": _cert_chain,
+                "key_path": _cert_key,
+                "alpn": ["h2", "http/1.1"]
+            }
+        },
+        {
+            "type": "trojan",
+            "tag": "trojan-tcp",
+            "listen": "0.0.0.0",
+            "listen_port": trojan_tcp_port,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
+            "users": [{"password": trojan_pass}],
+            "tls": {
+                "enabled": True,
+                "server_name": cf_domain or server_ip,
+                "certificate_path": _cert_chain,
+                "key_path": _cert_key,
+                "alpn": ["h2", "http/1.1"]
+            }
         }
     ],
     "outbounds": [
@@ -420,4 +470,4 @@ with open(os.path.join(BASE_DIR, "config.json"), 'w') as f:
 
 print("[OK] Singbox配置已保存")
 print(f"  配置文件: {os.path.join(BASE_DIR, 'config.json')}")
-print(f"  入站协议: VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2" + (", SOCKS5" if socks5_user and socks5_pass else ""))
+print(f"  入站协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2" + (", SOCKS5" if socks5_user and socks5_pass else ""))

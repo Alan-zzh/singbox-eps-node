@@ -1,1 +1,1 @@
-v4.10.20.3 - Cloudflare安全等级降为essentially_off + 用户IP加白名单，修复日/新/港CDN全断
+v4.11.0 - 新增VLESS-gRPC/Trojan-TCP直连协议 + sing-box升级1.15.0 + TCP Fast Open优化 + 随机端口配置（HK/JP/SG三服务器同步）

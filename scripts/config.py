@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 统一配置模块
 Author: Alan
@@ -125,6 +125,9 @@ VLESS_WS_PORT = 8443
 VLESS_UPGRADE_PORT = 2053
 TROJAN_WS_PORT = 2083
 HYSTERIA2_PORT = 443
+# VLESS-gRPC / Trojan-TCP 可配置端口（从 .env 读取，不固定，随机更安全）
+VLESS_GRPC_PORT = int(os.getenv('VLESS_GRPC_PORT', '0')) or 50051
+TROJAN_TCP_PORT = int(os.getenv('TROJAN_TCP_PORT', '0')) or 50443
 SOCKS5_PORT = 1080
 
 LOCKED_PORTS = {
@@ -134,6 +137,8 @@ LOCKED_PORTS = {
     'VLESS_UPGRADE_PORT': VLESS_UPGRADE_PORT,
     'TROJAN_WS_PORT': TROJAN_WS_PORT,
     'HYSTERIA2_PORT': HYSTERIA2_PORT,
+    'VLESS_GRPC_PORT': VLESS_GRPC_PORT,
+    'TROJAN_TCP_PORT': TROJAN_TCP_PORT,
     'SOCKS5_PORT': SOCKS5_PORT,
 }
 

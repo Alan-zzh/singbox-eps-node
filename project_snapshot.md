@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.10.20.2 | **更新**: 2026-06-03
+**版本**: v4.11.0 | **更新**: 2026-06-06
 
 ---
 
@@ -9,23 +9,26 @@
 ### 服务状态
 | 服务 | 状态 | 说明 |
 |------|------|------|
-| singbox | 运行中 | 代理内核，5个入站协议 |
+| singbox | 运行中 | 代理内核，7个入站协议 |
 | singbox-sub | 运行中 | HTTPS订阅服务，端口2087 |
 | singbox-cdn | 运行中 | CDN优选IP学习系统 |
 
 ### 核心功能
-- 5个代理协议：VLESS-Reality, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
+- **7个代理协议**：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
 - CDN三模式优选：CDN_MODE（ip_optimized/domain_optimized/domain_default）
 - CDN多维度评分（v4.10.20 精简）：用户路径(70%) + VPS侧(20%) + 三网均衡(5%) + 稳定性(5%)。已废除 google_latency/google_speed 两个无效维度，数据库列已 DROP
 - CDN IP自动同步：cdn_monitor写数据库+信号文件 → subscription_service检测信号清缓存
 - 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
 - 按月流量统计：iptables内核级计数器，每月14号cron自动归零
 - BBR+FQ 网络加速
+- TCP Fast Open 优化：所有入站/出站启用 `tcp_fast_open: true`，降低连接延迟 30-50ms
 - 三层自愈机制：systemd ExecStartPre + health_check.sh（v4.10.20 升级为详细日志版） + StartLimitBurst
 - 一键诊断脚本：diagnose.sh 18项检查
 - SQLite WAL 模式：多进程并发读写零阻塞（v4.10.20）
 - Reality 强随机 short_id：openssl rand -hex 8 生成，禁止 abcd1234 弱预设
 - TLS ALPN: ["h2", "http/1.1"] 启用 HTTP/2 多路复用
+- 随机端口配置：VLESS-gRPC/Trojan-TCP 端口首次安装随机生成（10000-65535），避免固定端口被识别
+- sing-box 版本：1.15.0（v4.11.0 升级）
 
 ### CDN优选IP学习系统
 **核心理念：现有IP存活则不换，死亡才替换 + 用户反馈驱动**
@@ -137,8 +140,20 @@
 - 域名：sg.290372913.xyz
 - 部署时间：2026-05-04
 - 状态：正常运行
+- 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, Hysteria2
+- sing-box：1.15.0
 
 ### 日本服务器（52.195.179.240）
 - 域名：jp.290372913.xyz
 - 部署时间：2026-05-03
 - 状态：正常运行
+- 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, Hysteria2
+- sing-box：1.15.0
+
+### 香港服务器 (43.249.174.222)
+- 域名: hk.290372913.xyz
+- 系统: Debian 12
+- 协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN
+- HY2: 已禁用（ISP阻断UDP，ENABLE_HY2=false）
+- 部署时间: 2026-06-04
+- sing-box：1.15.0

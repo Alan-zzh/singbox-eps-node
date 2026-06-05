@@ -20,6 +20,12 @@
 
 set -e
 
+# 非root用户检查 [Trae CN] 2026-06-04
+if [ "$EUID" -ne 0 ]; then
+    echo "[错误] 此脚本必须以root用户运行"
+    exit 1
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -78,7 +84,7 @@ install_dependencies() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         curl wget unzip python3 python3-pip python3-venv \
         cron iptables-persistent sqlite3 dnsutils openssl \
-        net-tools procps iproute2
+        net-tools procps iproute2 psmisc
     log_info "运行依赖安装完成"
 }
 
@@ -331,7 +337,7 @@ install_singbox() {
         *)       log_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
 
-    SINGBOX_VER="1.13.9"
+    SINGBOX_VER="1.15.0"
     SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}.tar.gz"
     log_info "下载 Singbox v${SINGBOX_VER} (${SINGBOX_ARCH})..."
     cd /tmp
@@ -363,8 +369,13 @@ clone_repo() {
 setup_python_env() {
     log_step "配置Python环境..."
     cd "$BASE_DIR"
-    pip3 install --break-system-packages --quiet flask python-dotenv pyyaml 2>/dev/null || pip3 install --quiet flask python-dotenv pyyaml 2>/dev/null || apt-get install -y -qq python3-flask python3-dotenv python3-yaml 2>/dev/null || true
-    log_info "Python依赖已安装（flask + python-dotenv + pyyaml）"
+    pip3 install --break-system-packages --quiet flask python-dotenv pyyaml 2>/dev/null || pip3 install --quiet flask python-dotenv pyyaml 2>/dev/null || apt-get install -y -qq python3-flask python3-dotenv python3-yaml 2>/dev/null || echo "[警告] pip安装flask/python-dotenv/pyyaml失败，部分功能可能异常"
+    # 安装gevent（优先apt，降级pip）[Trae CN] 2026-06-04
+    apt-get install -y -qq python3-gevent 2>/dev/null || \
+        pip3 install --break-system-packages --quiet gevent 2>/dev/null || \
+        pip3 install --quiet gevent 2>/dev/null || \
+        echo "[警告] gevent安装失败，订阅服务将使用Flask开发服务器"
+    log_info "Python依赖已安装（flask + python-dotenv + pyyaml + gevent）"
 }
 
 generate_uuids_and_passwords() {
@@ -387,6 +398,9 @@ generate_uuids_and_passwords() {
     VLESS_WS_UUID=${VLESS_WS_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     TROJAN_PASSWORD=${TROJAN_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
     HYSTERIA2_PASSWORD=${HYSTERIA2_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
+    # 随机端口生成（10000-65535 之间，避免常用端口）
+    VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
+    TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
     if [ -n "$SERVER_IP" ]; then
         COUNTRY_CODE=$(curl -s --connect-timeout 5 "https://ipinfo.io/${SERVER_IP}/country" 2>/dev/null | tr -d '[:space:]' || echo "")
@@ -394,6 +408,7 @@ generate_uuids_and_passwords() {
     COUNTRY_CODE=${COUNTRY_CODE:-US}
     log_info "服务器IP: ${SERVER_IP}，国家代码: ${COUNTRY_CODE}"
     log_info "UUID和密码已生成"
+    log_info "VLESS-gRPC端口: ${VLESS_GRPC_PORT}，Trojan-TCP端口: ${TROJAN_TCP_PORT}"
 }
 
 generate_reality_keys() {
@@ -515,6 +530,10 @@ HYSTERIA2_PASSWORD=${HYSTERIA2_PASSWORD}
 REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
 REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
 
+# ============ 协议端口（直连协议随机生成，避免被封）=========
+VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
+TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
+
 # ============ 可选 ============
 CF_API_TOKEN=${CF_API_TOKEN_INPUT}
 COUNTRY_CODE=${COUNTRY_CODE}
@@ -571,6 +590,8 @@ ExecStart=/usr/local/bin/sing-box run -c ${BASE_DIR}/config.json
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65535
+MemoryMin=64M
+Environment=GOMEMLIMIT=128MiB
 
 [Install]
 WantedBy=multi-user.target
@@ -588,6 +609,8 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+MemoryMin=32M
+Environment=GOMEMLIMIT=80MiB
 
 [Install]
 WantedBy=multi-user.target
@@ -605,6 +628,8 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+MemoryMin=32M
+Environment=GOMEMLIMIT=80MiB
 
 [Install]
 WantedBy=multi-user.target
@@ -699,6 +724,15 @@ clean_crontab_conflicts() {
 
 setup_iptables_traffic_counter() {
     log_step "配置iptables流量计数器（sing-box各入站端口）..."
+    # 从 .env 读取端口配置
+    if [ -f "$BASE_DIR/.env" ]; then
+        VLESS_GRPC_PORT=$(grep "^VLESS_GRPC_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
+        TROJAN_TCP_PORT=$(grep "^TROJAN_TCP_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
+    fi
+    # 默认值
+    VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-50051}
+    TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-50443}
+
     iptables -F INPUT 2>/dev/null || true
     iptables -A INPUT -p tcp --dport 443 -j ACCEPT
     iptables -A INPUT -p udp --dport 443 -j ACCEPT
@@ -710,10 +744,15 @@ setup_iptables_traffic_counter() {
     iptables -A INPUT -p udp --dport 2083 -j ACCEPT
     iptables -A INPUT -p tcp --dport 2087 -j ACCEPT
     iptables -A INPUT -p udp --dport 2087 -j ACCEPT
+    # 动态端口
+    iptables -A INPUT -p tcp --dport $VLESS_GRPC_PORT -j ACCEPT
+    iptables -A INPUT -p udp --dport $VLESS_GRPC_PORT -j ACCEPT
+    iptables -A INPUT -p tcp --dport $TROJAN_TCP_PORT -j ACCEPT
+    iptables -A INPUT -p udp --dport $TROJAN_TCP_PORT -j ACCEPT
     iptables -A INPUT -p udp --dport 21000:21200 -j ACCEPT
     iptables -A INPUT -p tcp --dport 21000:21200 -j ACCEPT
     netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/21000-21200）"
+    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/$VLESS_GRPC_PORT/$TROJAN_TCP_PORT/21000-21200）"
 }
 
 start_services() {

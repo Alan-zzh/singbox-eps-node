@@ -61,6 +61,7 @@ try:
     from config import (
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
+        VLESS_GRPC_PORT, TROJAN_TCP_PORT,
         HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
         AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR,
@@ -300,6 +301,8 @@ VLESS_WS_UUID = os.getenv('VLESS_WS_UUID', '')
 VLESS_UPGRADE_PORT = VLESS_UPGRADE_PORT if 'VLESS_UPGRADE_PORT' in dir() else int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
 TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
 HYSTERIA2_PASSWORD = os.getenv('HYSTERIA2_PASSWORD', '')
+# [Trae CN] 2026-06-04: 支持按服务器禁用HY2（如HK因ISP阻断UDP设ENABLE_HY2=false）
+ENABLE_HY2 = os.getenv('ENABLE_HY2', 'true').lower() == 'true'
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
 EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
 
@@ -344,7 +347,7 @@ def setup_iptables_traffic_counters():
     - 端口：443(VLESS-Reality/HY2), 8443(VLESS-WS), 2053(VLESS-HTTPUpgrade), 2083(Trojan-WS)
     幂等操作：重复调用不会添加重复规则
     """
-    singbox_ports = [443, 8443, 2053, 2083]
+    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT]
 
     for port in singbox_ports:
         # 先检查规则是否已存在（幂等）
@@ -370,7 +373,7 @@ def get_iptables_traffic_bytes():
     原理：iptables -L INPUT -v -n -x 返回每条规则的packet/byte计数器
     取所有sing-box端口规则的bytes总和
     """
-    singbox_ports = [443, 8443, 2053, 2083]
+    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT]
     total_bytes = 0
 
     cmd = 'iptables -L INPUT -v -n -x'
@@ -688,6 +691,7 @@ def get_cdn_ip_for_protocol(protocol_key):
                 return current_ip  # 数据不足，暂不淘汰
         # 当前IP被阻断或被硬淘汰，从cdn_ips_list中换一个
         logger.warning(f"CDN IP {current_ip} 被阻断，从池中换IP")
+        print(f"[CDN IP切换] CDN IP {current_ip} 被阻断，从池中换IP")
 
         # 获取cdn_ips_list
         cursor.execute("SELECT value FROM cdn_settings WHERE key='cdn_ips_list'")
@@ -758,10 +762,12 @@ def get_cdn_ip_for_protocol(protocol_key):
         conn.commit()
 
         logger.info(f"CDN IP已替换: {current_ip} -> {new_ip}")
+        print(f"[CDN IP切换] CDN IP切换: {current_ip} -> {new_ip}")
         return new_ip
 
     except Exception as e:
         logger.debug(f"获取CDN IP失败: {e}")
+        print(f"[CDN IP切换] 获取CDN IP失败: {e}")
         return None
     finally:
         if conn:
@@ -835,14 +841,36 @@ def generate_all_links():
         'fp': 'chrome',
         'pbk': REALITY_PUBLIC_KEY,
         'sid': REALITY_SHORT_ID,
-        'spx': '',
         'dest': REALITY_DEST,
         'headerType': 'none'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
     links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-VLESS-Reality")
 
-    # 2. VLESS-WS (CDN)
+    # 2. VLESS-gRPC (直连)
+    params = {
+        'encryption': 'none',
+        'type': 'grpc',
+        'serviceName': 'gun',
+        'security': 'tls',
+        'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
+        'fp': 'chrome',
+    }
+    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
+    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:{VLESS_GRPC_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-gRPC")
+
+    # 3. Trojan-TCP (直连)
+    params = {
+        'security': 'tls',
+        'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
+        'type': 'tcp',
+        'headerType': 'none',
+        'allowInsecure': '1'
+    }
+    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
+    links.append(f"trojan://{TROJAN_PASSWORD}@{SERVER_IP}:{TROJAN_TCP_PORT}?{param_str}#{COUNTRY_CODE}-Trojan-TCP")
+
+    # 4. VLESS-WS (CDN)
     params = {
         'encryption': 'none',
         'type': 'ws',
@@ -884,15 +912,17 @@ def generate_all_links():
     # 5. Hysteria2 (直连) - 端口443，iptables端口跳跃21000-21200→443
     # ⚠️ mport范围必须与cert_manager.py中setup_hysteria2_port_hopping()一致
     # ⚠️ obfs=salamander用于规避QUIC检测，obfs-password取HY2密码前8位
-    params = {
-        'sni': REALITY_SNI,
-        'insecure': '1',
-        'obfs': 'salamander',
-        'obfs-password': HYSTERIA2_PASSWORD[:8],
-        'mport': '443,21000-21200'
-    }
-    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"hysteria2://{HYSTERIA2_PASSWORD}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-Hysteria2")
+    # [Trae CN] 2026-06-04: ENABLE_HY2=false时跳过（如HK因ISP阻断UDP）
+    if ENABLE_HY2:
+        params = {
+            'sni': REALITY_SNI,
+            'insecure': '1',
+            'obfs': 'salamander',
+            'obfs-password': HYSTERIA2_PASSWORD[:8],
+            'mport': '443,21000-21200'
+        }
+        param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
+        links.append(f"hysteria2://{HYSTERIA2_PASSWORD}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-Hysteria2")
 
     return links
 
@@ -1040,15 +1070,18 @@ def generate_singbox_config():
         "outbounds": [
             # ePS-Auto: 用户可见的节点选择器（只包含5个代理节点+direct）
             # ⚠️ AI-SOCKS5不在此列表中，它是幕后路由出站，用户不应手动选择
+            # [Trae CN] 2026-06-04: ENABLE_HY2=false时selector不含HY2
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
                 "outbounds": [
                     f"{COUNTRY_CODE}-VLESS-Reality",
+                    f"{COUNTRY_CODE}-VLESS-gRPC",
+                    f"{COUNTRY_CODE}-Trojan-TCP",
                     f"{COUNTRY_CODE}-VLESS-WS",
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
-                    f"{COUNTRY_CODE}-Hysteria2",
+                ] + ([f"{COUNTRY_CODE}-Hysteria2"] if ENABLE_HY2 else []) + [
                     "ePS-Auto-Test",
                     "direct"
                 ],
@@ -1059,6 +1092,8 @@ def generate_singbox_config():
                 "type": "urltest",
                 "tag": "ePS-Auto-Test",
                 "outbounds": [
+                    f"{COUNTRY_CODE}-VLESS-gRPC",
+                    f"{COUNTRY_CODE}-Trojan-TCP",
                     f"{COUNTRY_CODE}-VLESS-WS",
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
@@ -1097,6 +1132,8 @@ def generate_singbox_config():
                 "uuid": VLESS_UUID,
                 "flow": "xtls-rprx-vision",
                 "packet_encoding": "xudp",
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
                 },
@@ -1115,6 +1152,59 @@ def generate_singbox_config():
                     }
                 }
             },
+            # VLESS-gRPC (直连)
+            {
+                "type": "vless",
+                "tag": f"{COUNTRY_CODE}-VLESS-gRPC",
+                "server": SERVER_IP,
+                "server_port": VLESS_GRPC_PORT,
+                "uuid": VLESS_UUID,
+                "packet_encoding": "xudp",
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
+                "multiplex": {
+                    "enabled": False
+                },
+                "connect_timeout": "5s",
+                "tls": {
+                    "enabled": True,
+                    "server_name": cdn_sni,
+                    "insecure": True,
+                    "utls": {
+                        "enabled": True,
+                        "fingerprint": "chrome"
+                    },
+                    "alpn": ["h2", "http/1.1"]
+                },
+                "transport": {
+                    "type": "grpc",
+                    "service_name": "gun"
+                }
+            },
+            # Trojan-TCP (直连)
+            {
+                "type": "trojan",
+                "tag": f"{COUNTRY_CODE}-Trojan-TCP",
+                "server": SERVER_IP,
+                "server_port": TROJAN_TCP_PORT,
+                "password": TROJAN_PASSWORD,
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
+                "multiplex": {
+                    "enabled": False
+                },
+                "connect_timeout": "5s",
+                "tls": {
+                    "enabled": True,
+                    "server_name": cdn_sni,
+                    "insecure": True,
+                    "utls": {
+                        "enabled": True,
+                        "fingerprint": "chrome"
+                    },
+                    "alpn": ["h2", "http/1.1"]
+                }
+            },
             # VLESS-WS (CDN)
             {
                 "type": "vless",
@@ -1123,6 +1213,8 @@ def generate_singbox_config():
                 "server_port": VLESS_WS_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
                 },
@@ -1153,6 +1245,8 @@ def generate_singbox_config():
                 "server_port": VLESS_UPGRADE_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
                 },
@@ -1180,6 +1274,8 @@ def generate_singbox_config():
                 "server": trojan_ws_addr,
                 "server_port": TROJAN_WS_PORT,
                 "password": TROJAN_PASSWORD,
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
                 },
@@ -1207,13 +1303,16 @@ def generate_singbox_config():
             # 工作原理：客户端初始连443，后续QUIC连接自动切换到21000-21200范围内的端口
             # 服务端iptables将21000-21200全部DNAT到443，所以无论客户端跳到哪个端口都能到达HY2
             # 效果：当某个端口被封锁/干扰时，客户端自动跳到其他端口，无需断线重连
-            {
+            # [Trae CN] 2026-06-04: ENABLE_HY2=false时不含此outbound
+        ] + ([{
                 "type": "hysteria2",
                 "tag": f"{COUNTRY_CODE}-Hysteria2",
                 "server": SERVER_IP,
                 "server_port": 443,
                 "hop_ports": "21000-21200",
                 "password": HYSTERIA2_PASSWORD,
+                "tcp_fast_open": True,
+                "tcp_multi_path": False,
                 "tls": {
                     "enabled": True,
                     "server_name": REALITY_SNI,
@@ -1226,10 +1325,10 @@ def generate_singbox_config():
                 "connect_timeout": "5s",
                 "up_mbps": 200,
                 "down_mbps": 200
-            },
+            }] if ENABLE_HY2 else []) + ([
             # AI-SOCKS5代理池 - 多代理自动容错切换
             # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
-        ] + ([{
+            {
                 "type": "socks",
                 "tag": f"AI-SOCKS5-{i+1}",
                 "server": proxy['server'],
@@ -1556,7 +1655,40 @@ def generate_clash_config():
         "servername": REALITY_SNI
     })
     
-    # 2. VLESS-WS (CDN) - Clash Meta支持
+    # 2. VLESS-gRPC (直连)
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-VLESS-gRPC",
+        "type": "vless",
+        "server": SERVER_IP,
+        "port": VLESS_GRPC_PORT,
+        "uuid": VLESS_UUID,
+        "tls": True,
+        "udp": True,
+        "network": "grpc",
+        "grpc-opts": {
+            "grpc-service-name": "gun"
+        },
+        "client-fingerprint": "chrome",
+        "servername": cdn_sni,
+        "skip-cert-verify": True
+    })
+    
+    # 3. Trojan-TCP (直连)
+    proxies.append({
+        "name": f"{COUNTRY_CODE}-Trojan-TCP",
+        "type": "trojan",
+        "server": SERVER_IP,
+        "port": TROJAN_TCP_PORT,
+        "password": TROJAN_PASSWORD,
+        "tls": True,
+        "udp": True,
+        "network": "tcp",
+        "client-fingerprint": "chrome",
+        "servername": cdn_sni,
+        "skip-cert-verify": True
+    })
+    
+    # 4. VLESS-WS (CDN) - Clash Meta支持
     proxies.append({
         "name": f"{COUNTRY_CODE}-VLESS-WS",
         "type": "vless",
@@ -1627,24 +1759,28 @@ def generate_clash_config():
     })
     
     # 5. Hysteria2 (直连) - Clash Meta支持
-    proxies.append({
-        "name": f"{COUNTRY_CODE}-Hysteria2",
-        "type": "hysteria2",
-        "server": SERVER_IP,
-        "port": 443,
-        "password": HYSTERIA2_PASSWORD,
-        "udp": True,
-        "sni": REALITY_SNI,
-        "skip-cert-verify": True,
-        "obfs": "salamander",
-        "obfs-password": HYSTERIA2_PASSWORD[:8],
-        "ports": "443,21000-21200",
-        "up": 200,
-        "down": 200
-    })
+    # [Trae CN] 2026-06-04: ENABLE_HY2=false时跳过
+    if ENABLE_HY2:
+        proxies.append({
+            "name": f"{COUNTRY_CODE}-Hysteria2",
+            "type": "hysteria2",
+            "server": SERVER_IP,
+            "port": 443,
+            "password": HYSTERIA2_PASSWORD,
+            "udp": True,
+            "sni": REALITY_SNI,
+            "skip-cert-verify": True,
+            "obfs": "salamander",
+            "obfs-password": HYSTERIA2_PASSWORD[:8],
+            "ports": "443,21000-21200",
+            "up": 200,
+            "down": 200
+        })
     
     proxy_names = [p["name"] for p in proxies]
     auto_proxy_names = [
+        f"{COUNTRY_CODE}-VLESS-gRPC",
+        f"{COUNTRY_CODE}-Trojan-TCP",
         f"{COUNTRY_CODE}-VLESS-WS",
         f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
         f"{COUNTRY_CODE}-Trojan-WS",
@@ -1743,7 +1879,7 @@ def create_app():
             <div class="sub-box">
                 <p><strong>Base64订阅链接：</strong></p>
                 <p class="sub-link">https://{server}:{port}/sub/{country}</p>
-                <p class="info">（包含5个节点：{country}-VLESS-Reality、{country}-VLESS-WS、{country}-VLESS-HTTPUpgrade、{country}-Trojan-WS、{country}-Hysteria2）</p>
+                <p class="info">（包含7个节点：{country}-VLESS-Reality、{country}-VLESS-gRPC、{country}-Trojan-TCP、{country}-VLESS-WS、{country}-VLESS-HTTPUpgrade、{country}-Trojan-WS、{country}-Hysteria2）</p>
             </div>
             <div class="sub-box">
                 <p><strong>sing-box JSON配置（含自动路由）：</strong></p>
