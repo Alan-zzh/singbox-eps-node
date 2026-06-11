@@ -134,7 +134,7 @@ check_ports() {
     if ss -ulnp 2>/dev/null | grep -q ":443 "; then
         log "  ✓  UDP 443 监听中"
     else
-        log "  ❌ UDP 443 未监听（HY2 不可用）"
+        log "  ℹ️ UDP 443 未监听（TUIC v5 使用独立端口，不监听 443）"
     fi
 }
 

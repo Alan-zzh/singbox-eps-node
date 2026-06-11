@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.11.0 | **更新**: 2026-06-06
+**版本**: v4.12.1 | **更新**: 2026-06-11
 
 ---
 
@@ -10,16 +10,19 @@
 | 服务 | 状态 | 说明 |
 |------|------|------|
 | singbox | 运行中 | 代理内核，7个入站协议 |
-| singbox-sub | 运行中 | HTTPS订阅服务，端口2087 |
+| singbox-sub | 运行中 | HTTPS订阅服务，端口2087，按 UA 自动识别客户端能力 |
 | singbox-cdn | 运行中 | CDN优选IP学习系统 |
 
 ### 核心功能
-- **7个代理协议**：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2
+- **7个代理协议**：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, TUIC v5
+- **多客户端兼容**（v4.12.1 新增）：UA 自动识别客户端能力，Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/Quantumult X → 5 节点（剔除 HTTPUpgrade + TUIC v5）
+- **流量查询**（v4.12.1 新增）：`/info` 端点（v2rayN 也能看）+ `/api/traffic` JSON + 订阅 Base64 头部插入流量注释
+- **流量统计修复**（v4.12.1）：iptables INPUT + OUTPUT 双向计数，UDP 端口（TUIC）独立统计
 - CDN三模式优选：CDN_MODE（ip_optimized/domain_optimized/domain_default）
 - CDN多维度评分（v4.10.20 精简）：用户路径(70%) + VPS侧(20%) + 三网均衡(5%) + 稳定性(5%)。已废除 google_latency/google_speed 两个无效维度，数据库列已 DROP
 - CDN IP自动同步：cdn_monitor写数据库+信号文件 → subscription_service检测信号清缓存
 - 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
-- 按月流量统计：iptables内核级计数器，每月14号cron自动归零
+- 按月流量统计：iptables内核级 INPUT+OUTPUT 双向计数器，每月14号cron自动归零
 - BBR+FQ 网络加速
 - TCP Fast Open 优化：所有入站/出站启用 `tcp_fast_open: true`，降低连接延迟 30-50ms
 - 三层自愈机制：systemd ExecStartPre + health_check.sh（v4.10.20 升级为详细日志版） + StartLimitBurst
@@ -141,19 +144,25 @@
 - 部署时间：2026-05-04
 - 状态：正常运行
 - 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, Hysteria2
-- sing-box：1.15.0
+- vless-grpc 端口: 51263
+- trojan-tcp 端口: 14497
+- sing-box：1.13.11（CHANGELOG v4.11.0 计划升级 1.15.0 未实际执行）
 
 ### 日本服务器（52.195.179.240）
 - 域名：jp.290372913.xyz
 - 部署时间：2026-05-03
 - 状态：正常运行
 - 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, Hysteria2
-- sing-box：1.15.0
+- vless-grpc 端口: 36848
+- trojan-tcp 端口: 64688
+- sing-box：1.13.11（CHANGELOG v4.11.0 计划升级 1.15.0 未实际执行）
 
 ### 香港服务器 (43.249.174.222)
 - 域名: hk.290372913.xyz
 - 系统: Debian 12
 - 协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN
-- HY2: 已禁用（ISP阻断UDP，ENABLE_HY2=false）
+- TUIC v5: 已启用（ENABLE_TUIC=true）
 - 部署时间: 2026-06-04
-- sing-box：1.15.0
+- vless-grpc 端口: 51794
+- trojan-tcp 端口: 65004
+- sing-box：1.13.9（CHANGELOG v4.11.0 计划升级 1.15.0 未实际执行）

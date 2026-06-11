@@ -77,6 +77,26 @@
 8. **长驻进程必须有数据变更感知机制**：信号文件是最轻量的跨进程通知方式
 9. **小内存 VPS 必须配 MemoryMin + GOMEMLIMIT 双保险**
 10. **评分维度必须全部有效**：无效维度等于白算且拉低区分度
+11. **CDN 520是假象**：curl测试CDN端口返回520不等于CDN不通，需用正确WebSocket头（含Sec-WebSocket-Key）测试，sing-box只响应合法WebSocket握手
+12. **DNS proxied=false致命**：proxied=false会导致CDN完全失效（TLS握手失败），绝对不能改。CDN节点需要proxied=true才能通过Cloudflare代理回源
+13. **Debian 12 PEP 668**：pip3 install被阻止，需用apt install python3-xxx或--break-system-packages，一键安装脚本必须处理此兼容性
+14. **psmisc是必需依赖**：fuser命令来自psmisc包，缺失会导致singbox ExecStartPre失败，一键安装必须包含psmisc
+15. **自签证书必须含SAN**：openssl生成自签名证书时必须添加-addext "subjectAltName=DNS:域名"，否则Cloudflare回源520错误
+16. **CF API Token 长度校验**（v4.10.21 新增）：.env 中 `CF_API_TOKEN` 必须是 40 字符 hex（Global API Key）或 `cfat_` 开头 48 字符（scoped token），37 字符是截断的病态值，会导致所有 CF API 调用静默失败
+17. **CF 全局设置巡检**（v4.10.21 新增）：每周或每次新部署必须确认 `security_level=essentially_off` + `browser_check=off` + `bot_fight_mode=off`，CF 免费版 Managed Rules 会自动启用并拦截代理流量
+18. **诊断必须分 IPv4/IPv6**（v4.10.21 新增）：CF 对数据中心 IPv6 段会误判为爬虫，curl 测试必须加 `-4` 强制 IPv4 才不会误判"CDN 全断"
+19. **Global API Key 用完立刻 Roll**（v4.10.21 新增）：Global API Key 是账户最高权限，用完必须在 https://dash.cloudflare.com/profile/api-tokens 页面底部点 "Roll" 吊销旧 key 拿新 key
+20. **sing-box 400/520 ≠ 协议不通**（v4.10.21 新增）：curl 测试 CDN 协议没做完整 WS 握手被 sing-box 拒，返回 4xx 是正常的。**真实用户客户端会做完整握手**。要验证是否真通，必须看 sing-box.log 中有无 inbound 真实连接记录
+21. **协议代码层新增必须配套配置重生成**（v4.11.1 新增）：修改 `scripts/config_generator.py` 新增/删除入站协议时，必须确保 install.sh 启动流程会重跑 `config_generator.py`，否则服务器 config.json 仍合法存在 → 触发器不生效 → 入站缺失但订阅伪造"已生效"。教训：v4.11.0 新增 vless-grpc/trojan-tcp 后，install.sh 只在 config.json 缺失/损坏时才重跑，服务器 config.json 没更新 → 用户"协议连不上"实际是入站缺失
+22. **deploy.py 同步 .py 后必须重跑 config_generator.py + 重启 singbox**（v4.11.1 新增）：仅 SFTP 同步文件不算完成部署，必须 `cd && python3 scripts/config_generator.py` + `systemctl restart singbox`，否则 singbox 仍跑旧 config.json
+23. **verify_installation 验证脚本必须覆盖所有入站端口**（v4.11.1 新增）：包括 .env 随机端口（VLESS_GRPC_PORT/TROJAN_TCP_PORT），不能只验证老端口
+24. **订阅伪造"已生效"陷阱**（v4.11.1 新增）：subscription_service.py 是订阅层（生成 7 节点 URL），config_generator.py 是服务端层（生成 7 入站配置），两者**必须同时部署**。仅升级订阅层导致"订阅看到节点但服务端没监听"——用户感知"协议连不上"
+25. **singbox 1.13.11 默认编译已含 gRPC transport**（v4.11.1 新增）：不需要升级到 1.15.0 也能用 grpc（strings 验证含 grpc/grpcu/GRPCOptions）
+26. **CF SSL 模式必须为 full**（v4.11.2 新增）：自签证书场景下 strict/full_strict 会导致 526 回源失败，必须设为 full（允许自签证书，只加密不验证 CA 身份）。每次部署或 CF 设置变更后必须确认 SSL 模式为 full
+27. **v2rayN/Xray-core 客户端协议兼容**（v4.12.1 新增）：VLESS-HTTPUpgrade（`type=httpupgrade`）和 TUIC v5（`tuic://`）Xray-core 完全不支持。生成订阅时必须按 UA 自动分流：Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/Quantumult X → 5 节点（剔除这 2 个）。**禁止把任何 Xray-core 不识别的 URI 塞进 /sub 端点**
+28. **订阅流量统计必须 INPUT+OUTPUT 双向**（v4.12.1 新增）：原版 `setup_iptables_traffic_counters()` 只在 INPUT 链建规则，下载流量被低估 50%。修复：INPUT + OUTPUT 双链都建规则，UDP 端口（TUIC v5 QUIC 协议）独立建规则。`get_iptables_traffic_bytes()` 也必须 INPUT+OUTPUT 求和
+29. **v2rayN 不解析 subscription-userinfo header**（v4.12.1 新增）：v2rayN 订阅更新只显示"成功: N 个节点"，永远不显示流量。新增 `/info` 端点（v2rayN 浏览器能看）+ Base64 头部插入流量注释行（部分客户端可见）作为补充，**禁止期望 v2rayN 通过 subscription 显示流量**
+30. **HTTP header 不能含非 ASCII 字符**（v4.12.1 新增）：Flask `Response.headers` 只能设置 latin-1 编码的值，`Content-Disposition: attachment; filename=香港订阅.txt` 会触发 UnicodeEncodeError 导致 500。修复：RFC 5987 `filename*=UTF-8''URL编码`，或 profile-title 改为纯 ASCII。**任何通过 header 传递中文字符必须 URL-encode**
 
 ## 记录规范
 

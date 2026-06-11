@@ -37,14 +37,14 @@
 | {CC}-VLESS-WS-CDN | 优选IP:8443 | CDN |
 | {CC}-VLESS-HTTPUpgrade-CDN | 优选IP:2053 | CDN |
 | {CC}-Trojan-WS-CDN | 优选IP:2083 | CDN |
-| {CC}-Hysteria2 | {IP}:443 | 直连，端口跳跃21000-21200 |
+| {CC}-TUIC-v5 | {IP}:TUIC_PORT | 直连，TCP+UDP双栈 |
 
 ⚠️ AI-SOCKS5是幕后路由出站，不是用户可见节点。不出现在订阅链接和selector中，AI网站流量自动走SOCKS5，用户无感。
 
 ### 端口分配
 | 端口 | 用途 | CDN |
 |------|------|-----|
-| 443 | VLESS-Reality + Hysteria2 | ✅ |
+| 443 | VLESS-Reality | ✅ |
 | 2053 | VLESS-HTTPUpgrade-CDN | ✅ |
 | 2083 | Trojan-WS-CDN | ✅ |
 | 2087 | 订阅服务 | ✅ |
@@ -52,7 +52,7 @@
 | VLESS_GRPC_PORT | VLESS-gRPC（随机10000-65535） | ❌ |
 | TROJAN_TCP_PORT | Trojan-TCP（随机10000-65535） | ❌ |
 | 1080 | SOCKS5本地代理 | ❌ |
-| 21000-21200 | HY2端口跳跃→443 | ❌ |
+| TUIC_PORT | TUIC v5（随机10000-65535） | ❌ |
 
 ### 文件结构
 ```
@@ -67,7 +67,7 @@
 │   ├── config.py           # 全局配置（唯一真相源）
 │   ├── config_generator.py # sing-box配置生成器
 │   ├── subscription_service.py # HTTPS订阅服务
-│   ├── cert_manager.py     # 证书管理+HY2端口跳跃
+│   ├── cert_manager.py     # 证书管理
 │   ├── cdn_monitor.py      # CDN优选IP监控
 │   ├── tg_bot.py           # Telegram机器人
 │   ├── logger.py           # 日志管理
@@ -85,7 +85,7 @@
 - 服务器IP自动检测（`_detect_server_ip()`）
 - 域名/IP动态判断（`get_sub_domain()`）
 - 端口硬编码锁定 + SHA256校验和防篡改
-- .env文件读取，HY2规避配置，SOCKS5凭据从环境变量读取
+- .env文件读取，TUIC规避配置，SOCKS5凭据从环境变量读取
 - `.env` 解析优先 `python-dotenv`，降级时兼容历史 `KEY=  # 注释` 遗留格式
 - COUNTRY_CODE从.env读取，NODE_PREFIX动态生成
 
@@ -97,7 +97,7 @@
 - CDN纠错机制：get_cdn_ip_for_protocol()连通性检测，连不上自动回退域名（Bug #57）
 - SOCKS5 AI路由规则（可选项，默认关闭，开启时13个AI域名走住宅代理，X/推特/groK排除）
 - SOCKS5代理检测：check_single_socks5()用socket替换sock_mod，finally确保关闭
-- HY2端口跳跃 hop_ports 字段
+- TUIC v5 端口配置
 - 按月流量统计（SQLite持久化，每月14号自动归零）
 - /api/traffic JSON接口
 
@@ -146,11 +146,10 @@
 ⚠️ HTTP真实延迟测试已废弃，改为TCP存活检测
 自动同步：cdn_monitor每小时更新IP → subscription_service实时读取 → 用户更新订阅即可
 
-### cert_manager.py — 证书管理+端口跳跃
+### cert_manager.py — 证书管理
 - Cloudflare API源证书（15年有效期）
 - 自签证书备用（365天）
 - 自动续签检查
-- Hysteria2端口跳跃iptables规则（UDP+TCP双协议）
 - iptables持久化
 
 ### health_check.sh — 健康检查与自动恢复
@@ -188,11 +187,20 @@
 - 证书: Let's Encrypt（acme.sh自动续期）
 - ⚠️ 必须用域名访问，IP访问证书不匹配
 
-### 2. Hysteria2端口跳跃
-- iptables DNAT: 21000-21200 → 443（UDP+TCP双协议）
-- 客户端: `hop_ports: "21000-21200"`
-- 规避: obfs=salamander + 端口跳跃 + alpn=h3
-- 无感切换：某端口被封自动跳其他端口，不断线
+### 2. TUIC v5 协议
+- **协议原理**：基于 QUIC（UDP）传输，内置 TLS 1.3（QUIC 强制加密），TCP+UDP 双栈代理
+- **配置参数**：
+  - `congestion_control: bbr` — BBR 拥塞控制，不依赖丢包
+  - `alpn: h3` — HTTP/3 ALPN 协商
+  - `uuid + password` 认证 — 从 .env 读取，安装时自动生成
+  - 随机端口（10000-65535）— 避免固定端口被识别，支持 .env 手动修改
+- **与 Hysteria2 的区别**：
+  - 无端口跳跃：QUIC 自带连接迁移（Connection ID），不需要 TCP 时代的端口跳跃
+  - 无 obfs 混淆：TUIC v5 指纹更低调，不需要 salamander 等额外混淆
+  - 不复用 443：独立随机端口，不与 VLESS-Reality 共享
+  - TCP+UDP 双栈：同时代理 TCP 和 UDP 流量（HY2 仅 UDP 加速）
+- **证书复用**：使用 cert/fullchain.pem（与 CDN 协议共享自签证书）
+- **一键回退**：HK 等 ISP 阻断 UDP 时，`ENABLE_TUIC=false` 可禁用
 
 ### 3. CDN优选IP（v2.0.0 多源聚合+评分排序）
 1. vvhan API（中国实测，含延迟/速度/数据中心，每15分钟更新，可信度最高）
@@ -431,7 +439,7 @@
   - install.sh安装时交互配置
   - tg_bot.py /AI路由 一键开关
   - 直接编辑.env文件 AI_SOCKS5_ROUTING=on/off
-- **关闭时**: 所有流量走正常协议（VLESS/Trojan/HY2），不经过SOCKS5
+- **关闭时**: 所有流量走正常协议（VLESS/Trojan/TUIC），不经过SOCKS5
 - **生效时机**: 修改配置后立即重启服务生效
 
 ### 5. 按月流量统计（v3.1.1重构）
@@ -501,7 +509,8 @@
 | VLESS_UUID | VLESS Reality UUID |
 | VLESS_WS_UUID | VLESS WS/HTTPUpgrade UUID |
 | TROJAN_PASSWORD | Trojan-WS密码 |
-| HYSTERIA2_PASSWORD | Hysteria2密码 |
+| HYSTERIA2_PASSWORD | Hysteria2密码（已废弃，保留兼容） |
+| TUIC_PASSWORD | TUIC v5密码 |
 | REALITY_PRIVATE_KEY | Reality私钥 |
 | REALITY_PUBLIC_KEY | Reality公钥 |
 
@@ -534,9 +543,9 @@
 **教训**: v1.0.43用9443端口，CDN不代理，域名访问时CDN直接丢弃流量
 **CDN支持HTTPS端口**: 443, 2053, 2083, 2087, 2096, 8443
 
-### 规则3：HY2端口跳跃必须UDP+TCP双规则，目标端口与listen_port一致
-**教训**: v1.0.45前DNAT到4433但HY2监听443（端口跳跃无效）；后来修复时又错误移除TCP规则（UDP被封则HY2完全不可用）
-**做法**: iptables DNAT目标必须与config_generator.py的listen_port一致，必须同时设UDP+TCP
+### 规则3：TUIC v5 使用随机端口，不需要端口跳跃
+**教训**: Hysteria2 使用 iptables 200条 DNAT 规则做端口跳跃，是 TCP 时代的产物。QUIC 协议自带连接迁移（Connection ID），端口被封时自动迁移到新端口，不需要 DNAT
+**做法**: TUIC v5 使用随机端口（10000-65535），只需 1 条 TCP + 1 条 UDP iptables 规则
 
 ### 规则4：CDN IP获取必须用指定DNS
 **教训**: v1.0.36-37用日本服务器DNS解析，返回对中国延迟高的IP（200ms+）

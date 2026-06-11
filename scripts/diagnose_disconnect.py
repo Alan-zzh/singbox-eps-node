@@ -49,7 +49,7 @@ PROTOCOLS = {
     'vless-ws': {'port': 8443, 'label': 'VLESS-WS', 'transport': 'tcp'},
     'vless-upgrade': {'port': 2053, 'label': 'VLESS-HTTPUpgrade', 'transport': 'tcp'},
     'trojan-ws': {'port': 2083, 'label': 'Trojan-WS', 'transport': 'tcp'},
-    'hysteria2': {'port': 443, 'label': 'Hysteria2', 'transport': 'udp'},
+    'tuic': {'port_env': 'TUIC_PORT', 'label': 'TUIC v5', 'transport': 'udp'},
 }
 
 # 远程路径

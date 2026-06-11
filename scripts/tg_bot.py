@@ -268,7 +268,7 @@ def handle_ai_routing(action):
         if current_routing == 'on':
             return "🟢 AI路由状态：已开启\nAI域名（ChatGPT/Claude/Gemini等）自动走住宅代理"
         else:
-            return "🔴 AI路由状态：已关闭\n所有流量走正常协议（VLESS/Trojan/HY2）"
+            return "🔴 AI路由状态：已关闭\n所有流量走正常协议（VLESS/Trojan/TUIC）"
 
 def handle_message(update):
     chat_id = str(update['message']['chat']['id'])

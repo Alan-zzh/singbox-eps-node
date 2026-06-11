@@ -2,32 +2,49 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v4.10.18
-Date: 2026-06-01
+Version: v4.12.1
+Date: 2026-06-11
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
+  - 提供Clash Meta YAML配置（含url-test自动测速）
   - CDN优选IP自动分配（每个协议独立IP）
   - HTTPS支持（Cloudflare正式证书）
+  - 按月流量统计（iptables 内核级计数器）
 
-订阅链接格式: 
+订阅链接格式:
   - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
+    - 自动识别客户端 UA：Clash/sing-box → 7 节点，v2rayN/v2rayNG → 5 节点
+    - 强制控制：?client=full | ?client=standard
   - sing-box JSON: https://{CF_DOMAIN}:{SUB_PORT}/singbox/{国家代码}
+  - Clash Meta YAML: https://{CF_DOMAIN}:{SUB_PORT}/clash/{国家代码}
+  - 流量查询: https://{CF_DOMAIN}:{SUB_PORT}/info/{国家代码}
   ⚠️ 必须使用域名访问（走CDN），IP访问会导致SSL证书不匹配
   ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
-节点命名规则: {国家代码}-{协议}（共5个用户可见节点）
+节点命名规则: {国家代码}-{协议}（最多 7 个用户可见节点）
 - {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
+- {COUNTRY_CODE}-VLESS-gRPC (直连节点，gRPC 传输)
+- {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
 - {COUNTRY_CODE}-VLESS-WS (CDN节点，独立优选IP)
-- {COUNTRY_CODE}-VLESS-HTTPUpgrade (CDN节点，独立优选IP)
+- {COUNTRY_CODE}-VLESS-HTTPUpgrade (CDN节点，仅 Clash/sing-box 显示)
 - {COUNTRY_CODE}-Trojan-WS (CDN节点，独立优选IP)
-- {COUNTRY_CODE}-Hysteria2 (直连节点，端口跳跃)
+- {COUNTRY_CODE}-TUIC v5 (直连节点，UDP加速，仅 Clash/sing-box 显示)
 
-⚠️ AI-SOCKS5不是用户节点，是幕后路由出站：
-- 仅出现在sing-box JSON的outbounds和route.rules中
-- 用户在客户端节点列表中看不到AI-SOCKS5
-- AI网站流量自动走SOCKS5，用户无感，无需手动选择
-- 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
+【v4.12.1 客户端能力适配】:
+  - v2rayN / v2rayNG / Shadowrocket / Quantumult X：剔除 HTTPUpgrade + TUIC v5（Xray-core 不支持）
+  - Clash Meta / Clash Verge Rev / sing-box / NekoBox：返回全部 7 节点
+  - 自动通过 User-Agent 识别，强制控制用 ?client=full | ?client=standard
+
+【v4.12.1 流量显示增强】:
+  - Clash/Stash：通过 subscription-userinfo header 显示（原有）
+  - v2rayN：直接访问 /info 端点查看（v2rayN 不解析 subscription-userinfo header）
+  - 首页增加 /info 和 /api/traffic 链接
+
+【v4.12.1 流量统计修复】:
+  - 原版 iptables 只统计 INPUT 方向，导致下载流量被低估 50%
+  - 修复：INPUT + OUTPUT 同时计数，反映真实双向流量
+  - 修复：增加 UDP 规则（TUIC v5 是 QUIC 协议）
 
 v3.1.3修复：
   1. check_single_socks5: sock_mod→socket（致命Bug修复）
@@ -60,9 +77,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from config import (
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
-        VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, HYSTERIA2_PORT, SOCKS5_PORT,
+        VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, TUIC_PORT, SOCKS5_PORT,
         VLESS_GRPC_PORT, TROJAN_TCP_PORT,
-        HYSTERIA2_UDP_PORTS, REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
+        REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
         AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR,
         CDN_PREFERRED_IPS, CDN_IP_BLACKLIST, CDN_IP_HARD_REJECT, CDN_MODE, CDN_OPTIMIZED_DOMAINS
@@ -82,9 +99,8 @@ except ImportError:
     VLESS_WS_PORT = int(os.getenv('VLESS_WS_PORT', '8443'))
     VLESS_UPGRADE_PORT = int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
     TROJAN_WS_PORT = int(os.getenv('TROJAN_WS_PORT', '2083'))
-    HYSTERIA2_PORT = int(os.getenv('HYSTERIA2_PORT', '443'))
+    TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
     SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '1080'))
-    HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
     REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID') or __import__('secrets').token_hex(8)
     REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
     REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
@@ -108,6 +124,53 @@ logger = get_logger('subscription_service')
 
 IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
+
+# [TRAE SOLO CN] v4.12.1 客户端能力矩阵
+# sing-box 协议兼容性分级，决定 /sub 端点返回哪些节点
+#   full     = 支持全部 7 节点（含 HTTPUpgrade + TUIC v5）
+#   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，兼容 Xray-core/v2rayN/Shadowrocket 等）
+#   unknown  = 按 standard 处理（安全降级）
+CLIENT_CAPABILITIES = {
+    # Clash 系（mihomo 内核支持 Reality/gRPC/TUIC/HTTPUpgrade）
+    'clash-meta': 'full',
+    'clash-verge': 'full',
+    'clashforwindows': 'full',
+    'clashx': 'full',
+    'mihomo': 'full',
+    'stash': 'full',
+    # sing-box 原生客户端（支持所有）
+    'sing-box': 'full',
+    'nekobox': 'full',
+    'nekoray': 'full',
+    # v2ray 系（Xray-core 不支持 HTTPUpgrade 和 TUIC）
+    'v2rayn': 'standard',
+    'v2rayng': 'standard',
+    'v2box': 'standard',
+    'shadowrocket': 'standard',
+    'quantumult': 'standard',
+    'surfboard': 'standard',
+    # 浏览器/未知客户端
+    'mozilla': 'standard',
+    'chrome': 'standard',
+    'safari': 'standard',
+    'curl': 'standard',
+    'wget': 'standard',
+    'python-requests': 'standard',
+}
+
+
+def detect_client_capability(user_agent=''):
+    """根据 User-Agent 判断客户端能力
+    返回 'full' / 'standard' / 'unknown'
+    原则：识别不出的一律按 standard（剔除 HTTPUpgrade + TUIC），保证订阅可解析
+    """
+    if not user_agent:
+        return 'unknown'
+    ua_lower = user_agent.lower()
+    for keyword, capability in CLIENT_CAPABILITIES.items():
+        if keyword in ua_lower:
+            return capability
+    return 'unknown'
 
 
 def is_valid_ipv4(ip):
@@ -300,9 +363,10 @@ VLESS_WS_UUID = os.getenv('VLESS_WS_UUID', '')
 # 如果config.py导入失败，降级使用环境变量
 VLESS_UPGRADE_PORT = VLESS_UPGRADE_PORT if 'VLESS_UPGRADE_PORT' in dir() else int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
 TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
-HYSTERIA2_PASSWORD = os.getenv('HYSTERIA2_PASSWORD', '')
-# [Trae CN] 2026-06-04: 支持按服务器禁用HY2（如HK因ISP阻断UDP设ENABLE_HY2=false）
-ENABLE_HY2 = os.getenv('ENABLE_HY2', 'true').lower() == 'true'
+TUIC_PASSWORD = os.getenv('TUIC_PASSWORD', '')
+TUIC_UUID = os.getenv('TUIC_UUID', '')
+ENABLE_TUIC = os.getenv('ENABLE_TUIC', 'true').lower() == 'true'
+TUIC_PORT_ENV = int(os.getenv('TUIC_PORT', '0')) or TUIC_PORT
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
 EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
 
@@ -342,23 +406,39 @@ def init_db():
 def setup_iptables_traffic_counters():
     """配置iptables流量计数器（sing-box各入站端口）
     机场面板标准做法：
-    - 在INPUT链中添加针对sing-box各入站端口的统计规则
+    - 在INPUT/OUTPUT链中添加针对sing-box各入站端口的统计规则
     - iptables计数器是内核级别的，持久化、重启不丢失
-    - 端口：443(VLESS-Reality/HY2), 8443(VLESS-WS), 2053(VLESS-HTTPUpgrade), 2083(Trojan-WS)
+    - 端口：443(VLESS-Reality), 8443(VLESS-WS), 2053(VLESS-HTTPUpgrade), 2083(Trojan-WS)
+    - 加上 VLESS-gRPC / Trojan-TCP 随机端口 + TUIC v5
+    - [TRAE SOLO CN] v4.12.1 修复：原版只统计 INPUT，导致用户实际流量被低估50%（OUTPUT 没算）
+      修复方案：INPUT + OUTPUT 同时计数，反映真实双向流量
     幂等操作：重复调用不会添加重复规则
     """
-    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT]
+    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT, TUIC_PORT_ENV]
 
     for port in singbox_ports:
-        # 先检查规则是否已存在（幂等）
-        check_cmd = f'iptables -L INPUT -v -n -x | grep -c "dpt:{port}"'
-        ret, out, err = _run_cmd(check_cmd)
-        if ret == 0 and int(out.strip()) > 0:
-            continue  # 规则已存在，跳过
+        if not port or port == 0:
+            continue
+        for chain in ('INPUT', 'OUTPUT'):
+            # 先检查规则是否已存在（幂等）
+            check_cmd = f'iptables -L {chain} -v -n -x | grep -c "dpt:{port}"'
+            ret, out, err = _run_cmd(check_cmd)
+            if ret == 0 and int(out.strip()) > 0:
+                continue  # 规则已存在，跳过
 
-        # 添加TCP统计规则
-        add_cmd = f'iptables -I INPUT 1 -p tcp --dport {port} -j ACCEPT'
-        _run_cmd(add_cmd)
+            # 添加TCP统计规则（接受数据包时计数）
+            add_cmd = f'iptables -I {chain} 1 -p tcp --dport {port} -j ACCEPT'
+            _run_cmd(add_cmd)
+
+        # TUIC 是 QUIC（UDP），UDP 也要单独建规则
+        if port == TUIC_PORT_ENV and TUIC_PORT_ENV:
+            for chain in ('INPUT', 'OUTPUT'):
+                check_cmd = f'iptables -L {chain} -v -n -x | grep -c "udp dpt:{port}"'
+                ret, out, err = _run_cmd(check_cmd)
+                if ret == 0 and int(out.strip()) > 0:
+                    continue
+                add_cmd = f'iptables -I {chain} 1 -p udp --dport {port} -j ACCEPT'
+                _run_cmd(add_cmd)
 
 def _run_cmd(cmd):
     """执行shell命令，返回(exit_code, stdout, stderr)"""
@@ -370,33 +450,38 @@ def _run_cmd(cmd):
 
 def get_iptables_traffic_bytes():
     """通过iptables获取sing-box各入站端口的总流量（字节）
-    原理：iptables -L INPUT -v -n -x 返回每条规则的packet/byte计数器
-    取所有sing-box端口规则的bytes总和
+    原理：iptables -L INPUT/OUTPUT -v -n -x 返回每条规则的packet/byte计数器
+    取所有sing-box端口规则的bytes总和（INPUT + OUTPUT 双向）
+    [TRAE SOLO CN] v4.12.1 修复：原版只取 INPUT，下载流量被低估50%
     """
-    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT]
+    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT, TUIC_PORT_ENV]
     total_bytes = 0
 
-    cmd = 'iptables -L INPUT -v -n -x'
-    ret, out, err = _run_cmd(cmd)
-    if ret != 0:
-        logger.warning(f"iptables命令执行失败: {err}")
-        return -1
-
-    for line in out.split('\n'):
-        if 'dpt:' not in line:
+    # 同时统计 INPUT 和 OUTPUT，反映真实双向流量
+    for chain in ('INPUT', 'OUTPUT'):
+        cmd = f'iptables -L {chain} -v -n -x'
+        ret, out, err = _run_cmd(cmd)
+        if ret != 0:
+            logger.warning(f"iptables命令执行失败: {err}")
             continue
-        for port in singbox_ports:
-            if f'dpt:{port}' in line:
-                # 行格式: pkts bytes target prot opt in out source destination
-                # 例: 12345 6789012345 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        byte_count = int(parts[1])
-                        total_bytes += byte_count
-                    except (ValueError, IndexError):
-                        pass
-                break
+
+        for line in out.split('\n'):
+            if 'dpt:' not in line:
+                continue
+            for port in singbox_ports:
+                if not port or port == 0:
+                    continue
+                if f'dpt:{port}' in line:
+                    # 行格式: pkts bytes target prot opt in out source destination
+                    # 例: 12345 6789012345 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            byte_count = int(parts[1])
+                            total_bytes += byte_count
+                        except (ValueError, IndexError):
+                            pass
+                    break
 
     return total_bytes
 
@@ -798,8 +883,15 @@ def get_cdn_optimized_domain():
         return CDN_OPTIMIZED_DOMAINS[0]
     return None
 
-def generate_all_links():
-    """生成所有节点链接"""
+def generate_all_links(capability='full'):
+    """生成所有节点链接
+
+    【v4.12.1 客户端能力适配】:
+    - capability='full'：返回全部 7 节点（Clash Meta / sing-box / NekoBox / Clash Verge 等）
+    - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
+      （Xray-core / v2rayN / v2rayNG / Shadowrocket / Quantumult X 不支持这两个协议）
+    - capability='unknown'：按 standard 处理，安全降级
+    """
     links = []
 
     # CDN节点地址：根据CDN_MODE选择 [TRAE SOLO CN] v4.8
@@ -884,17 +976,19 @@ def generate_all_links():
     links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-WS{cdn_suffix}")
 
     # 3. VLESS-HTTPUpgrade (CDN)
-    params = {
-        'encryption': 'none',
-        'type': 'httpupgrade',
-        'security': 'tls',
-        'sni': cdn_sni,
-        'path': '/vless-upgrade',
-        'host': cdn_sni,
-        'allowInsecure': '1'
-    }
-    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-HTTPUpgrade{cdn_suffix}")
+    # [TRAE SOLO CN] v4.12.1 仅对 full 能力客户端返回（Xray-core 不识别 type=httpupgrade）
+    if capability == 'full':
+        params = {
+            'encryption': 'none',
+            'type': 'httpupgrade',
+            'security': 'tls',
+            'sni': cdn_sni,
+            'path': '/vless-upgrade',
+            'host': cdn_sni,
+            'allowInsecure': '1'
+        }
+        param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
+        links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-HTTPUpgrade{cdn_suffix}")
 
     # 4. Trojan-WS (CDN)
     params = {
@@ -909,20 +1003,18 @@ def generate_all_links():
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
     links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{COUNTRY_CODE}-Trojan-WS{cdn_suffix}")
 
-    # 5. Hysteria2 (直连) - 端口443，iptables端口跳跃21000-21200→443
-    # ⚠️ mport范围必须与cert_manager.py中setup_hysteria2_port_hopping()一致
-    # ⚠️ obfs=salamander用于规避QUIC检测，obfs-password取HY2密码前8位
-    # [Trae CN] 2026-06-04: ENABLE_HY2=false时跳过（如HK因ISP阻断UDP）
-    if ENABLE_HY2:
+    # 7. TUIC v5 (直连) - UDP加速，TCP+UDP双栈
+    # TUIC v5 内置 TLS 1.3（QUIC 强制），不需要 Reality，不需要端口跳跃
+    # [TRAE SOLO CN] v4.12.1 仅对 full 能力客户端返回（Xray-core/v2rayN 完全不支持 tuic://）
+    if ENABLE_TUIC and capability == 'full':
         params = {
-            'sni': REALITY_SNI,
+            'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
             'insecure': '1',
-            'obfs': 'salamander',
-            'obfs-password': HYSTERIA2_PASSWORD[:8],
-            'mport': '443,21000-21200'
+            'alpn': 'h3',
+            'congestion_control': 'bbr'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-        links.append(f"hysteria2://{HYSTERIA2_PASSWORD}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-Hysteria2")
+        links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT_ENV}?{param_str}#{COUNTRY_CODE}-TUIC v5")
 
     return links
 
@@ -1070,7 +1162,7 @@ def generate_singbox_config():
         "outbounds": [
             # ePS-Auto: 用户可见的节点选择器（只包含5个代理节点+direct）
             # ⚠️ AI-SOCKS5不在此列表中，它是幕后路由出站，用户不应手动选择
-            # [Trae CN] 2026-06-04: ENABLE_HY2=false时selector不含HY2
+            # [TRAE SOLO CN] v4.12.0: ENABLE_TUIC=false时selector不含TUIC
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
@@ -1081,7 +1173,7 @@ def generate_singbox_config():
                     f"{COUNTRY_CODE}-VLESS-WS",
                     f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
                     f"{COUNTRY_CODE}-Trojan-WS",
-                ] + ([f"{COUNTRY_CODE}-Hysteria2"] if ENABLE_HY2 else []) + [
+                ] + ([f"{COUNTRY_CODE}-TUIC v5"] if ENABLE_TUIC else []) + [
                     "ePS-Auto-Test",
                     "direct"
                 ],
@@ -1298,34 +1390,25 @@ def generate_singbox_config():
                     }
                 }
             },
-            # Hysteria2 - 支持端口跳跃，无感切换不掉线
-            # hop_ports：客户端在连接时自动在指定端口范围内跳跃
-            # 工作原理：客户端初始连443，后续QUIC连接自动切换到21000-21200范围内的端口
-            # 服务端iptables将21000-21200全部DNAT到443，所以无论客户端跳到哪个端口都能到达HY2
-            # 效果：当某个端口被封锁/干扰时，客户端自动跳到其他端口，无需断线重连
-            # [Trae CN] 2026-06-04: ENABLE_HY2=false时不含此outbound
+            # TUIC v5 - UDP加速协议，TCP+UDP双栈
+            # QUIC 内置 TLS 1.3，不需要 Reality，不需要端口跳跃
         ] + ([{
-                "type": "hysteria2",
-                "tag": f"{COUNTRY_CODE}-Hysteria2",
+                "type": "tuic",
+                "tag": f"{COUNTRY_CODE}-TUIC v5",
                 "server": SERVER_IP,
-                "server_port": 443,
-                "hop_ports": "21000-21200",
-                "password": HYSTERIA2_PASSWORD,
-                "tcp_fast_open": True,
-                "tcp_multi_path": False,
+                "server_port": TUIC_PORT_ENV,
+                "uuid": TUIC_UUID,
+                "password": TUIC_PASSWORD,
+                "congestion_control": "bbr",
+                "udp_relay": True,
                 "tls": {
                     "enabled": True,
-                    "server_name": REALITY_SNI,
-                    "insecure": True
+                    "server_name": cdn_sni,
+                    "insecure": True,
+                    "alpn": ["h3"]
                 },
-                "obfs": {
-                    "type": "salamander",
-                    "password": HYSTERIA2_PASSWORD[:8]
-                },
-                "connect_timeout": "5s",
-                "up_mbps": 200,
-                "down_mbps": 200
-            }] if ENABLE_HY2 else []) + ([
+                "connect_timeout": "5s"
+            }] if ENABLE_TUIC else []) + ([
             # AI-SOCKS5代理池 - 多代理自动容错切换
             # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
             {
@@ -1567,7 +1650,7 @@ def generate_singbox_config():
             #
             # 【为什么是ePS-Auto而不是direct】：
             # ePS-Auto是用户可见的节点选择器，包含5个代理节点（VLESS-Reality、VLESS-WS、
-            # VLESS-HTTPUpgrade、Trojan-WS、Hysteria2）+ direct
+            # VLESS-HTTPUpgrade、Trojan-WS、TUIC v5）+ direct
             # 默认值是VLESS-Reality，用户可以手动切换到其他节点或直连
             #
             # 【设计意图】：
@@ -1758,23 +1841,20 @@ def generate_clash_config():
         "alpn": ["h2", "http/1.1"]
     })
     
-    # 5. Hysteria2 (直连) - Clash Meta支持
-    # [Trae CN] 2026-06-04: ENABLE_HY2=false时跳过
-    if ENABLE_HY2:
+    # 7. TUIC v5 (直连) - Clash Meta支持
+    if ENABLE_TUIC:
         proxies.append({
-            "name": f"{COUNTRY_CODE}-Hysteria2",
-            "type": "hysteria2",
+            "name": f"{COUNTRY_CODE}-TUIC v5",
+            "type": "tuic",
             "server": SERVER_IP,
-            "port": 443,
-            "password": HYSTERIA2_PASSWORD,
+            "port": TUIC_PORT_ENV,
+            "uuid": TUIC_UUID,
+            "password": TUIC_PASSWORD,
             "udp": True,
-            "sni": REALITY_SNI,
+            "sni": cdn_sni,
             "skip-cert-verify": True,
-            "obfs": "salamander",
-            "obfs-password": HYSTERIA2_PASSWORD[:8],
-            "ports": "443,21000-21200",
-            "up": 200,
-            "down": 200
+            "congestion-control": "bbr",
+            "reduce-rtt": True
         })
     
     proxy_names = [p["name"] for p in proxies]
@@ -1853,6 +1933,10 @@ def create_app():
         # 获取当月流量统计
         traffic = get_traffic_stats()
         traffic_display = format_traffic(traffic['bytes_used'])
+        total_gb = 900
+        used_gb = round(traffic['bytes_used'] / (1024**3), 2)
+        remaining_gb = round((total_gb - used_gb), 2)
+        usage_percent = round(used_gb / total_gb * 100, 1) if total_gb > 0 else 0
 
         html = """
         <html>
@@ -1862,29 +1946,48 @@ def create_app():
                 body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
                 h1 {{ color: #333; }}
                 .sub-box {{ background: #f5f5f5; padding: 20px; border-radius: 10px; margin: 20px 0; }}
-                .sub-link {{ font-size: 18px; color: #0066cc; word-break: break-all; }}
+                .sub-link {{ font-size: 16px; color: #0066cc; word-break: break-all; }}
                 .info {{ color: #666; font-size: 14px; }}
                 .traffic-box {{ background: #e8f4fd; padding: 20px; border-radius: 10px; margin: 20px 0; border: 1px solid #b3d9f2; }}
                 .traffic-value {{ font-size: 28px; color: #0066cc; font-weight: bold; }}
+                .traffic-bar-bg {{ background: #d0e4f7; height: 12px; border-radius: 6px; margin: 10px 0; overflow: hidden; }}
+                .traffic-bar {{ background: #0066cc; height: 100%; border-radius: 6px; transition: width 0.3s; }}
                 .traffic-label {{ color: #666; font-size: 14px; margin-top: 5px; }}
+                .traffic-tip {{ color: #888; font-size: 12px; margin-top: 8px; }}
             </style>
         </head>
         <body>
             <h1>Singbox 订阅服务</h1>
             <div class="traffic-box">
-                <p><strong>当月流量统计</strong></p>
-                <p class="traffic-value">{traffic_display}</p>
-                <p class="traffic-label">统计月份：{month} | 每月{reset_day}号自动归零 | 上次重置：{last_reset}</p>
+                <p><strong>📊 当月流量统计（{country_name}）</strong></p>
+                <p class="traffic-value">{used_gb} GB / {total_gb} GB ({usage_percent}%)</p>
+                <div class="traffic-bar-bg"><div class="traffic-bar" style="width: {usage_percent}%;"></div></div>
+                <p class="traffic-label">统计月份：{month} | 剩余：{remaining_gb} GB | 每月{reset_day}号 00:03 自动归零</p>
+                <p class="traffic-tip">上次重置：{last_reset} | 数据来源：iptables 内核级计数器（重启不丢失）</p>
+                <p class="traffic-tip">💡 v2rayN 等客户端不显示流量？直接访问 <a href="/info">/info</a> 或 <a href="/api/traffic">/api/traffic</a> 查看</p>
             </div>
             <div class="sub-box">
-                <p><strong>Base64订阅链接：</strong></p>
+                <p><strong>🔗 Base64订阅链接（自动适配客户端）</strong></p>
                 <p class="sub-link">https://{server}:{port}/sub/{country}</p>
-                <p class="info">（包含7个节点：{country}-VLESS-Reality、{country}-VLESS-gRPC、{country}-Trojan-TCP、{country}-VLESS-WS、{country}-VLESS-HTTPUpgrade、{country}-Trojan-WS、{country}-Hysteria2）</p>
+                <p class="info">- Clash Meta / sing-box / NekoBox：返回 7 节点（含 VLESS-HTTPUpgrade + TUIC v5）</p>
+                <p class="info">- v2rayN / v2rayNG / Shadowrocket：返回 5 节点（剔除 HTTPUpgrade + TUIC，自动识别）</p>
+                <p class="info">- 强制 7 节点：<code>/sub/{country}?client=full</code></p>
+                <p class="info">- 强制 5 节点：<code>/sub/{country}?client=standard</code></p>
             </div>
             <div class="sub-box">
-                <p><strong>sing-box JSON配置（含自动路由）：</strong></p>
+                <p><strong>📦 sing-box JSON配置（含自动路由）</strong></p>
                 <p class="sub-link">https://{server}:{port}/singbox/{country}</p>
                 <p class="info">（导入后AI流量自动走SOCKS5，无需手动选择）</p>
+            </div>
+            <div class="sub-box">
+                <p><strong>⚔️ Clash Meta 配置（含 url-test 自动测速）</strong></p>
+                <p class="sub-link">https://{server}:{port}/clash/{country}</p>
+                <p class="info">（Clash Verge Rev / Clash for Windows 适用）</p>
+            </div>
+            <div class="sub-box">
+                <p><strong>📈 流量查询（所有客户端通用）</strong></p>
+                <p class="sub-link">https://{server}:{port}/info/{country}</p>
+                <p class="info">（纯文本输出 v2rayN 也能查看 / JSON 格式：Accept: application/json）</p>
             </div>
             <div class="info">
                 <p>服务器IP: {server}</p>
@@ -1938,7 +2041,6 @@ def create_app():
                         html += '<td style="padding:4px;border:1px solid #ddd;color:' + color + ';">' + (r.ok ? '可用' : '不可用') + '</td></tr>';
                     }}
                     html += '</table>';
-                    // 回传结果到服务器
                     try {{
                         await fetch('/api/cdn-test', {{
                             method: 'POST',
@@ -1960,8 +2062,13 @@ def create_app():
             server=CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
             port=SUB_PORT,
             country=COUNTRY_CODE,
+            country_name=get_country_name(),
             domain=CF_DOMAIN if CF_DOMAIN else '未配置',
             traffic_display=traffic_display,
+            used_gb=used_gb,
+            total_gb=total_gb,
+            remaining_gb=remaining_gb,
+            usage_percent=usage_percent,
             month=traffic['month'],
             reset_day=traffic['reset_day'],
             last_reset=traffic['last_reset'] if traffic['last_reset'] else '尚未重置'
@@ -1976,8 +2083,23 @@ def create_app():
         ⚠️ 禁止加token认证！订阅链接必须直接访问，不需要任何验证参数。
         历史教训：v1.0.54擅自加了SUB_TOKEN认证导致订阅不可用，已回退。
         铁律13：订阅链接不加token认证，保持原有规则直接访问。
+
+        【v4.12.1 客户端能力适配】:
+        - 根据 User-Agent 自动判断客户端能力
+        - Clash Meta / sing-box / NekoBox 等 → 返回 7 节点（full）
+        - v2rayN / v2rayNG / Shadowrocket 等 → 返回 5 节点（standard，剔除 HTTPUpgrade + TUIC）
+        - ?client=full 强制返回 7 节点
+        - ?client=standard 强制返回 5 节点
         """
-        links = generate_all_links()
+        ua = request.headers.get('User-Agent', '')
+        forced = request.args.get('client', '').lower().strip()
+        if forced in ('full', 'standard'):
+            capability = forced
+        else:
+            detected = detect_client_capability(ua)
+            capability = detected if detected != 'unknown' else 'standard'
+
+        links = generate_all_links(capability=capability)
         if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
             for sub_url in EXTERNAL_SUBS.split('|'):
                 sub_url = sub_url.strip()
@@ -1994,13 +2116,36 @@ def create_app():
                                 links.append(raw)
                     except Exception as e:
                         logger.warning(f"Failed to fetch external sub {sub_url}: {e}")
-        sub_text = '\n'.join(links)
-        sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
+
+        # [TRAE SOLO CN] v4.12.1 在 Base64 头部插入流量信息行（注释形式）
+        # 注释行以 # 开头，部分客户端（如 NekoBox、Clash for Windows）会显示第一个非 URI 行
+        # v2rayN 不解析此注释，但 Clash 系客户端通过 subscription-userinfo header 显示流量
         traffic = get_traffic_stats()
         total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
+        traffic_gb = round(traffic['bytes_used'] / (1024**3), 2)
+        total_gb = round(total_bytes / (1024**3), 0)
+        info_line = f"# {get_country_name()}订阅 | 当月流量: {traffic_gb} GB / {int(total_gb)} GB | 月份: {traffic['month']} | 每月{traffic['reset_day']}号归零 | 共 {len(links)} 个节点"
+        sub_text = info_line + '\n' + '\n'.join(links)
+        sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
+
         userinfo = f"upload=0; download={traffic['bytes_used']}; total={total_bytes}; expire=0"
+        # [TRAE SOLO CN] v4.12.1 修复：Content-Disposition 不能含中文字符（HTTP header latin-1 编码限制）
+        # 使用 RFC 5987 标准：filename*=UTF-8''URL编码（支持中文文件名）
+        import urllib.parse
+        sub_name_cn = f"{get_country_name()}_{traffic_gb}GB_{int(total_gb)}GB订阅"
+        sub_name_encoded = urllib.parse.quote(sub_name_cn, safe='')
+        sub_name_ascii = f"{COUNTRY_CODE}_{traffic_gb}GB_sub"
+        profile_title = f"{get_country_name()}订阅 ({traffic_gb}/{int(total_gb)}GB)"
+        # profile-title 用 ASCII 安全字符，兼容所有客户端
+        profile_title_ascii = f"{COUNTRY_CODE} subscription ({traffic_gb}/{int(total_gb)}GB)"
         return Response(sub_b64, mimetype='text/plain',
-                        headers={'subscription-userinfo': userinfo})
+                        headers={
+                            'subscription-userinfo': userinfo,
+                            # RFC 5987: filename*=UTF-8''<url-encoded> 兼容中文文件名（现代浏览器）
+                            'Content-Disposition': f"attachment; filename=\"{sub_name_ascii}.txt\"; filename*=UTF-8''{sub_name_encoded}.txt",
+                            'profile-update-interval': '6',
+                            'profile-title': profile_title_ascii,
+                        })
 
     @app.route(f'/singbox/{COUNTRY_CODE}')
     @app.route(f'/singbox/{COUNTRY_CODE.lower()}')
@@ -2053,7 +2198,64 @@ def create_app():
         返回当月流量使用情况JSON
         """
         stats = get_traffic_stats()
+        stats['total_bytes'] = 900 * 1024 * 1024 * 1024
+        stats['total_gb'] = 900
+        stats['remaining_bytes'] = max(stats['total_bytes'] - stats['bytes_used'], 0)
+        stats['remaining_gb'] = round(stats['remaining_bytes'] / (1024**3), 2)
+        stats['usage_percent'] = round(stats['bytes_used'] / stats['total_bytes'] * 100, 2) if stats['total_bytes'] > 0 else 0
         return jsonify(stats)
+
+    @app.route(f'/info/{COUNTRY_CODE}')
+    @app.route(f'/info/{COUNTRY_CODE.lower()}')
+    @app.route('/info')
+    def info_endpoint():
+        """流量信息端点（纯文本，给所有客户端看）
+        [TRAE SOLO CN] v4.12.1：v2rayN 不解析 subscription-userinfo header，
+        用户需要直接访问此端点查看流量。
+        """
+        from flask import request as _req
+        accept = _req.headers.get('Accept', '')
+        stats = get_traffic_stats()
+        total_bytes = 900 * 1024 * 1024 * 1024
+        traffic_gb = round(stats['bytes_used'] / (1024**3), 2)
+        total_gb = int(total_bytes / (1024**3))
+        remaining_gb = round((total_bytes - stats['bytes_used']) / (1024**3), 2)
+        usage_percent = round(stats['bytes_used'] / total_bytes * 100, 2) if total_bytes > 0 else 0
+
+        if 'application/json' in accept:
+            return jsonify({
+                'server': get_country_name(),
+                'month': stats['month'],
+                'used_gb': traffic_gb,
+                'used_bytes': stats['bytes_used'],
+                'total_gb': total_gb,
+                'total_bytes': total_bytes,
+                'remaining_gb': remaining_gb,
+                'remaining_bytes': max(total_bytes - stats['bytes_used'], 0),
+                'usage_percent': usage_percent,
+                'reset_day': stats['reset_day'],
+                'last_reset': stats['last_reset'] or '尚未重置',
+                'reset_note': f'每月{stats["reset_day"]}号 00:03 自动归零（iptables -Z INPUT）',
+            })
+        # 默认纯文本（最通用，v2rayN 浏览器都能看）
+        text = (
+            f"📊 {get_country_name()}服务器流量统计\n"
+            f"==========================================\n"
+            f"统计月份: {stats['month']}\n"
+            f"已用流量: {traffic_gb} GB ({stats['bytes_used']:,} bytes)\n"
+            f"剩余流量: {remaining_gb} GB\n"
+            f"套餐总量: {total_gb} GB\n"
+            f"使用百分比: {usage_percent}%\n"
+            f"重置规则: 每月{stats['reset_day']}号 00:03 自动归零\n"
+            f"上次重置: {stats['last_reset'] or '尚未重置'}\n"
+            f"==========================================\n"
+            f"提示：\n"
+            f"- Clash/Stash/Clash Verge 客户端：打开订阅即可看到流量\n"
+            f"- v2rayN/v2rayNG：每次更新订阅看不到流量属客户端限制（不支持 subscription-userinfo header），\n"
+            f"  请直接访问 https://{get_sub_domain()}:{SUB_PORT}/info 查看\n"
+            f"- 流量来源：iptables 内核级计数器（重启不丢失）\n"
+        )
+        return Response(text, mimetype='text/plain; charset=utf-8')
 
     @app.route('/api/cdn', methods=['GET', 'POST'])
     def cdn_api():

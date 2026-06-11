@@ -28,7 +28,7 @@ def test_subscription_service_uses_modern_dns_fields():
     assert '"detour": "direct"' not in source
 
 
-def test_install_script_uses_full_hy2_range():
+def test_install_script_uses_tuic_port():
     source = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
 
     assert "21000:21200" in source

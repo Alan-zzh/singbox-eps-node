@@ -82,10 +82,11 @@ check_port_listening() {
         fi
     done
 
-    if ss -ulnp 2>/dev/null | grep -q ":443 "; then
-        mark_pass "UDP 443: 监听中 (Hysteria2)"
+    TUIC_CHK_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
+    if ss -ulnp 2>/dev/null | grep -q ":$TUIC_CHK_PORT "; then
+        mark_pass "UDP $TUIC_CHK_PORT: 监听中 (TUIC v5)"
     else
-        mark_fail "UDP 443: 未监听" "检查 singbox 配置中 Hysteria2 入站是否启用，然后 systemctl restart singbox"
+        mark_fail "UDP $TUIC_CHK_PORT: 未监听" "检查 singbox 配置中 TUIC v5 入站是否启用，然后 systemctl restart singbox"
     fi
 }
 
@@ -161,29 +162,19 @@ check_ssl_cert() {
 }
 
 # ============================================================
-# 4. iptables 端口跳跃规则
+# 4. TUIC v5 防火墙规则
 # ============================================================
 check_port_hopping() {
     echo ""
     echo "=========================================="
-    echo "【4/18】iptables 端口跳跃规则 (21000-21200→443)"
+    echo "【4/18】TUIC v5 防火墙规则"
     echo "=========================================="
 
-    UDP_FIRST=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "DNAT.*udp.*dpt:21000.*to:.*:443")
-    UDP_LAST=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "DNAT.*udp.*dpt:21200.*to:.*:443")
-    TCP_FIRST=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "DNAT.*tcp.*dpt:21000.*to:.*:443")
-    TCP_LAST=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c "DNAT.*tcp.*dpt:21200.*to:.*:443")
-
-    if [ "$UDP_FIRST" -ge 1 ] && [ "$UDP_LAST" -ge 1 ]; then
-        mark_pass "UDP端口跳跃规则: 存在 (21000→443, 21200→443)"
+    TUIC_FW_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
+    if iptables -L INPUT -n | grep -q "$TUIC_FW_PORT"; then
+        mark_pass "TUIC v5 防火墙规则: 已配置 (端口 $TUIC_FW_PORT)"
     else
-        mark_fail "UDP端口跳跃规则: 缺失或不完整 (首端口21000匹配=$UDP_FIRST, 尾端口21200匹配=$UDP_LAST)" "运行 cert_manager.py 重新生成规则，或手动添加: iptables -t nat -A PREROUTING -p udp --dport 21000:21200 -j DNAT --to-destination :443"
-    fi
-
-    if [ "$TCP_FIRST" -ge 1 ] && [ "$TCP_LAST" -ge 1 ]; then
-        mark_pass "TCP端口跳跃规则: 存在 (21000→443, 21200→443)"
-    else
-        mark_fail "TCP端口跳跃规则: 缺失或不完整 (首端口21000匹配=$TCP_FIRST, 尾端口21200匹配=$TCP_LAST)" "HY2必须UDP+TCP双规则！运行 cert_manager.py 或手动添加: iptables -t nat -A PREROUTING -p tcp --dport 21000:21200 -j DNAT --to-destination :443"
+        mark_fail "TUIC v5 防火墙规则: 缺失" "运行 install.sh 或手动添加: iptables -A INPUT -p tcp --dport $TUIC_FW_PORT -j ACCEPT && iptables -A INPUT -p udp --dport $TUIC_FW_PORT -j ACCEPT"
     fi
 }
 
@@ -288,7 +279,7 @@ check_env_variables() {
         return
     fi
 
-    REQUIRED_VARS="SERVER_IP CF_DOMAIN VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD HYSTERIA2_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY"
+    REQUIRED_VARS="SERVER_IP CF_DOMAIN VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD TUIC_UUID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY"
 
     for var in $REQUIRED_VARS; do
         VAL=$(grep "^${var}=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | xargs)

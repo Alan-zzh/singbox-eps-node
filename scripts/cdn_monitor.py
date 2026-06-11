@@ -2334,6 +2334,11 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown'):
 
     logger.info(f"\n[OK] CDN优选IP已保存")
 
+    # [TRAE SOLO CN] v4.10.2 CDN测速完成日志：打印新池大小和最快IP
+    best_ip = ips[0] if ips else '无'
+    best_score_val = scored_ips[0][1] if scored_ips else 0
+    print(f"[CDN测速] CDN测速完成，新池大小: {len(ips)}，最快IP: {best_ip} (评分: {best_score_val:.1f})")
+
     # [TRAE SOLO CN] v4.10.1 通知订阅服务刷新CDN IP缓存
     signal_file = os.path.join(DATA_DIR, '.cdn_ip_updated')
     try:
@@ -2553,9 +2558,18 @@ def run_once():
     logger.info(f"CDN监控启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("="*50)
 
+    # [TRAE SOLO CN] v4.10.2 CDN测速开始日志：打印当前IP池大小
+    try:
+        old_pool = get_current_cdn_ips_from_db()
+        print(f"[CDN测速] CDN测速开始，当前池大小: {len(old_pool)}")
+    except Exception as e:
+        print(f"[CDN测速] CDN测速开始（无法获取当前池大小: {e}）")
+
     ips, user_probe_result, isp_type = fetch_cdn_ips()
     if ips:
         assign_and_save_ips(ips, user_probe_result=user_probe_result, isp_type=isp_type)
+    else:
+        print(f"[CDN测速] CDN测速完成，无可用IP")
 
     db_path = os.path.join(DATA_DIR, 'singbox.db')
     cleanup_old_history(db_path)
@@ -2590,5 +2604,8 @@ if __name__ == '__main__':
             logger.info("CDN监控已停止")
             break
         except Exception as e:
-            logger.error(f"[ERROR] {e}")
+            logger.error(f"[ERROR] CDN测速出错: {e}")
+            print(f"[CDN测速] CDN测速出错: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             time.sleep(60)

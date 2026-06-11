@@ -42,7 +42,10 @@ elif os.path.exists(env_file):
 vless_uuid = env_vars.get('VLESS_UUID', str(uuid.uuid4()))
 vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
 trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
-hysteria2_pass = env_vars.get('HYSTERIA2_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
+tuic_pass = env_vars.get('TUIC_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
+tuic_uuid = env_vars.get('TUIC_UUID', str(uuid.uuid4()))
+enable_tuic = env_vars.get('ENABLE_TUIC', 'true').lower() == 'true'
+tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 50444
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
 reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
 # v4.10.20.2 兼容过渡：服务器端 short_id 数组同时保留旧客户端用的 abcd1234
@@ -227,27 +230,20 @@ config = {
             }
         },
         {
-            "type": "hysteria2",
-            "tag": "hysteria2",
+            "type": "tuic",
+            "tag": "tuic-in",
             "listen": "0.0.0.0",
-            "listen_port": 443,
-            "tcp_fast_open": True,
-            "tcp_multi_path": False,
-            "users": [{"password": hysteria2_pass}],
+            "listen_port": tuic_port,
+            "congestion_control": "bbr",
+            "users": [{"name": "tuic-user", "uuid": tuic_uuid, "password": tuic_pass}],
             "tls": {
                 "enabled": True,
-                "server_name": "www.apple.com",
+                "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
                 "alpn": ["h3"]
-            },
-            "obfs": {
-                "type": "salamander",
-                "password": hysteria2_pass[:8]
-            },
-            "up_mbps": 200,
-            "down_mbps": 200
-        },
+            }
+        } if enable_tuic else None,
         {
             "type": "vless",
             "tag": "vless-grpc",
@@ -470,4 +466,4 @@ with open(os.path.join(BASE_DIR, "config.json"), 'w') as f:
 
 print("[OK] Singbox配置已保存")
 print(f"  配置文件: {os.path.join(BASE_DIR, 'config.json')}")
-print(f"  入站协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, Hysteria2" + (", SOCKS5" if socks5_user and socks5_pass else ""))
+print(f"  入站协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS" + (", TUIC v5" if enable_tuic else "") + (", SOCKS5" if socks5_user and socks5_pass else ""))

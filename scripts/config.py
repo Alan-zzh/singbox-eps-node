@@ -13,7 +13,7 @@ Date: 2026-05-01
   VLESS_WS_PORT = 8443
   VLESS_UPGRADE_PORT = 2053
   TROJAN_WS_PORT = 2083
-  HYSTERIA2_PORT = 443
+  TUIC_PORT = (random, from .env)
 修改端口号必须由用户明确指令，否则视为违规操作。
 历史教训：
   - v1.0.42之前默认端口6969导致防火墙不匹配、服务不可达
@@ -124,7 +124,7 @@ SINGBOX_PORT = 443
 VLESS_WS_PORT = 8443
 VLESS_UPGRADE_PORT = 2053
 TROJAN_WS_PORT = 2083
-HYSTERIA2_PORT = 443
+TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
 # VLESS-gRPC / Trojan-TCP 可配置端口（从 .env 读取，不固定，随机更安全）
 VLESS_GRPC_PORT = int(os.getenv('VLESS_GRPC_PORT', '0')) or 50051
 TROJAN_TCP_PORT = int(os.getenv('TROJAN_TCP_PORT', '0')) or 50443
@@ -136,7 +136,7 @@ LOCKED_PORTS = {
     'VLESS_WS_PORT': VLESS_WS_PORT,
     'VLESS_UPGRADE_PORT': VLESS_UPGRADE_PORT,
     'TROJAN_WS_PORT': TROJAN_WS_PORT,
-    'HYSTERIA2_PORT': HYSTERIA2_PORT,
+    'TUIC_PORT': TUIC_PORT,
     'VLESS_GRPC_PORT': VLESS_GRPC_PORT,
     'TROJAN_TCP_PORT': TROJAN_TCP_PORT,
     'SOCKS5_PORT': SOCKS5_PORT,
@@ -145,19 +145,6 @@ LOCKED_PORTS = {
 SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 
-HYSTERIA2_UDP_PORTS = list(range(21000, 21201))
-
-# ⚠️ HY2规避配置说明（必须完整保留，禁止删减任何一项）：
-# 1. obfs=salamander：规避QUIC/UDP流量特征检测
-# 2. obfs-password：取HY2密码前8位，必须与singbox配置一致
-# 3. 端口跳跃21000-21200：iptables DNAT转发到443，扩大端口范围规避封锁
-# 4. mport参数：客户端使用的多端口范围，必须与iptables规则一致
-# 5. alpn=["h3"]：HY2使用QUIC协议，必须设置h3
-# 6. ⚠️ 端口跳跃必须同时设置UDP和TCP规则（双协议保障）：
-#    - UDP：HY2核心协议(QUIC)，主要流量走UDP
-#    - TCP：降级兜底，UDP被封或不稳定时HY2可降级使用TCP
-#    - 禁止只设UDP或只设TCP，必须双协议，否则一种被封则HY2完全不可用
-#    - 历史教训：v1.0.45曾错误移除TCP规则，导致UDP被封时HY2无兜底
 
 REALITY_SHORT_ID = 'abcd1234'  # v4.10.20 弱预设已弃用，安装时通过 openssl rand -hex 8 写入 .env
 REALITY_DEST = 'www.apple.com:443'
@@ -572,7 +559,7 @@ def get_node_name(protocol):
         'vless-reality': f'{NODE_PREFIX}-VLESS-Reality',
         'vless-ws': f'{NODE_PREFIX}-VLESS-WS',
         'trojan-ws': f'{NODE_PREFIX}-Trojan-WS',
-        'hysteria2': f'{NODE_PREFIX}-Hysteria2',
+        'tuic': f'{NODE_PREFIX}-TUIC v5',
         'socks5': f'{NODE_PREFIX}-SOCKS5'
     }
     return names.get(protocol, f'{NODE_PREFIX}-{protocol}')
@@ -602,7 +589,9 @@ def load_all_config():
         'vless_uuid': get_env('VLESS_UUID', ''),
         'vless_ws_uuid': get_env('VLESS_WS_UUID', ''),
         'trojan_password': get_env('TROJAN_PASSWORD', ''),
-        'hysteria2_password': get_env('HYSTERIA2_PASSWORD', ''),
+        'tuic_password': get_env('TUIC_PASSWORD', ''),
+        'tuic_uuid': get_env('TUIC_UUID', ''),
+        'enable_tuic': get_env('ENABLE_TUIC', 'true'),
         'socks5_user': get_env('SOCKS5_USER', ''),
         'socks5_pass': get_env('SOCKS5_PASS', ''),
         'reality_private_key': get_env('REALITY_PRIVATE_KEY', ''),

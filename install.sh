@@ -14,7 +14,7 @@
 # 阶段2-部署服务（交互式配置）：
 #   5. 卸载旧面板 → 安装singbox → 部署项目
 #   6. 交互式配置：AI代理+域名
-#   7. 生成配置+证书+防火墙+端口跳跃
+#   7. 生成配置+证书+防火墙
 #   8. 启动服务+验证
 # ============================================================
 
@@ -294,7 +294,7 @@ install_singbox() {
             PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
             > "$PASSWORD_BACKUP"
             if [ -f "$BASE_DIR/.env" ]; then
-                for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD HYSTERIA2_PASSWORD \
+                for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD \
                              REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
                              AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
@@ -388,7 +388,8 @@ generate_uuids_and_passwords() {
                 VLESS_UUID) VLESS_UUID="$value" ;;
                 VLESS_WS_UUID) VLESS_WS_UUID="$value" ;;
                 TROJAN_PASSWORD) TROJAN_PASSWORD="$value" ;;
-                HYSTERIA2_PASSWORD) HYSTERIA2_PASSWORD="$value" ;;
+                TUIC_PASSWORD) TUIC_PASSWORD="$value" ;;
+                TUIC_UUID) TUIC_UUID="$value" ;;
                 COUNTRY_CODE) COUNTRY_CODE="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
@@ -397,10 +398,12 @@ generate_uuids_and_passwords() {
     VLESS_UUID=${VLESS_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     VLESS_WS_UUID=${VLESS_WS_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     TROJAN_PASSWORD=${TROJAN_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
-    HYSTERIA2_PASSWORD=${HYSTERIA2_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
+    TUIC_PASSWORD=${TUIC_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(32))")}
+    TUIC_UUID=${TUIC_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     # 随机端口生成（10000-65535 之间，避免常用端口）
     VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
     TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
+    TUIC_PORT=${TUIC_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
     if [ -n "$SERVER_IP" ]; then
         COUNTRY_CODE=$(curl -s --connect-timeout 5 "https://ipinfo.io/${SERVER_IP}/country" 2>/dev/null | tr -d '[:space:]' || echo "")
@@ -408,7 +411,7 @@ generate_uuids_and_passwords() {
     COUNTRY_CODE=${COUNTRY_CODE:-US}
     log_info "服务器IP: ${SERVER_IP}，国家代码: ${COUNTRY_CODE}"
     log_info "UUID和密码已生成"
-    log_info "VLESS-gRPC端口: ${VLESS_GRPC_PORT}，Trojan-TCP端口: ${TROJAN_TCP_PORT}"
+    log_info "VLESS-gRPC端口: ${VLESS_GRPC_PORT}，Trojan-TCP端口: ${TROJAN_TCP_PORT}，TUIC端口: ${TUIC_PORT}"
 }
 
 generate_reality_keys() {
@@ -526,13 +529,16 @@ CF_DOMAIN=${CF_DOMAIN_INPUT}
 VLESS_UUID=${VLESS_UUID}
 VLESS_WS_UUID=${VLESS_WS_UUID}
 TROJAN_PASSWORD=${TROJAN_PASSWORD}
-HYSTERIA2_PASSWORD=${HYSTERIA2_PASSWORD}
+TUIC_PASSWORD=${TUIC_PASSWORD}
+TUIC_UUID=${TUIC_UUID}
+ENABLE_TUIC=true
 REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
 REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
 
 # ============ 协议端口（直连协议随机生成，避免被封）=========
 VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
 TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
+TUIC_PORT=${TUIC_PORT}
 
 # ============ 可选 ============
 CF_API_TOKEN=${CF_API_TOKEN_INPUT}
@@ -568,10 +574,21 @@ setup_certificate() {
     python3 scripts/cert_manager.py --cf-cert || python3 scripts/cert_manager.py
 }
 
-setup_port_hopping() {
-    log_step "设置Hysteria2端口跳跃规则 (21000-21200 → 443, UDP+TCP)..."
-    cd "$BASE_DIR"
-    python3 scripts/cert_manager.py --setup-iptables
+setup_tuic_firewall() {
+    log_step "配置TUIC v5防火墙规则..."
+    # 从 .env 读取 TUIC 端口
+    if [ -f "$BASE_DIR/.env" ]; then
+        TUIC_PORT_FW=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
+    fi
+    TUIC_PORT_FW=${TUIC_PORT_FW:-50444}
+    # 清理旧端口跳跃规则（21000-21200）
+    iptables-save 2>/dev/null | grep -v "21000:21200" | iptables-restore 2>/dev/null || true
+    log_info "旧端口跳跃规则已清理"
+    # 添加 TUIC TCP+UDP 规则
+    iptables -A INPUT -p tcp --dport $TUIC_PORT_FW -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -p udp --dport $TUIC_PORT_FW -j ACCEPT 2>/dev/null || true
+    netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    log_info "TUIC v5 防火墙规则已配置 (端口: $TUIC_PORT_FW, TCP+UDP)"
 }
 
 create_systemd_services() {
@@ -749,10 +766,12 @@ setup_iptables_traffic_counter() {
     iptables -A INPUT -p udp --dport $VLESS_GRPC_PORT -j ACCEPT
     iptables -A INPUT -p tcp --dport $TROJAN_TCP_PORT -j ACCEPT
     iptables -A INPUT -p udp --dport $TROJAN_TCP_PORT -j ACCEPT
-    iptables -A INPUT -p udp --dport 21000:21200 -j ACCEPT
-    iptables -A INPUT -p tcp --dport 21000:21200 -j ACCEPT
+    # TUIC v5 端口
+    TUIC_PORT_IPT=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "50444")
+    iptables -A INPUT -p tcp --dport $TUIC_PORT_IPT -j ACCEPT
+    iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
     netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/$VLESS_GRPC_PORT/$TROJAN_TCP_PORT/21000-21200）"
+    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/$VLESS_GRPC_PORT/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
 }
 
 start_services() {
@@ -764,6 +783,17 @@ start_services() {
     if ! python3 -c "import json; json.load(open('${BASE_DIR}/config.json'))" 2>/dev/null; then
         log_error "config.json 语法错误！重新生成..."
         cd "$BASE_DIR" && python3 scripts/config_generator.py
+    fi
+    # v4.11.1 修复：config_generator.py 升级后必须强制重跑 + check，避免新协议入站缺失（Bug #90 教训）
+    # 之前条件是"config.json 缺失或损坏"才重跑，导致 v4.11.0 升级 scripts/config_generator.py 新增 vless-grpc/trojan-tcp 后，
+    # 服务器 config.json 仍是 5-入站旧版，singbox 实际没监听新端口，但订阅服务已生成 7 节点 → 用户连不上"协议配置错"（实际入站缺失）
+    # 现在无条件重跑 config_generator.py（生成在毫秒级，零成本）
+    log_info "重跑 config_generator.py 以确保入站配置与代码版本一致..."
+    cd "$BASE_DIR" && python3 scripts/config_generator.py
+    # 立即 check 一次，配置错误早暴露
+    if ! /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" >/dev/null 2>&1; then
+        log_warn "config.json 检查失败，详情："
+        /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" 2>&1 | head -20
     fi
     CERT_DIR_PATH="${BASE_DIR}/cert"
     if [ ! -f "${CERT_DIR_PATH}/cert.pem" ] && [ ! -f "${CERT_DIR_PATH}/fullchain.pem" ]; then
@@ -811,6 +841,29 @@ verify_installation() {
             ALL_OK=false
         fi
     done
+    # v4.11.1 新增：验证随机端口协议（vless-grpc / trojan-tcp）实际监听
+    # 历史教训：v4.11.0 升级后 config.json 没重跑，这俩端口永远不会监听，验证脚本漏检
+    for port_var in VLESS_GRPC_PORT TROJAN_TCP_PORT; do
+        vport=$(grep "^${port_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+        if [ -n "$vport" ]; then
+            if ss -tlnp | grep -q ":$vport "; then
+                echo -e "    ${GREEN}✅${NC} 端口 $vport ($port_var): 监听中"
+            else
+                echo -e "    ${RED}❌${NC} 端口 $vport ($port_var): 未监听"
+                ALL_OK=false
+            fi
+        fi
+    done
+    # v4.12.0 新增：验证 TUIC v5 端口（TCP+UDP 双栈）
+    tuic_vport=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    if [ -n "$tuic_vport" ]; then
+        if ss -tulnp | grep -q ":$tuic_vport "; then
+            echo -e "    ${GREEN}✅${NC} 端口 $tuic_vport (TUIC_PORT): TCP+UDP 监听中"
+        else
+            echo -e "    ${RED}❌${NC} 端口 $tuic_vport (TUIC_PORT): 未监听"
+            ALL_OK=false
+        fi
+    fi
     echo ""
     echo -e "  系统优化:"
     if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
@@ -923,7 +976,7 @@ cmd_reset() {
     generate_config
     create_systemd_services
     setup_firewall
-    setup_port_hopping
+    setup_tuic_firewall
     setup_swap_and_optimize
     clean_crontab_conflicts
     setup_iptables_traffic_counter
@@ -1112,7 +1165,7 @@ main() {
             generate_config
             setup_certificate
             setup_firewall
-            setup_port_hopping
+            setup_tuic_firewall
             create_systemd_services
             setup_swap_and_optimize
             clean_crontab_conflicts
