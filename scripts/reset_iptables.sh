@@ -1,12 +1,9 @@
 #!/bin/bash
 # ============================================================
-# iptables 流量计数器月度归零脚本
-# 版本: v4.10.20.1
-# 用途: 每月 3 号 00:03 自动清零 INPUT/OUTPUT 计数器
-# Cron: 3 0 3 * * /root/singbox-eps-node/scripts/reset_iptables.sh >> /var/log/iptables_reset.log 2>&1
-# 部署: install.sh 阶段 4 自动添加 cron + 写本脚本
+# [Codex] iptables 流量统计基准说明脚本
+# 版本: v4.12.2
+# 用途: 保留兼容入口，但不清零内核计数器
+# 说明: subscription_service.py 每月 14 号通过数据库 baseline 重置月用量
 # ============================================================
 
-iptables -Z INPUT
-iptables -Z OUTPUT
-echo "[$(date '+%F %T')] iptables 流量计数器已归零" >> /var/log/iptables_reset.log
+echo "[$(date '+%F %T')] [Codex] 不清零 iptables 内核计数器；月度流量由 subscription_service.py baseline 重置" >> /var/log/iptables_reset.log

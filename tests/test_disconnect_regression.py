@@ -126,6 +126,72 @@ def test_subscription_service_can_rotate_from_plain_pool_without_quality_filter(
     assert chosen == "2.2.2.2"
 
 
+def test_subscription_client_capability_defaults_to_compatible_standard(subscription_service_module):
+    assert subscription_service_module.detect_client_capability("v2rayN/6.60") == "standard"
+    assert subscription_service_module.detect_client_capability("v2rayNG/1.9") == "standard"
+    assert subscription_service_module.detect_client_capability("Shadowrocket/2.2") == "standard"
+    assert subscription_service_module.detect_client_capability("Clash Verge Rev") == "full"
+    assert subscription_service_module.detect_client_capability("mihomo/1.18") == "full"
+    assert subscription_service_module.detect_client_capability("sing-box/1.10") == "full"
+
+
+def test_subscription_client_query_aliases(subscription_service_module):
+    assert subscription_service_module.resolve_subscription_capability("clash", "v2rayN/6.60") == "full"
+    assert subscription_service_module.resolve_subscription_capability("mihomo", "") == "full"
+    assert subscription_service_module.resolve_subscription_capability("v2rayn", "clash") == "standard"
+    assert subscription_service_module.resolve_subscription_capability("shadowrocket", "clash") == "standard"
+    assert subscription_service_module.resolve_subscription_capability("", "unknown-client") == "standard"
+
+
+def test_base64_links_filter_incompatible_nodes_for_standard_clients(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    links = subscription_service_module.generate_all_links(capability="standard")
+    text = "\n".join(links)
+
+    assert "VLESS-HTTPUpgrade" not in text
+    assert "TUIC v5" not in text
+    assert "VLESS-WS-CDN" in text
+    assert "Trojan-WS-CDN" in text
+
+
+def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    monkeypatch.setattr(subscription_service_module, "get_cdn_ip_for_protocol", lambda key: {
+        "vless_ws_cdn_ip": "1.1.1.1",
+        "vless_upgrade_cdn_ip": "2.2.2.2",
+        "trojan_ws_cdn_ip": "3.3.3.3",
+    }[key])
+
+    clash = subscription_service_module.generate_clash_config()
+    singbox = subscription_service_module.generate_singbox_config()
+    clash_names = {proxy["name"] for proxy in clash["proxies"]}
+    singbox_tags = {outbound["tag"] for outbound in singbox["outbounds"] if "tag" in outbound}
+
+    assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-WS-CDN" in clash_names
+    assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-HTTPUpgrade-CDN" in clash_names
+    assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in clash_names
+    assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-WS-CDN" in singbox_tags
+    assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-HTTPUpgrade-CDN" in singbox_tags
+    assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in singbox_tags
+
+
+def test_iptables_traffic_rules_count_output_by_source_port():
+    source = (PROJECT_ROOT / "scripts" / "subscription_service.py").read_text(encoding="utf-8")
+
+    assert "iptables -I INPUT 1 -p tcp --dport {port}" in source
+    assert "iptables -I OUTPUT 1 -p tcp --sport {port}" in source
+    assert "iptables -I INPUT 1 -p udp --dport {port}" in source
+    assert "iptables -I OUTPUT 1 -p udp --sport {port}" in source
+    assert "f'spt:{port}'" in source
+
+
+def test_reset_iptables_no_longer_zeros_kernel_counters():
+    source = (PROJECT_ROOT / "scripts" / "reset_iptables.sh").read_text(encoding="utf-8")
+
+    assert "iptables -Z" not in source
+    assert "不清零" in source
+
+
 def test_config_generator_removes_inbound_tcp_keepalive_fields():
     source = (PROJECT_ROOT / "scripts" / "config_generator.py").read_text(encoding="utf-8")
 
@@ -166,7 +232,10 @@ def test_install_script_prefers_fq_over_fq_pie():
 
 
 def test_verify_server_config_uses_safe_stdout_and_available_memory_column():
-    source = (PROJECT_ROOT / "scripts" / "verify_server_config.py").read_text(encoding="utf-8")
+    script_path = PROJECT_ROOT / "scripts" / "verify_server_config.py"
+    if not script_path.exists():
+        pytest.skip("verify_server_config.py 已归档或删除，当前仓库不再维护该脚本")
+    source = script_path.read_text(encoding="utf-8")
 
     assert "configure_stdout()" in source
     assert "available = parts[6]" in source

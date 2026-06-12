@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v4.12.1
-Date: 2026-06-11
+Version: v4.12.2
+Date: 2026-06-13
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -14,8 +14,8 @@ Date: 2026-06-11
 
 订阅链接格式:
   - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
-    - 自动识别客户端 UA：Clash/sing-box → 7 节点，v2rayN/v2rayNG → 5 节点
-    - 强制控制：?client=full | ?client=standard
+    - 自动识别客户端 UA：Clash/sing-box → 7 节点，v2rayN/v2rayNG/Shadowrocket → 5 节点
+    - 强制控制：?client=full|standard|clash|v2rayn|shadowrocket
   - sing-box JSON: https://{CF_DOMAIN}:{SUB_PORT}/singbox/{国家代码}
   - Clash Meta YAML: https://{CF_DOMAIN}:{SUB_PORT}/clash/{国家代码}
   - 流量查询: https://{CF_DOMAIN}:{SUB_PORT}/info/{国家代码}
@@ -26,15 +26,15 @@ Date: 2026-06-11
 - {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
 - {COUNTRY_CODE}-VLESS-gRPC (直连节点，gRPC 传输)
 - {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
-- {COUNTRY_CODE}-VLESS-WS (CDN节点，独立优选IP)
-- {COUNTRY_CODE}-VLESS-HTTPUpgrade (CDN节点，仅 Clash/sing-box 显示)
-- {COUNTRY_CODE}-Trojan-WS (CDN节点，独立优选IP)
+- {COUNTRY_CODE}-VLESS-WS-CDN (CDN节点，独立优选IP)
+- {COUNTRY_CODE}-VLESS-HTTPUpgrade-CDN (CDN节点，仅 Clash/sing-box 显示)
+- {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，独立优选IP)
 - {COUNTRY_CODE}-TUIC v5 (直连节点，UDP加速，仅 Clash/sing-box 显示)
 
-【v4.12.1 客户端能力适配】:
-  - v2rayN / v2rayNG / Shadowrocket / Quantumult X：剔除 HTTPUpgrade + TUIC v5（Xray-core 不支持）
-  - Clash Meta / Clash Verge Rev / sing-box / NekoBox：返回全部 7 节点
-  - 自动通过 User-Agent 识别，强制控制用 ?client=full | ?client=standard
+【v4.12.2 客户端能力适配】:
+  - Clash/sing-box/NekoBox：返回全部 7 节点
+  - v2rayN/v2rayNG/Shadowrocket/未知客户端：默认 5 节点，避免 TUIC/HTTPUpgrade 解析不稳定
+  - 自动通过 User-Agent 识别，强制控制用 ?client=full|standard|clash|v2rayn|shadowrocket
 
 【v4.12.1 流量显示增强】:
   - Clash/Stash：通过 subscription-userinfo header 显示（原有）
@@ -125,15 +125,16 @@ logger = get_logger('subscription_service')
 IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
 
-# [TRAE SOLO CN] v4.12.1 客户端能力矩阵
-# sing-box 协议兼容性分级，决定 /sub 端点返回哪些节点
-#   full     = 支持全部 7 节点（含 HTTPUpgrade + TUIC v5）
-#   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，兼容 Xray-core/v2rayN/Shadowrocket 等）
+# [Codex] v4.12.2 客户端能力矩阵
+# 决定 /sub 端点返回哪些节点
+#   full     = 支持全部 7 节点
+#   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，优先保证订阅可解析）
 #   unknown  = 按 standard 处理（安全降级）
 CLIENT_CAPABILITIES = {
     # Clash 系（mihomo 内核支持 Reality/gRPC/TUIC/HTTPUpgrade）
     'clash-meta': 'full',
     'clash-verge': 'full',
+    'clash verge': 'full',
     'clashforwindows': 'full',
     'clashx': 'full',
     'mihomo': 'full',
@@ -142,11 +143,12 @@ CLIENT_CAPABILITIES = {
     'sing-box': 'full',
     'nekobox': 'full',
     'nekoray': 'full',
-    # v2ray 系（Xray-core 不支持 HTTPUpgrade 和 TUIC）
+    # v2ray/Shadowrocket 默认保守降级；新版客户端可用 ?client=full 手动启用 7 节点
     'v2rayn': 'standard',
     'v2rayng': 'standard',
     'v2box': 'standard',
     'shadowrocket': 'standard',
+    # 以下客户端兼容性不确定，保守降级
     'quantumult': 'standard',
     'surfboard': 'standard',
     # 浏览器/未知客户端
@@ -157,6 +159,27 @@ CLIENT_CAPABILITIES = {
     'wget': 'standard',
     'python-requests': 'standard',
 }
+
+CLIENT_QUERY_ALIASES = {
+    'full': 'full',
+    'standard': 'standard',
+    'clash': 'full',
+    'clash-meta': 'full',
+    'mihomo': 'full',
+    'singbox': 'full',
+    'sing-box': 'full',
+    'nekobox': 'full',
+    'nekoray': 'full',
+    'v2rayn': 'standard',
+    'v2rayng': 'standard',
+    'shadowrocket': 'standard',
+}
+
+
+def node_name(protocol, cdn=False):
+    """[Codex] 统一所有订阅格式中的节点名称。"""
+    suffix = '-CDN' if cdn else ''
+    return f"{COUNTRY_CODE}-{protocol}{suffix}"
 
 
 def detect_client_capability(user_agent=''):
@@ -171,6 +194,15 @@ def detect_client_capability(user_agent=''):
         if keyword in ua_lower:
             return capability
     return 'unknown'
+
+
+def resolve_subscription_capability(forced='', user_agent=''):
+    """[Codex] 解析 ?client= 强制参数，未知时回退到 UA 自动识别。"""
+    forced_key = (forced or '').lower().strip()
+    if forced_key in CLIENT_QUERY_ALIASES:
+        return CLIENT_QUERY_ALIASES[forced_key]
+    detected = detect_client_capability(user_agent)
+    return detected if detected != 'unknown' else 'standard'
 
 
 def is_valid_ipv4(ip):
@@ -188,6 +220,10 @@ def load_cdn_settings(conn):
 
 
 def parse_cdn_ips_list(raw_value):
+    return [item['ip'] for item in parse_cdn_pool_details(raw_value) if item.get('ip')]
+
+
+def parse_cdn_pool_details(raw_value):
     if not raw_value:
         return []
     raw = raw_value.strip()
@@ -195,10 +231,10 @@ def parse_cdn_ips_list(raw_value):
         try:
             items = json.loads(raw)
             if isinstance(items, list) and items and isinstance(items[0], dict):
-                return [item['ip'] for item in items if isinstance(item, dict) and item.get('ip')]
+                return [item for item in items if isinstance(item, dict) and item.get('ip')]
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
-    return [ip.strip() for ip in raw.split(',') if ip.strip()]
+    return [{'ip': ip.strip()} for ip in raw.split(',') if ip.strip()]
 
 
 def get_cdn_pool_state(conn):
@@ -207,6 +243,37 @@ def get_cdn_pool_state(conn):
     pool_raw = settings.get('cdn_ips_list', '')
     pool = parse_cdn_ips_list(pool_raw)
     return settings, current, pool
+
+
+def get_ip_performance_snapshot(cursor, ip):
+    """[Codex] 读取单个 CDN IP 的性能快照，兼容旧库缺列。"""
+    if not ip:
+        return {}
+    try:
+        cursor.execute("PRAGMA table_info(ip_performance)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if not columns:
+            return {}
+        cursor.execute("SELECT * FROM ip_performance WHERE ip=?", (ip,))
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        perf = dict(zip(columns, row))
+        return {
+            'score': perf.get('composite_score_v2', 0) or 0,
+            'latency_ms': perf.get('avg_latency', 0) or 0,
+            'speed_mbps': perf.get('speed_mbps', 0) or 0,
+            'success_count': perf.get('success_count', 0) or 0,
+            'total_tests': perf.get('total_tests', 0) or 0,
+            'fail_count': perf.get('fail_count', 0) or 0,
+            'consecutive_fails': perf.get('consecutive_fails', 0) or 0,
+            'cross_isp_score': perf.get('user_isp_match', 0) or 0,
+            'last_test_time': perf.get('last_test_time'),
+            'last_success_time': perf.get('last_success_time'),
+            'source': perf.get('source'),
+        }
+    except Exception:
+        return {}
 
 
 def save_cdn_pool(conn, pool):
@@ -391,7 +458,7 @@ def init_db():
                 value TEXT
             )
         """)
-        # 按月流量统计表（每月14号自动归零）
+        # [Codex] 按月流量统计表（每月14号更新baseline，不清零iptables）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS traffic_stats (
                 key TEXT PRIMARY KEY,
@@ -419,25 +486,28 @@ def setup_iptables_traffic_counters():
     for port in singbox_ports:
         if not port or port == 0:
             continue
-        for chain in ('INPUT', 'OUTPUT'):
-            # 先检查规则是否已存在（幂等）
-            check_cmd = f'iptables -L {chain} -v -n -x | grep -c "dpt:{port}"'
+        tcp_rules = (
+            ('INPUT', 'dpt', f'iptables -I INPUT 1 -p tcp --dport {port} -j ACCEPT'),
+            ('OUTPUT', 'spt', f'iptables -I OUTPUT 1 -p tcp --sport {port} -j ACCEPT'),
+        )
+        for chain, marker, add_cmd in tcp_rules:
+            check_cmd = f'iptables -L {chain} -v -n -x | grep -c "tcp {marker}:{port}"'
             ret, out, err = _run_cmd(check_cmd)
             if ret == 0 and int(out.strip()) > 0:
-                continue  # 规则已存在，跳过
-
-            # 添加TCP统计规则（接受数据包时计数）
-            add_cmd = f'iptables -I {chain} 1 -p tcp --dport {port} -j ACCEPT'
+                continue
             _run_cmd(add_cmd)
 
         # TUIC 是 QUIC（UDP），UDP 也要单独建规则
         if port == TUIC_PORT_ENV and TUIC_PORT_ENV:
-            for chain in ('INPUT', 'OUTPUT'):
-                check_cmd = f'iptables -L {chain} -v -n -x | grep -c "udp dpt:{port}"'
+            udp_rules = (
+                ('INPUT', 'dpt', f'iptables -I INPUT 1 -p udp --dport {port} -j ACCEPT'),
+                ('OUTPUT', 'spt', f'iptables -I OUTPUT 1 -p udp --sport {port} -j ACCEPT'),
+            )
+            for chain, marker, add_cmd in udp_rules:
+                check_cmd = f'iptables -L {chain} -v -n -x | grep -c "udp {marker}:{port}"'
                 ret, out, err = _run_cmd(check_cmd)
                 if ret == 0 and int(out.strip()) > 0:
                     continue
-                add_cmd = f'iptables -I {chain} 1 -p udp --dport {port} -j ACCEPT'
                 _run_cmd(add_cmd)
 
 def _run_cmd(cmd):
@@ -465,15 +535,17 @@ def get_iptables_traffic_bytes():
             logger.warning(f"iptables命令执行失败: {err}")
             continue
 
+        port_marker = 'dpt' if chain == 'INPUT' else 'spt'
         for line in out.split('\n'):
-            if 'dpt:' not in line:
+            if f'{port_marker}:' not in line:
                 continue
             for port in singbox_ports:
                 if not port or port == 0:
                     continue
-                if f'dpt:{port}' in line:
+                port_prefix = f'dpt:{port}' if chain == 'INPUT' else f'spt:{port}'
+                if port_prefix in line:
                     # 行格式: pkts bytes target prot opt in out source destination
-                    # 例: 12345 6789012345 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443
+                    # 例: 12345 6789012345 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443/spt:443
                     parts = line.split()
                     if len(parts) >= 2:
                         try:
@@ -509,6 +581,10 @@ def check_and_reset_month():
             iptables_bytes = get_iptables_traffic_bytes()
             if iptables_bytes >= 0:
                 cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('current_month', current_month))
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('last_reset', today_str))
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
                                ('iptables_baseline', str(iptables_bytes)))
                 logger.info(f"iptables基准值初始化: {iptables_bytes} bytes")
                 # 同时清除旧的current_bytes（旧版本update_traffic写入的订阅文件大小）
@@ -517,6 +593,10 @@ def check_and_reset_month():
                 return  # 初始化完成，不需要重置月份
             else:
                 # iptables不可用，创建空基准值
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('current_month', current_month))
+                cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
+                               ('last_reset', today_str))
                 cursor.execute("INSERT OR REPLACE INTO traffic_stats (key, value) VALUES (?, ?)",
                                ('iptables_baseline', '0'))
                 conn.commit()
@@ -886,10 +966,10 @@ def get_cdn_optimized_domain():
 def generate_all_links(capability='full'):
     """生成所有节点链接
 
-    【v4.12.1 客户端能力适配】:
-    - capability='full'：返回全部 7 节点（Clash Meta / sing-box / NekoBox / Clash Verge 等）
+    【v4.12.2 客户端能力适配】:
+    - capability='full'：返回全部 7 节点（所有主流客户端）
     - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
-      （Xray-core / v2rayN / v2rayNG / Shadowrocket / Quantumult X 不支持这两个协议）
+      （仅量子多/冲浪板等不确定的老旧客户端降级使用）
     - capability='unknown'：按 standard 处理，安全降级
     """
     links = []
@@ -899,14 +979,14 @@ def generate_all_links(capability='full'):
         vless_ws_addr = CF_DOMAIN
         vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
-        cdn_suffix = "-CDN-D"
+        cdn_suffix = "-CDN"
         use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
     elif CDN_MODE == 'domain_optimized':
         optimized_domain = get_cdn_optimized_domain()
         vless_ws_addr = optimized_domain or CF_DOMAIN
         vless_upgrade_addr = optimized_domain or CF_DOMAIN
         trojan_ws_addr = optimized_domain or CF_DOMAIN
-        cdn_suffix = "-CDN-O"
+        cdn_suffix = "-CDN"
         use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
     else:
         vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
@@ -937,7 +1017,7 @@ def generate_all_links(capability='full'):
         'headerType': 'none'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#{COUNTRY_CODE}-VLESS-Reality")
+    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#{node_name('VLESS-Reality')}")
 
     # 2. VLESS-gRPC (直连)
     params = {
@@ -949,7 +1029,7 @@ def generate_all_links(capability='full'):
         'fp': 'chrome',
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:{VLESS_GRPC_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-gRPC")
+    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:{VLESS_GRPC_PORT}?{param_str}#{node_name('VLESS-gRPC')}")
 
     # 3. Trojan-TCP (直连)
     params = {
@@ -960,7 +1040,7 @@ def generate_all_links(capability='full'):
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"trojan://{TROJAN_PASSWORD}@{SERVER_IP}:{TROJAN_TCP_PORT}?{param_str}#{COUNTRY_CODE}-Trojan-TCP")
+    links.append(f"trojan://{TROJAN_PASSWORD}@{SERVER_IP}:{TROJAN_TCP_PORT}?{param_str}#{node_name('Trojan-TCP')}")
 
     # 4. VLESS-WS (CDN)
     params = {
@@ -973,10 +1053,10 @@ def generate_all_links(capability='full'):
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-WS{cdn_suffix}")
+    links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{node_name('VLESS-WS', cdn=True)}")
 
     # 3. VLESS-HTTPUpgrade (CDN)
-    # [TRAE SOLO CN] v4.12.1 仅对 full 能力客户端返回（Xray-core 不识别 type=httpupgrade）
+    # 仅在 standard 模式（?client=standard / 老旧客户端）时剔除
     if capability == 'full':
         params = {
             'encryption': 'none',
@@ -988,7 +1068,7 @@ def generate_all_links(capability='full'):
             'allowInsecure': '1'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{COUNTRY_CODE}-VLESS-HTTPUpgrade{cdn_suffix}")
+        links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{node_name('VLESS-HTTPUpgrade', cdn=True)}")
 
     # 4. Trojan-WS (CDN)
     params = {
@@ -1001,20 +1081,21 @@ def generate_all_links(capability='full'):
         'host': cdn_sni,
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-    links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{COUNTRY_CODE}-Trojan-WS{cdn_suffix}")
+    links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{node_name('Trojan-WS', cdn=True)}")
 
     # 7. TUIC v5 (直连) - UDP加速，TCP+UDP双栈
     # TUIC v5 内置 TLS 1.3（QUIC 强制），不需要 Reality，不需要端口跳跃
-    # [TRAE SOLO CN] v4.12.1 仅对 full 能力客户端返回（Xray-core/v2rayN 完全不支持 tuic://）
+    # 【v4.12.2 修复】: insecure → allow_insecure（v2rayN 标准参数名）+ udp_relay_mode=native
     if ENABLE_TUIC and capability == 'full':
         params = {
             'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
-            'insecure': '1',
+            'allow_insecure': '1',
             'alpn': 'h3',
-            'congestion_control': 'bbr'
+            'congestion_control': 'bbr',
+            'udp_relay_mode': 'native'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-        links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT_ENV}?{param_str}#{COUNTRY_CODE}-TUIC v5")
+        links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT_ENV}?{param_str}#{node_name('TUIC v5')}")
 
     return links
 
@@ -1167,29 +1248,31 @@ def generate_singbox_config():
                 "type": "selector",
                 "tag": "ePS-Auto",
                 "outbounds": [
-                    f"{COUNTRY_CODE}-VLESS-Reality",
-                    f"{COUNTRY_CODE}-VLESS-gRPC",
-                    f"{COUNTRY_CODE}-Trojan-TCP",
-                    f"{COUNTRY_CODE}-VLESS-WS",
-                    f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
-                    f"{COUNTRY_CODE}-Trojan-WS",
-                ] + ([f"{COUNTRY_CODE}-TUIC v5"] if ENABLE_TUIC else []) + [
+                    node_name("VLESS-Reality"),
+                    node_name("VLESS-gRPC"),
+                    node_name("Trojan-TCP"),
+                    node_name("VLESS-WS", cdn=True),
+                    node_name("VLESS-HTTPUpgrade", cdn=True),
+                    node_name("Trojan-WS", cdn=True),
+                ] + ([node_name("TUIC v5")] if ENABLE_TUIC else []) + [
                     "ePS-Auto-Test",
                     "direct"
                 ],
                 "default": "ePS-Auto-Test"
             },
             # ePS-Auto-Test: 自动测速选优节点（urltest类型，每60秒测速一次）
+            # 全部 7 协议加入 urltest，与 Clash url-test 同步。用户要求"全部协议加入自动选择"
             {
                 "type": "urltest",
                 "tag": "ePS-Auto-Test",
                 "outbounds": [
-                    f"{COUNTRY_CODE}-VLESS-gRPC",
-                    f"{COUNTRY_CODE}-Trojan-TCP",
-                    f"{COUNTRY_CODE}-VLESS-WS",
-                    f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
-                    f"{COUNTRY_CODE}-Trojan-WS",
-                ],
+                    node_name("VLESS-Reality"),
+                    node_name("VLESS-gRPC"),
+                    node_name("Trojan-TCP"),
+                    node_name("VLESS-WS", cdn=True),
+                    node_name("VLESS-HTTPUpgrade", cdn=True),
+                    node_name("Trojan-WS", cdn=True),
+                ] + ([node_name("TUIC v5")] if ENABLE_TUIC else []),
                 "interval": "60s",
                 "tolerance": 150,
                 "url": "http://cp.cloudflare.com/generate_204"
@@ -1218,13 +1301,12 @@ def generate_singbox_config():
             # VLESS-Reality
             {
                 "type": "vless",
-                "tag": f"{COUNTRY_CODE}-VLESS-Reality",
+                "tag": node_name("VLESS-Reality"),
                 "server": SERVER_IP,
                 "server_port": 443,
                 "uuid": VLESS_UUID,
                 "flow": "xtls-rprx-vision",
                 "packet_encoding": "xudp",
-                "tcp_fast_open": True,
                 "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
@@ -1247,12 +1329,11 @@ def generate_singbox_config():
             # VLESS-gRPC (直连)
             {
                 "type": "vless",
-                "tag": f"{COUNTRY_CODE}-VLESS-gRPC",
+                "tag": node_name("VLESS-gRPC"),
                 "server": SERVER_IP,
                 "server_port": VLESS_GRPC_PORT,
                 "uuid": VLESS_UUID,
                 "packet_encoding": "xudp",
-                "tcp_fast_open": True,
                 "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
@@ -1276,11 +1357,10 @@ def generate_singbox_config():
             # Trojan-TCP (直连)
             {
                 "type": "trojan",
-                "tag": f"{COUNTRY_CODE}-Trojan-TCP",
+                "tag": node_name("Trojan-TCP"),
                 "server": SERVER_IP,
                 "server_port": TROJAN_TCP_PORT,
                 "password": TROJAN_PASSWORD,
-                "tcp_fast_open": True,
                 "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
@@ -1300,12 +1380,11 @@ def generate_singbox_config():
             # VLESS-WS (CDN)
             {
                 "type": "vless",
-                "tag": f"{COUNTRY_CODE}-VLESS-WS",
+                "tag": node_name("VLESS-WS", cdn=True),
                 "server": vless_ws_addr,
                 "server_port": VLESS_WS_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
-                "tcp_fast_open": True,
                 "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
@@ -1332,12 +1411,11 @@ def generate_singbox_config():
             # VLESS-HTTPUpgrade (CDN)
             {
                 "type": "vless",
-                "tag": f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
+                "tag": node_name("VLESS-HTTPUpgrade", cdn=True),
                 "server": vless_upgrade_addr,
                 "server_port": VLESS_UPGRADE_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
-                "tcp_fast_open": True,
                 "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
@@ -1362,11 +1440,10 @@ def generate_singbox_config():
             # Trojan-WS (CDN)
             {
                 "type": "trojan",
-                "tag": f"{COUNTRY_CODE}-Trojan-WS",
+                "tag": node_name("Trojan-WS", cdn=True),
                 "server": trojan_ws_addr,
                 "server_port": TROJAN_WS_PORT,
                 "password": TROJAN_PASSWORD,
-                "tcp_fast_open": True,
                 "tcp_multi_path": False,
                 "multiplex": {
                     "enabled": False
@@ -1394,7 +1471,7 @@ def generate_singbox_config():
             # QUIC 内置 TLS 1.3，不需要 Reality，不需要端口跳跃
         ] + ([{
                 "type": "tuic",
-                "tag": f"{COUNTRY_CODE}-TUIC v5",
+                "tag": node_name("TUIC v5"),
                 "server": SERVER_IP,
                 "server_port": TUIC_PORT_ENV,
                 "uuid": TUIC_UUID,
@@ -1718,7 +1795,7 @@ def generate_clash_config():
     
     # 1. VLESS-Reality (直连) - Clash Meta v1.18.0+ 支持
     proxies.append({
-        "name": f"{COUNTRY_CODE}-VLESS-Reality",
+        "name": node_name("VLESS-Reality"),
         "type": "vless",
         "server": SERVER_IP,
         "port": 443,
@@ -1740,7 +1817,7 @@ def generate_clash_config():
     
     # 2. VLESS-gRPC (直连)
     proxies.append({
-        "name": f"{COUNTRY_CODE}-VLESS-gRPC",
+        "name": node_name("VLESS-gRPC"),
         "type": "vless",
         "server": SERVER_IP,
         "port": VLESS_GRPC_PORT,
@@ -1758,7 +1835,7 @@ def generate_clash_config():
     
     # 3. Trojan-TCP (直连)
     proxies.append({
-        "name": f"{COUNTRY_CODE}-Trojan-TCP",
+        "name": node_name("Trojan-TCP"),
         "type": "trojan",
         "server": SERVER_IP,
         "port": TROJAN_TCP_PORT,
@@ -1773,7 +1850,7 @@ def generate_clash_config():
     
     # 4. VLESS-WS (CDN) - Clash Meta支持
     proxies.append({
-        "name": f"{COUNTRY_CODE}-VLESS-WS",
+        "name": node_name("VLESS-WS", cdn=True),
         "type": "vless",
         "server": vless_ws_addr,
         "port": VLESS_WS_PORT,
@@ -1796,7 +1873,7 @@ def generate_clash_config():
     
     # 3. VLESS-HTTPUpgrade (CDN) - Clash Meta通过ws-opts.v2ray-http-upgrade启用
     proxies.append({
-        "name": f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
+        "name": node_name("VLESS-HTTPUpgrade", cdn=True),
         "type": "vless",
         "server": vless_upgrade_addr,
         "port": VLESS_UPGRADE_PORT,
@@ -1820,7 +1897,7 @@ def generate_clash_config():
     
     # 4. Trojan-WS (CDN) - Clash Meta支持
     proxies.append({
-        "name": f"{COUNTRY_CODE}-Trojan-WS",
+        "name": node_name("Trojan-WS", cdn=True),
         "type": "trojan",
         "server": trojan_ws_addr,
         "port": TROJAN_WS_PORT,
@@ -1844,7 +1921,7 @@ def generate_clash_config():
     # 7. TUIC v5 (直连) - Clash Meta支持
     if ENABLE_TUIC:
         proxies.append({
-            "name": f"{COUNTRY_CODE}-TUIC v5",
+            "name": node_name("TUIC v5"),
             "type": "tuic",
             "server": SERVER_IP,
             "port": TUIC_PORT_ENV,
@@ -1858,13 +1935,17 @@ def generate_clash_config():
         })
     
     proxy_names = [p["name"] for p in proxies]
+    # 全部 7 协议加入 url-test 自动测速，用户要求"全部协议加入自动选择且稳定不反复切换"
+    # Reality 走 xtls-rprx-vision 流控，延迟最低；TUIC v5 走 QUIC/UDP，url-test 发 HTTP 请求也能通过
+    # 稳定性靠 tolerance=150 + interval=60 + lazy=false 保证（详见 AGENTS.md Clash 订阅生成铁律）
     auto_proxy_names = [
-        f"{COUNTRY_CODE}-VLESS-gRPC",
-        f"{COUNTRY_CODE}-Trojan-TCP",
-        f"{COUNTRY_CODE}-VLESS-WS",
-        f"{COUNTRY_CODE}-VLESS-HTTPUpgrade",
-        f"{COUNTRY_CODE}-Trojan-WS",
-    ]
+        node_name("VLESS-Reality"),
+        node_name("VLESS-gRPC"),
+        node_name("Trojan-TCP"),
+        node_name("VLESS-WS", cdn=True),
+        node_name("VLESS-HTTPUpgrade", cdn=True),
+        node_name("Trojan-WS", cdn=True),
+    ] + ([node_name("TUIC v5")] if ENABLE_TUIC else [])
     
     config = {
         "mixed-port": 7890,
@@ -1962,7 +2043,7 @@ def create_app():
                 <p><strong>📊 当月流量统计（{country_name}）</strong></p>
                 <p class="traffic-value">{used_gb} GB / {total_gb} GB ({usage_percent}%)</p>
                 <div class="traffic-bar-bg"><div class="traffic-bar" style="width: {usage_percent}%;"></div></div>
-                <p class="traffic-label">统计月份：{month} | 剩余：{remaining_gb} GB | 每月{reset_day}号 00:03 自动归零</p>
+                <p class="traffic-label">统计月份：{month} | 剩余：{remaining_gb} GB | 每月{reset_day}号 00:03 更新baseline</p>
                 <p class="traffic-tip">上次重置：{last_reset} | 数据来源：iptables 内核级计数器（重启不丢失）</p>
                 <p class="traffic-tip">💡 v2rayN 等客户端不显示流量？直接访问 <a href="/info">/info</a> 或 <a href="/api/traffic">/api/traffic</a> 查看</p>
             </div>
@@ -2084,20 +2165,16 @@ def create_app():
         历史教训：v1.0.54擅自加了SUB_TOKEN认证导致订阅不可用，已回退。
         铁律13：订阅链接不加token认证，保持原有规则直接访问。
 
-        【v4.12.1 客户端能力适配】:
+        【客户端能力适配】:
         - 根据 User-Agent 自动判断客户端能力
-        - Clash Meta / sing-box / NekoBox 等 → 返回 7 节点（full）
-        - v2rayN / v2rayNG / Shadowrocket 等 → 返回 5 节点（standard，剔除 HTTPUpgrade + TUIC）
-        - ?client=full 强制返回 7 节点
-        - ?client=standard 强制返回 5 节点
+        - 主流客户端（Clash / v2rayN / Shadowrocket 等）→ 返回 7 节点（full）
+        - 不确定兼容性的老旧客户端 → 返回 5 节点（standard，剔除 HTTPUpgrade + TUIC）
+        - ?client=full / ?client=clash 强制返回 7 节点
+        - ?client=standard / ?client=v2rayn / ?client=shadowrocket 强制返回 5 节点
         """
         ua = request.headers.get('User-Agent', '')
         forced = request.args.get('client', '').lower().strip()
-        if forced in ('full', 'standard'):
-            capability = forced
-        else:
-            detected = detect_client_capability(ua)
-            capability = detected if detected != 'unknown' else 'standard'
+        capability = resolve_subscription_capability(forced, ua)
 
         links = generate_all_links(capability=capability)
         if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
@@ -2235,7 +2312,7 @@ def create_app():
                 'usage_percent': usage_percent,
                 'reset_day': stats['reset_day'],
                 'last_reset': stats['last_reset'] or '尚未重置',
-                'reset_note': f'每月{stats["reset_day"]}号 00:03 自动归零（iptables -Z INPUT）',
+                'reset_note': f'每月{stats["reset_day"]}号 00:03 更新baseline（不清零iptables计数器）',
             })
         # 默认纯文本（最通用，v2rayN 浏览器都能看）
         text = (
@@ -2246,7 +2323,7 @@ def create_app():
             f"剩余流量: {remaining_gb} GB\n"
             f"套餐总量: {total_gb} GB\n"
             f"使用百分比: {usage_percent}%\n"
-            f"重置规则: 每月{stats['reset_day']}号 00:03 自动归零\n"
+            f"重置规则: 每月{stats['reset_day']}号 00:03 更新baseline（不清零iptables）\n"
             f"上次重置: {stats['last_reset'] or '尚未重置'}\n"
             f"==========================================\n"
             f"提示：\n"
@@ -2512,6 +2589,8 @@ def create_app():
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
 
+            settings = load_cdn_settings(conn)
+
             # 获取各协议当前CDN IP
             protocols = {
                 'vless-ws': 'vless_ws_cdn_ip',
@@ -2519,15 +2598,30 @@ def create_app():
                 'trojan-ws': 'trojan_ws_cdn_ip',
             }
             current_ips = {}
+            current_protocols = {}
             for name, key in protocols.items():
-                cursor.execute("SELECT value FROM cdn_settings WHERE key=?", (key,))
-                row = cursor.fetchone()
-                current_ips[name] = row[0] if row else None
+                ip = settings.get(key)
+                current_ips[name] = ip
+                current_protocols[name] = {
+                    'setting_key': key,
+                    'node_name': node_name({
+                        'vless-ws': 'VLESS-WS',
+                        'vless-httpupgrade': 'VLESS-HTTPUpgrade',
+                        'trojan-ws': 'Trojan-WS',
+                    }[name], cdn=True),
+                    'ip': ip,
+                    'preferred_static': ip in CDN_PREFERRED_IPS if ip else False,
+                    'blacklisted': ip in CDN_IP_BLACKLIST if ip else False,
+                    'performance': get_ip_performance_snapshot(cursor, ip),
+                }
 
             # 获取IP池
-            cursor.execute("SELECT value FROM cdn_settings WHERE key='cdn_ips_list'")
-            row = cursor.fetchone()
-            pool = parse_cdn_ips_list(row[0]) if row and row[0] else []
+            pool_details = parse_cdn_pool_details(settings.get('cdn_ips_list', ''))
+            pool = [item['ip'] for item in pool_details if item.get('ip')]
+            pool_by_ip = {item.get('ip'): item for item in pool_details if item.get('ip')}
+            for data in current_protocols.values():
+                ip = data.get('ip')
+                data['pool_entry'] = pool_by_ip.get(ip, {}) if ip else {}
 
             # 健康检查每个当前IP
             health_checks = {}
@@ -2554,6 +2648,11 @@ def create_app():
             return jsonify({
                 'code': 200,
                 'data': {
+                    'cdn_mode': CDN_MODE,
+                    'cdn_updated_at': settings.get('cdn_updated_at'),
+                    'preferred_static_count': len(CDN_PREFERRED_IPS),
+                    'blacklist_size': len(CDN_IP_BLACKLIST),
+                    'protocols': current_protocols,
                     'current_ips': current_ips,
                     'health_checks': health_checks,
                     'pool_total': len(pool),

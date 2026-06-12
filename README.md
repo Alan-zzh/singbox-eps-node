@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.12.1`
+**当前版本**: `v4.12.2`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -44,14 +44,13 @@ bash install.sh optimize     # 只做系统优化（BBR + FQ）
 ## 当前功能
 
 - **7 协议**（按客户端能力自动适配）：VLESS-Reality / VLESS-gRPC / Trojan-TCP / VLESS-WS / VLESS-HTTPUpgrade / Trojan-WS / TUIC v5
-- **多客户端兼容**（v4.12.1 新增）：自动识别 User-Agent，Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/Quantumult X → 5 节点（剔除 HTTPUpgrade + TUIC v5）
+- **多客户端兼容**（v4.12.2 更新）：自动识别 User-Agent，Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/未知客户端 → 5 节点（剔除 HTTPUpgrade + TUIC v5），新版客户端可用 `?client=full` 强制 7 节点
 - **流量查询端点**（v4.12.1 新增）：`/info` 文本端点（v2rayN 也能看流量）+ `/api/traffic` JSON + 订阅 Base64 头部插入流量注释
 - HTTPS 订阅：Base64 + sing-box JSON + Clash Meta
-- CDN 优选 IP 自动维护（IP 池 10-15 个/服务器，多 C 段分散，按评分排序淘汰高延迟IP，订阅自动同步优选IP）
+- CDN 优选 IP 自动维护（IP 池 10-15 个/服务器，多 C 段分散，按评分排序淘汰高延迟IP，订阅自动同步优选IP，`/api/cdn-status` 可查看当前IP/评分/更新时间）
 - CDN 阻断自动检测与切换（403/1020 拦截检测 + 冷却机制 + 信号文件联动订阅刷新）
 - 健康检查 + 一键诊断
-- 按月流量统计（iptables 内核级 INPUT+OUTPUT 双向计数，UDP 独立统计）
-- TCP Fast Open 优化（降低连接延迟 30-50ms）
+- 按月流量统计（iptables 内核级 INPUT `dpt` + OUTPUT `spt` 双向计数，UDP 独立统计，每月14号更新 baseline）
 - BBR + FQ 网络优化
 - sing-box 版本：1.15.0
 
@@ -76,10 +75,14 @@ bash install.sh optimize     # 只做系统优化（BBR + FQ）
 | `https://{域名}:2087/sub/{CC}` | Base64 订阅（自动识别客户端能力） |
 | `https://{域名}:2087/sub/{CC}?client=full` | 强制 7 节点 |
 | `https://{域名}:2087/sub/{CC}?client=standard` | 强制 5 节点 |
+| `https://{域名}:2087/sub/{CC}?client=clash` | 强制 Clash/mihomo 完整订阅 |
+| `https://{域名}:2087/sub/{CC}?client=v2rayn` | 强制 v2rayN 兼容订阅 |
+| `https://{域名}:2087/sub/{CC}?client=shadowrocket` | 强制 Shadowrocket 兼容订阅 |
 | `https://{域名}:2087/singbox/{CC}` | sing-box JSON 配置 |
 | `https://{域名}:2087/clash/{CC}` | Clash Meta YAML 配置 |
 | `https://{域名}:2087/info/{CC}` | 流量查询（纯文本，v2rayN 也能看） |
 | `https://{域名}:2087/api/traffic` | 流量查询（JSON） |
+| `https://{域名}:2087/api/cdn-status` | CDN优选状态（当前IP、评分、更新时间） |
 
 ## 环境变量
 

@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.12.1 | **更新**: 2026-06-11
+**版本**: v4.12.2 | **更新**: 2026-06-13
 
 ---
 
@@ -15,16 +15,16 @@
 
 ### 核心功能
 - **7个代理协议**：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, TUIC v5
-- **多客户端兼容**（v4.12.1 新增）：UA 自动识别客户端能力，Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/Quantumult X → 5 节点（剔除 HTTPUpgrade + TUIC v5）
+- **多客户端兼容**（v4.12.2 更新）：UA 自动识别客户端能力，Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/未知客户端 → 5 节点（剔除 HTTPUpgrade + TUIC v5），`?client=full` 可强制 7 节点
+- **CDN节点命名统一**（v4.12.2）：Base64 / Clash / sing-box 三类订阅中 CDN 节点统一显示 `-CDN` 后缀
 - **流量查询**（v4.12.1 新增）：`/info` 端点（v2rayN 也能看）+ `/api/traffic` JSON + 订阅 Base64 头部插入流量注释
-- **流量统计修复**（v4.12.1）：iptables INPUT + OUTPUT 双向计数，UDP 端口（TUIC）独立统计
+- **流量统计修复**（v4.12.2）：iptables INPUT 按 `dpt` + OUTPUT 按 `spt` 双向计数，UDP 端口（TUIC）独立统计；每月14号更新数据库 baseline，不清零内核计数器
 - CDN三模式优选：CDN_MODE（ip_optimized/domain_optimized/domain_default）
 - CDN多维度评分（v4.10.20 精简）：用户路径(70%) + VPS侧(20%) + 三网均衡(5%) + 稳定性(5%)。已废除 google_latency/google_speed 两个无效维度，数据库列已 DROP
 - CDN IP自动同步：cdn_monitor写数据库+信号文件 → subscription_service检测信号清缓存
 - 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
-- 按月流量统计：iptables内核级 INPUT+OUTPUT 双向计数器，每月14号cron自动归零
+- 按月流量统计：iptables内核级 INPUT+OUTPUT 双向计数器，每月14号由订阅服务更新 baseline
 - BBR+FQ 网络加速
-- TCP Fast Open 优化：所有入站/出站启用 `tcp_fast_open: true`，降低连接延迟 30-50ms
 - 三层自愈机制：systemd ExecStartPre + health_check.sh（v4.10.20 升级为详细日志版） + StartLimitBurst
 - 一键诊断脚本：diagnose.sh 18项检查
 - SQLite WAL 模式：多进程并发读写零阻塞（v4.10.20）
@@ -61,7 +61,7 @@
 |------|------|------|
 | health_check.sh | 每15分钟 | 内存/服务/端口/config自愈/磁盘/日志/estab连接告警/iptables 完整 8 项 |
 | cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签 |
-| iptables -Z INPUT/OUTPUT | 每月3号 00:03 | 流量计数器月度归零 |
+| subscription_service baseline | 每月14号 00:03 | 更新月度流量基准，不清零 iptables 内核计数器 |
 
 ### 路由规则顺序（服务端）
 1. 私有地址拒绝（127/8/10/8/172.16/12/192.168/16/fd00::/8/::1/128 → block）

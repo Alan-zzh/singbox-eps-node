@@ -670,8 +670,8 @@ setup_health_check_cron() {
     chmod +x "${BASE_DIR}/scripts/health_check.sh" "${BASE_DIR}/scripts/diagnose.sh" "${BASE_DIR}/scripts/reset_iptables.sh" 2>/dev/null || true
     (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/15 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
     (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * /usr/bin/python3 ${BASE_DIR}/scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
-    (crontab -l 2>/dev/null | grep -v "reset_iptables.sh"; echo "3 0 3 * * ${BASE_DIR}/scripts/reset_iptables.sh >> /var/log/iptables_reset.log 2>&1") | crontab -
-    log_info "定时任务已配置（健康检查每5分钟 + 证书续签每月1号凌晨3点 + iptables归零每月3号凌晨0点）"
+    (crontab -l 2>/dev/null | grep -v "reset_iptables.sh") | crontab -
+    log_info "定时任务已配置（健康检查每15分钟 + 证书续签每月1号凌晨3点；流量每月14号由订阅服务baseline重置，不清零iptables）"
 }
 
 setup_swap_and_optimize() {
@@ -913,7 +913,7 @@ print_summary() {
     echo "📊 流量统计:"
     echo "  首页查看:  https://${CF_DOMAIN:-$SERVER_IP}:2087/"
     echo "  API接口:   https://${CF_DOMAIN:-$SERVER_IP}:2087/api/traffic"
-    echo "  重置规则:  每月14号自动归零"
+    echo "  重置规则:  每月14号更新baseline（不清零iptables计数器）"
     echo ""
     echo "🌐 CDN优选IP（4级降级保障）:"
     echo "  主方案:    本地实测IP池（湖南电信最优）"

@@ -1,3 +1,12 @@
+## [4.12.2] - 2026-06-13
+- [Codex] **修复订阅兼容策略回退**：v2rayN/v2rayNG/Shadowrocket 默认恢复为 5 节点（剔除 VLESS-HTTPUpgrade + TUIC v5），避免订阅解析不稳定；保留 `?client=full` 给新版客户端手动启用 7 节点
+- [Codex] **新增 client 别名**：`?client=clash|mihomo|singbox` 强制 7 节点，`?client=v2rayn|shadowrocket|standard` 强制 5 节点，未知 UA 默认 standard
+- [Codex] **统一 CDN 节点名称后缀**：Base64 URI、Clash YAML、sing-box JSON 中 VLESS-WS/VLESS-HTTPUpgrade/Trojan-WS 全部显示 `-CDN`
+- [Codex] **修复真实流量统计方向**：INPUT 按 `--dport`，OUTPUT 按 `--sport` 统计，TUIC UDP 同步覆盖，避免服务端下载回包漏算
+- [Codex] **取消 iptables 月度清零主流程**：每月 14 号由订阅服务更新数据库 baseline，不再依赖每月 3 号 `iptables -Z`
+- [Codex] **增强 `/api/cdn-status`**：返回 CDN_MODE、更新时间、每个 CDN 协议 IP、评分、延迟、速度、是否命中用户投喂池，便于判断优选 IP 是否正常切换
+- [Codex] **修复测试暗病**：新增 `pytest.ini` 限定只收集 `tests/`，避免归档脚本被 pytest 收集；旧 `verify_server_config.py` 测试改为文件不存在时跳过
+
 ## [4.12.1] - 2026-06-11
 - [TRAE SOLO CN] **修复 V2rayN/v2rayNG/Shadowrocket 订阅问题**：自动识别客户端 UA，非 Clash 客户端剔除 VLESS-HTTPUpgrade（`type=httpupgrade` Xray-core 不识别）+ TUIC v5（Xray-core 完全不支持），自动返回 5 节点
 - [TRAE SOLO CN] **修复订阅流量统计被低估 50%**：iptables 只统计 INPUT 改为 INPUT+OUTPUT 双向，UDP 端口（TUIC）独立计数

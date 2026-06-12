@@ -1,5 +1,39 @@
 # AI 调试历史与防Bug规则
 
+## 最新排查（2026-06-13 v4.12.2）[Codex]
+
+### 订阅兼容回退 + CDN后缀不统一 + 真实流量统计漏算
+- **症状**: 用户反馈订阅更新后 CDN 节点名称没看到 `CDN` 后缀、延时偏大怀疑优选 IP 未适配好，并要求 Clash/Shadowrocket/v2rayN 兼容与真实流量可见。
+- **根因1（兼容策略被本地未提交改动反向覆盖）**:
+  1. `scripts/subscription_service.py` 本地 v4.12.2 改动把 v2rayN/v2rayNG/Shadowrocket 从 `standard` 改成 `full`，和 v4.12.1 病历结论冲突。
+  2. 这会把 VLESS-HTTPUpgrade + TUIC v5 默认塞回 v2rayN/Shadowrocket 订阅，存在解析不稳定风险。
+- **根因2（CDN命名不统一）**:
+  1. Base64 URI 名称里有 `-CDN`，但 Clash YAML 的 proxy name 和 sing-box JSON outbound tag 仍是 `{CC}-VLESS-WS` / `{CC}-Trojan-WS`。
+  2. 用户更新 Clash/sing-box 订阅时看不到 CDN 后缀，容易误判订阅未更新。
+- **根因3（流量统计 OUTPUT 方向写错）**:
+  1. v4.12.1 虽然加入 INPUT+OUTPUT 双链，但 OUTPUT 仍按 `--dport` 统计。
+  2. 服务端回包真实源端口才是入站端口，应使用 `--sport`；否则下载方向大概率漏算。
+  3. `reset_iptables.sh` 每月3号 `iptables -Z` 与订阅服务每月14号 baseline 重置冲突，会导致月度用量失真。
+- **修复**:
+  1. [Codex] v2rayN/v2rayNG/Shadowrocket/未知 UA 默认 `standard`（5节点），Clash/mihomo/sing-box/NekoBox 默认 `full`（7节点）。
+  2. [Codex] 新增 `?client=clash|mihomo|singbox|v2rayn|shadowrocket` 别名，保留 `?client=full|standard`。
+  3. [Codex] 新增 `node_name()`，Base64 / Clash / sing-box 三类订阅统一 CDN 节点后缀：`-CDN`。
+  4. [Codex] iptables 统计规则改为 INPUT `--dport` + OUTPUT `--sport`，TUIC UDP 同步处理；读取时同时识别 `dpt:`/`spt:`。
+  5. [Codex] `reset_iptables.sh` 改成兼容说明脚本，不再清零内核计数器；install.sh 删除旧 reset cron。
+  6. [Codex] `/api/cdn-status` 增加 CDN_MODE、cdn_updated_at、每协议 IP、评分、延迟、速度、是否命中用户投喂池。
+  7. [Codex] 新增 `pytest.ini` 限定只收集 `tests/`，避免归档脚本触发 `sys.exit(1)`；已删除脚本的旧测试改为 skip。
+- **验证**:
+  1. [Codex] 回归测试先红后绿：新增 UA、client别名、CDN后缀、iptables方向、reset脚本测试。
+  2. [Codex] `pytest -q tests/test_disconnect_regression.py`：22 passed, 1 skipped。
+  3. [Codex] `python -m py_compile scripts/subscription_service.py scripts/cdn_monitor.py scripts/config.py scripts/config_generator.py`：通过。
+  4. [Codex] `pytest -q`：26 passed, 1 skipped（pytest.ini 已阻止 docs/archive/scripts 被收集）。
+  5. [Codex] 线上三服务器部署验证：JP/SG/HK 的 singbox/singbox-sub/singbox-cdn 均 active；`?client=v2rayn` 均为 5 节点且 HTTPUpgrade/TUIC 为 0；`?client=clash` 均为 7 节点且 3 个 CDN 名称；`/api/cdn-status` 均返回 `200 ip_optimized` 和 3 个协议；OUTPUT `spt` 规则均存在 4 条。
+- **教训**:
+  1. 订阅兼容必须优先保守默认，新增协议用强制参数开放，不要默认推给所有客户端。
+  2. 用户可见节点名必须在 Base64 / Clash / sing-box 三处同源生成，禁止只改一个端点。
+  3. 统计服务端真实流量时，OUTPUT 必须按源端口 `sport`，不是目标端口 `dport`。
+  4. 月流量不要同时使用 `iptables -Z` 和数据库 baseline 两套重置机制。
+
 ## 最新排查（2026-06-11 v4.12.1）
 
 ### V2rayN/Shadowrocket 订阅"有问题"+ 订阅更新看不到流量
