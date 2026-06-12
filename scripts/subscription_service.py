@@ -32,8 +32,8 @@ Date: 2026-06-13
 - {COUNTRY_CODE}-TUIC v5 (直连节点，UDP加速，仅 Clash/sing-box 显示)
 
 【v4.12.2 客户端能力适配】:
-  - Clash/sing-box/NekoBox：返回全部 7 节点
-  - v2rayN/v2rayNG/Shadowrocket/未知客户端：默认 5 节点，避免 TUIC/HTTPUpgrade 解析不稳定
+  - Clash/sing-box/NekoBox/v2rayN/Shadowrocket：返回全部 7 节点
+  - 未知客户端：默认 5 节点，避免不明客户端解析不稳定
   - 自动通过 User-Agent 识别，强制控制用 ?client=full|standard|clash|v2rayn|shadowrocket
 
 【v4.12.1 流量显示增强】:
@@ -128,7 +128,7 @@ CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_i
 # [Codex] v4.12.2 客户端能力矩阵
 # 决定 /sub 端点返回哪些节点
 #   full     = 支持全部 7 节点
-#   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，优先保证订阅可解析）
+#   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，作为手动兜底）
 #   unknown  = 按 standard 处理（安全降级）
 CLIENT_CAPABILITIES = {
     # Clash 系（mihomo 内核支持 Reality/gRPC/TUIC/HTTPUpgrade）
@@ -143,11 +143,11 @@ CLIENT_CAPABILITIES = {
     'sing-box': 'full',
     'nekobox': 'full',
     'nekoray': 'full',
-    # v2ray/Shadowrocket 默认保守降级；新版客户端可用 ?client=full 手动启用 7 节点
-    'v2rayn': 'standard',
-    'v2rayng': 'standard',
-    'v2box': 'standard',
-    'shadowrocket': 'standard',
+    # [Codex] 用户确认当前客户端支持扩展协议，默认给 7 节点
+    'v2rayn': 'full',
+    'v2rayng': 'full',
+    'v2box': 'full',
+    'shadowrocket': 'full',
     # 以下客户端兼容性不确定，保守降级
     'quantumult': 'standard',
     'surfboard': 'standard',
@@ -170,9 +170,9 @@ CLIENT_QUERY_ALIASES = {
     'sing-box': 'full',
     'nekobox': 'full',
     'nekoray': 'full',
-    'v2rayn': 'standard',
-    'v2rayng': 'standard',
-    'shadowrocket': 'standard',
+    'v2rayn': 'full',
+    'v2rayng': 'full',
+    'shadowrocket': 'full',
 }
 
 
@@ -969,7 +969,7 @@ def generate_all_links(capability='full'):
     【v4.12.2 客户端能力适配】:
     - capability='full'：返回全部 7 节点（所有主流客户端）
     - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
-      （仅量子多/冲浪板等不确定的老旧客户端降级使用）
+      （手动兜底或不确定客户端降级使用）
     - capability='unknown'：按 standard 处理，安全降级
     """
     links = []
@@ -2167,10 +2167,10 @@ def create_app():
 
         【客户端能力适配】:
         - 根据 User-Agent 自动判断客户端能力
-        - 主流客户端（Clash / v2rayN / Shadowrocket 等）→ 返回 7 节点（full）
-        - 不确定兼容性的老旧客户端 → 返回 5 节点（standard，剔除 HTTPUpgrade + TUIC）
+        - Clash / v2rayN / Shadowrocket 等已确认支持客户端 → 返回 7 节点（full）
+        - 不确定兼容性的客户端 → 返回 5 节点（standard，剔除 HTTPUpgrade + TUIC）
         - ?client=full / ?client=clash 强制返回 7 节点
-        - ?client=standard / ?client=v2rayn / ?client=shadowrocket 强制返回 5 节点
+        - ?client=standard 强制返回 5 节点
         """
         ua = request.headers.get('User-Agent', '')
         forced = request.args.get('client', '').lower().strip()

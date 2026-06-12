@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.12.2 | **更新**: 2026-06-13
+**版本**: v4.12.3 | **更新**: 2026-06-13
 
 ---
 
@@ -15,12 +15,13 @@
 
 ### 核心功能
 - **7个代理协议**：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, TUIC v5
-- **多客户端兼容**（v4.12.2 更新）：UA 自动识别客户端能力，Clash/sing-box/NekoBox → 7 节点；v2rayN/v2rayNG/Shadowrocket/未知客户端 → 5 节点（剔除 HTTPUpgrade + TUIC v5），`?client=full` 可强制 7 节点
+- **多客户端兼容**（v4.12.3 更新）：UA 自动识别客户端能力，Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 7 节点；未知客户端默认 5 节点，`?client=standard` 可强制 5 节点兜底
 - **CDN节点命名统一**（v4.12.2）：Base64 / Clash / sing-box 三类订阅中 CDN 节点统一显示 `-CDN` 后缀
 - **流量查询**（v4.12.1 新增）：`/info` 端点（v2rayN 也能看）+ `/api/traffic` JSON + 订阅 Base64 头部插入流量注释
 - **流量统计修复**（v4.12.2）：iptables INPUT 按 `dpt` + OUTPUT 按 `spt` 双向计数，UDP 端口（TUIC）独立统计；每月14号更新数据库 baseline，不清零内核计数器
 - CDN三模式优选：CDN_MODE（ip_optimized/domain_optimized/domain_default）
-- CDN多维度评分（v4.10.20 精简）：用户路径(70%) + VPS侧(20%) + 三网均衡(5%) + 稳定性(5%)。已废除 google_latency/google_speed 两个无效维度，数据库列已 DROP
+- CDN多维度评分（v4.12.3 更新）：用户路径 + VPS侧 + 三网均衡 + 稳定性综合评分，候选排序评分优先、延迟第二、本地投喂同分兜底
+- 本机私有 `deploy.py` 已同步 `scripts/cdn_monitor.py` 到 `/opt` 与 `/root` 双运行目录，并用于本次三服务器部署；该脚本被 `.gitignore` 忽略且不纳入 Git
 - CDN IP自动同步：cdn_monitor写数据库+信号文件 → subscription_service检测信号清缓存
 - 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
 - 按月流量统计：iptables内核级 INPUT+OUTPUT 双向计数器，每月14号由订阅服务更新 baseline

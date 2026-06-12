@@ -1,3 +1,10 @@
+## [4.12.3] - 2026-06-13
+- [Codex] **恢复 7 节点默认订阅**：用户确认 v2rayN/Shadowrocket 当前客户端支持扩展协议，v2rayN/v2rayNG/Shadowrocket 默认改为 `full`，订阅返回 7 节点
+- [Codex] **保留手动兜底**：`?client=standard` 仍可强制 5 节点，供旧客户端或临时排错使用
+- [Codex] **CDN优选改为评分优先**：候选 IP 排序从“用户投喂优先”改为“综合评分优先、延迟第二、本地投喂同分兜底”，确保更贴近当前测速最优
+- [Codex] **修复本地部署清单漏项**：本机私有 `deploy.py` 已纳入 `scripts/cdn_monitor.py` 双路径同步，并用于本次三服务器部署；该脚本被 `.gitignore` 忽略且含环境私有凭据兜底，不纳入 Git
+- [Codex] **线上执行要求**：修改后必须同步三服务器并重启 `singbox-cdn` 触发重新优选，避免本地代码生效但线上仍使用旧排序
+
 ## [4.12.2] - 2026-06-13
 - [Codex] **修复订阅兼容策略回退**：v2rayN/v2rayNG/Shadowrocket 默认恢复为 5 节点（剔除 VLESS-HTTPUpgrade + TUIC v5），避免订阅解析不稳定；保留 `?client=full` 给新版客户端手动启用 7 节点
 - [Codex] **新增 client 别名**：`?client=clash|mihomo|singbox` 强制 7 节点，`?client=v2rayn|shadowrocket|standard` 强制 5 节点，未知 UA 默认 standard

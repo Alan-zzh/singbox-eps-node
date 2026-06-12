@@ -1,5 +1,31 @@
 # AI 调试历史与防Bug规则
 
+## 最新排查（2026-06-13 v4.12.3）[Codex]
+
+### 用户确认客户端支持 7 节点 + CDN优选必须评分优先
+- **症状**: 用户反馈“还是7个节点啊。我要7个节点。因为客户端是支持的”，并要求确认 CDN 已实装且执行到位、选择最优。
+- **根因1（意图理解错误）**:
+  1. v4.12.2 按保守兼容把 v2rayN/Shadowrocket 默认设成 `standard`，导致 `/sub?...client=v2rayn` 返回 5 节点。
+  2. 用户真实要求是当前使用的 v2rayN/Shadowrocket 客户端支持扩展协议，应默认返回 7 节点。
+- **根因2（CDN排序不够“最优”）**:
+  1. `cdn_monitor.py` 旧排序先看 `local` 来源，再看评分。
+  2. 如果用户投喂池里某个 IP 评分低于外部候选，仍可能排在前面，不符合“选择最优”的要求。
+- **修复**:
+  1. [Codex] v2rayN/v2rayNG/v2box/Shadowrocket 默认改为 `full`；`?client=v2rayn`、`?client=shadowrocket` 也强制 full。
+  2. [Codex] 保留 `?client=standard` 手动兜底，旧客户端或临时排错仍可取 5 节点。
+  3. [Codex] CDN候选排序改为 `-score → latency → local`，评分优先、延迟第二、本地投喂只做同分兜底。
+- **本地验证**:
+  1. [Codex] `python -m py_compile scripts\subscription_service.py scripts\cdn_monitor.py scripts\config.py scripts\config_generator.py scripts\cdn_quality_filter.py scripts\direct_quality_filter.py` 通过。
+  2. [Codex] `pytest -q` 通过：29 passed, 1 skipped，覆盖 7 节点默认、standard 兜底、CDN 评分优先排序、部署清单必须同步 `cdn_monitor.py`。
+- **二次发现**:
+  1. [Codex] 本机私有 `deploy.py` 原同步清单漏掉 `scripts/cdn_monitor.py`，导致 CDN 排序修复可能只停留在本地，线上 `singbox-cdn` 不一定执行新逻辑。
+- **部署验证**:
+  1. [Codex] 已将 `scripts/cdn_monitor.py` 加入本机私有 `deploy.py` 的 `/opt/singbox-eps-node` 与 `/root/singbox-eps-node` 双路径同步清单，并重新部署 JP/SG/HK；该脚本被 `.gitignore` 忽略且含环境私有凭据兜底，不纳入 Git。
+  2. [Codex] JP/SG/HK 均重启 `singbox`、`singbox-sub`、`singbox-cdn`，三服务均 active。
+  3. [Codex] JP/SG/HK 本机订阅验证：`?client=v2rayn` = 7 节点、`?client=shadowrocket` = 7 节点、`?client=standard` = 5 节点；7 节点订阅包含 HTTPUpgrade + TUIC + `-CDN` 后缀。
+  4. [Codex] JP/SG/HK `/api/cdn-status` 均返回 `code=200`、`cdn_mode=ip_optimized`、3 个 CDN 协议，且可见 IP、节点名、评分、延迟、速度、来源、`cdn_updated_at`。
+  5. [Codex] CDN 实际优选结果已刷新：JP `cdn_updated_at=2026-06-13T01:31:12.120595`，SG `2026-06-13T01:29:53.264158`，HK `2026-06-13T01:28:38.653600`；日志显示健康评估完成并按评分输出最优 IP。
+
 ## 最新排查（2026-06-13 v4.12.2）[Codex]
 
 ### 订阅兼容回退 + CDN后缀不统一 + 真实流量统计漏算

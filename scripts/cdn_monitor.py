@@ -2158,14 +2158,14 @@ def fetch_cdn_ips():
                 'cross_isp_score': cross_isp or 0,
             })
 
-    # 按优先级排序：
-    # 1. 你投喂的本地IP优先
-    # 2. 评分越高越好
-    # 3. 延迟越低越好
+    # [Codex] 按优先级排序：
+    # 1. 评分越高越好（真实最优优先）
+    # 2. 延迟越低越好
+    # 3. 你投喂的本地IP作为同分兜底优先
     tested_results.sort(key=lambda x: (
-        0 if 'local' in x['sources'] else 1,
         -x['score'],
-        x['latency']
+        x['latency'],
+        0 if 'local' in x['sources'] else 1,
     ))
     tested_results = [r for r in tested_results if match_region_filter(','.join(r['sources']))]
     tested_results = apply_fastest_limit(tested_results)

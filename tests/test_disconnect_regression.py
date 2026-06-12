@@ -126,10 +126,10 @@ def test_subscription_service_can_rotate_from_plain_pool_without_quality_filter(
     assert chosen == "2.2.2.2"
 
 
-def test_subscription_client_capability_defaults_to_compatible_standard(subscription_service_module):
-    assert subscription_service_module.detect_client_capability("v2rayN/6.60") == "standard"
-    assert subscription_service_module.detect_client_capability("v2rayNG/1.9") == "standard"
-    assert subscription_service_module.detect_client_capability("Shadowrocket/2.2") == "standard"
+def test_subscription_client_capability_defaults_to_full_for_supported_clients(subscription_service_module):
+    assert subscription_service_module.detect_client_capability("v2rayN/6.60") == "full"
+    assert subscription_service_module.detect_client_capability("v2rayNG/1.9") == "full"
+    assert subscription_service_module.detect_client_capability("Shadowrocket/2.2") == "full"
     assert subscription_service_module.detect_client_capability("Clash Verge Rev") == "full"
     assert subscription_service_module.detect_client_capability("mihomo/1.18") == "full"
     assert subscription_service_module.detect_client_capability("sing-box/1.10") == "full"
@@ -138,20 +138,31 @@ def test_subscription_client_capability_defaults_to_compatible_standard(subscrip
 def test_subscription_client_query_aliases(subscription_service_module):
     assert subscription_service_module.resolve_subscription_capability("clash", "v2rayN/6.60") == "full"
     assert subscription_service_module.resolve_subscription_capability("mihomo", "") == "full"
-    assert subscription_service_module.resolve_subscription_capability("v2rayn", "clash") == "standard"
-    assert subscription_service_module.resolve_subscription_capability("shadowrocket", "clash") == "standard"
+    assert subscription_service_module.resolve_subscription_capability("v2rayn", "clash") == "full"
+    assert subscription_service_module.resolve_subscription_capability("shadowrocket", "clash") == "full"
     assert subscription_service_module.resolve_subscription_capability("", "unknown-client") == "standard"
 
 
-def test_base64_links_filter_incompatible_nodes_for_standard_clients(subscription_service_module, monkeypatch):
+def test_base64_links_keep_all_nodes_for_supported_clients(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    links = subscription_service_module.generate_all_links(capability="full")
+    text = "\n".join(links)
+
+    assert "VLESS-HTTPUpgrade-CDN" in text
+    assert "TUIC v5" in text
+    assert "VLESS-WS-CDN" in text
+    assert "Trojan-WS-CDN" in text
+    assert len(links) == 7
+
+
+def test_standard_override_still_filters_extended_nodes(subscription_service_module, monkeypatch):
     monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
     links = subscription_service_module.generate_all_links(capability="standard")
     text = "\n".join(links)
 
     assert "VLESS-HTTPUpgrade" not in text
     assert "TUIC v5" not in text
-    assert "VLESS-WS-CDN" in text
-    assert "Trojan-WS-CDN" in text
+    assert len(links) == 5
 
 
 def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_module, monkeypatch):
@@ -264,6 +275,26 @@ def test_cdn_monitor_preserves_ranked_ip_order_for_assignment():
 
     assert "selected_ips = list(ips[:3])" in source
     assert "信任 fetch_cdn_ips() 已经产出的顺序" in source
+
+
+def test_cdn_monitor_ranks_by_score_before_local_source():
+    source = (PROJECT_ROOT / "scripts" / "cdn_monitor.py").read_text(encoding="utf-8")
+
+    assert "tested_results.sort(key=lambda x: (" in source
+    assert "-x['score']," in source
+    assert "0 if 'local' in x['sources'] else 1," in source
+    assert source.index("-x['score'],") < source.index("0 if 'local' in x['sources'] else 1,")
+
+
+def test_deploy_syncs_cdn_monitor_for_runtime_selection():
+    deploy_script = PROJECT_ROOT / "deploy.py"
+    if not deploy_script.exists():
+        pytest.skip("deploy.py is local-only and ignored because it may contain environment-specific credentials")
+
+    source = deploy_script.read_text(encoding="utf-8")
+
+    assert "scripts/cdn_monitor.py" in source
+    assert "/opt/singbox-eps-node/scripts/cdn_monitor.py" in source
 
 
 def test_cdn_config_uses_stricter_reject_thresholds():
