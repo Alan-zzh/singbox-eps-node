@@ -430,19 +430,23 @@ check_crontab() {
 }
 
 # ============================================================
-# 13. BBR/FQ qdisc 状态
+# 13. BBRv3/FQ qdisc 状态
 # ============================================================
 check_bbr_qdisc() {
     echo ""
     echo "=========================================="
-    echo "【13/18】BBR/FQ qdisc 状态"
+    echo "【13/18】BBRv3/FQ qdisc 状态"
     echo "=========================================="
 
     CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     if [ "$CC" = "bbr" ]; then
-        mark_pass "TCP拥塞控制: BBR"
+        if uname -r | grep -qi "xanmod"; then
+            mark_pass "TCP拥塞控制: BBRv3 (XanMod $(uname -r))"
+        else
+            mark_warn "TCP拥塞控制: BBR，但当前不是 XanMod/BBRv3 内核 ($(uname -r))"
+        fi
     else
-        mark_fail "TCP拥塞控制: ${CC:-未设置} (应为bbr)" "启用BBR: sysctl -w net.ipv4.tcp_congestion_control=bbr && echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf"
+        mark_fail "TCP拥塞控制: ${CC:-未设置} (应为bbr)" "运行 bash install.sh optimize 安装 BBRv3 内核并启用 bbr；首次启用需重启"
     fi
 
     QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null)

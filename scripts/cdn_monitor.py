@@ -624,16 +624,18 @@ def calculate_user_path_quality(ip, user_probe_result, db_path):
     return round(lat_score * 0.4 + loss_score * 0.3 + region_score * 0.3, 2)
 
 
-def hard_reject_cdn_ip(ip, user_probe_result, db_path):
+def hard_reject_cdn_ip(ip, user_probe_result, db_path, sources=None):
     """
     v4.5 CDN IP硬淘汰检查
     不达标的IP直接淘汰，不进评分
     返回: (是否淘汰, 淘汰原因)
     """
     perf = get_ip_performance(db_path, ip)
+    trusted_user_source = bool({'local', 'isp_matched'} & set(sources or []))
 
     # VPS→CF延时检查
-    if perf and perf['avg_latency'] > 0 and perf['avg_latency'] > CDN_IP_HARD_REJECT['latency_ms']:
+    if (not trusted_user_source and perf and perf['avg_latency'] > 0
+            and perf['avg_latency'] > CDN_IP_HARD_REJECT['latency_ms']):
         return True, f"VPS→CF延时{perf['avg_latency']:.0f}ms超过{CDN_IP_HARD_REJECT['latency_ms']}ms"
 
     # 丢包率检查（基于历史数据）
@@ -643,7 +645,8 @@ def hard_reject_cdn_ip(ip, user_probe_result, db_path):
             return True, f"失败率{fail_rate*100:.0f}%超过{CDN_IP_HARD_REJECT['packet_loss_rate']*100:.0f}%"
 
     # 速度检查（基于历史数据）
-    if perf and perf.get('speed_mbps', 0) > 0 and perf['speed_mbps'] < CDN_IP_HARD_REJECT['download_speed_mbps']:
+    if (not trusted_user_source and perf and perf.get('speed_mbps', 0) > 0
+            and perf['speed_mbps'] < CDN_IP_HARD_REJECT['download_speed_mbps']):
         return True, f"速度{perf['speed_mbps']:.1f}Mbps低于{CDN_IP_HARD_REJECT['download_speed_mbps']}Mbps"
 
     return False, ""
@@ -1053,6 +1056,9 @@ def test_user_path_latency(cdn_ip, port=443, timeout=10):
         'packet_loss_rate': float, # 丢包率(0-1)
         'success': bool
     } 或 None
+
+    [Trae CN] v4.12.13 优化：新增通过代理入口端口(SUB_PORT=2087)的 HTTP 204 测速，
+    取 TLS 握手延迟和 HTTP 204 延迟中较小的作为用户路径延迟，更接近真实体验。
     """
     sni_host = CF_DOMAIN if CF_DOMAIN else 'cloudflare.com'
     # [TRAE SOLO CN] v4.10.19 SNI=CF_DOMAIN 仅测TCP+TLS握手延迟，不发HTTP请求（CDN 443端口不提供HTTP服务）
@@ -1097,6 +1103,46 @@ def test_user_path_latency(cdn_ip, port=443, timeout=10):
         try:
             if sock:
                 sock.close()
+        except Exception:
+            pass
+
+    # [Trae CN] v4.12.13 新增：通过代理入口端口(SUB_PORT)测 HTTP 真实延迟
+    # 代理入口端口(2087)提供 HTTP 服务（/info 等端点），可测真实 HTTP 往返延迟
+    # 用 socket 连接到 cdn_ip，但 SNI 设为 sni_host（CF_DOMAIN）
+    http_sock = None
+    http_ssock = None
+    try:
+        from config import SUB_PORT
+        http_start = time.time()
+        http_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        http_sock.settimeout(timeout)
+        http_sock.connect((cdn_ip, SUB_PORT))
+        ctx_http = ssl.create_default_context()
+        ctx_http.check_hostname = False
+        ctx_http.verify_mode = ssl.CERT_NONE
+        http_ssock = ctx_http.wrap_socket(http_sock, server_hostname=sni_host)
+        # 手动发 HTTP GET 请求
+        request_line = f"GET /info HTTP/1.1\r\nHost: {sni_host}\r\nConnection: close\r\n\r\n"
+        http_ssock.sendall(request_line.encode())
+        # 读取响应状态行
+        resp_data = http_ssock.recv(1024)
+        if resp_data and b'200' in resp_data.split(b'\r\n')[0]:
+            http_latency = (time.time() - http_start) * 1000
+            # 取 TLS 握手延迟和 HTTP 延迟中较小的
+            if http_latency < result['latency_ms']:
+                result['latency_ms'] = http_latency
+            logger.debug(f"  CDN测速 {cdn_ip}: HTTP /info 延迟 {http_latency:.1f}ms（取较小值 {result['latency_ms']:.1f}ms）")
+    except Exception as e:
+        logger.debug(f"  CDN测速 {cdn_ip}: HTTP 测速失败（不影响TLS握手结果）: {e}")
+    finally:
+        try:
+            if http_ssock:
+                http_ssock.close()
+        except Exception:
+            pass
+        try:
+            if http_sock:
+                http_sock.close()
         except Exception:
             pass
 
@@ -1811,6 +1857,53 @@ def apply_fastest_limit(results):
         return results
     return results[:CDN_FASTEST_LIMIT]
 
+
+def _source_trust_bonus(sources):
+    """用户本地投喂/运营商源比VPS侧裸测速更接近真实客户端体验。"""
+    source_set = set(sources or [])
+    bonus = 0
+    if 'local' in source_set:
+        bonus += 18
+    if 'isp_matched' in source_set:
+        bonus += 12
+    return bonus
+
+
+def rank_cdn_candidates(results, protected_top_n=3):
+    """按可信体验排序，并避免C段分散挤掉前三个真实最优候选。"""
+    ranked = []
+    for item in results:
+        copied = dict(item)
+        copied['adjusted_score'] = copied.get('score', 0) + _source_trust_bonus(copied.get('sources', []))
+        ranked.append(copied)
+
+    ranked.sort(key=lambda x: (
+        -x.get('adjusted_score', 0),
+        x.get('latency', 9999),
+        0 if 'local' in x.get('sources', []) else 1,
+    ))
+
+    protected = ranked[:protected_top_n]
+    remainder = ranked[protected_top_n:]
+
+    def get_c_segment(ip):
+        parts = ip.split('.')
+        return '.'.join(parts[:3]) if len(parts) == 4 else ip
+
+    selected_segments = {get_c_segment(r['ip']) for r in protected}
+    diversified = []
+    same_segment = []
+    for r in remainder:
+        seg = get_c_segment(r['ip'])
+        if seg not in selected_segments:
+            diversified.append(r)
+            selected_segments.add(seg)
+        else:
+            same_segment.append(r)
+
+    return protected + diversified + same_segment
+
+
 def fetch_from_ipdb_api():
     try:
         import urllib.request
@@ -2058,7 +2151,7 @@ def fetch_cdn_ips():
     first_stage = []
     for ip, info in candidate_ips.items():
         # v4.5 硬淘汰检查
-        rejected, reject_reason = hard_reject_cdn_ip(ip, user_probe_result, db_path)
+        rejected, reject_reason = hard_reject_cdn_ip(ip, user_probe_result, db_path, sources=info['sources'])
         if rejected:
             logger.info(f"  {ip} 硬淘汰: {reject_reason}")
             continue
@@ -2098,6 +2191,7 @@ def fetch_cdn_ips():
         info = item['info']
         user_path_result = None
         cross_isp = None
+        trusted_user_source = bool({'local', 'isp_matched'} & set(info.get('sources', [])))
         
         if i < 30:
             if i > 0:
@@ -2115,7 +2209,7 @@ def fetch_cdn_ips():
                     u_lat = user_path_result.get('latency_ms', 0)
                     u_spd = user_path_result.get('speed_mbps', 0)
                     logger.info(f"  {ip} 用户路径: 延迟={u_lat:.1f}ms 速度={u_spd:.1f}Mbps")
-                    if u_lat > CDN_IP_HARD_REJECT['user_path_latency_ms']:
+                    if not trusted_user_source and u_lat > CDN_IP_HARD_REJECT['user_path_latency_ms']:
                         logger.info(f"  {ip} 硬淘汰: 用户路径延时{u_lat:.1f}ms超过{CDN_IP_HARD_REJECT['user_path_latency_ms']}ms")
                         continue
                     if user_path_result.get('packet_loss_rate', 0) > CDN_IP_HARD_REJECT['packet_loss_rate']:
@@ -2124,7 +2218,8 @@ def fetch_cdn_ips():
                             f"{CDN_IP_HARD_REJECT['packet_loss_rate']*100:.0f}%"
                         )
                         continue
-                    if u_spd > 0 and u_spd < CDN_IP_HARD_REJECT['download_speed_mbps']:
+                    if (not trusted_user_source and u_spd > 0
+                            and u_spd < CDN_IP_HARD_REJECT['download_speed_mbps']):
                         logger.info(
                             f"  {ip} 硬淘汰: 用户路径速度{u_spd:.1f}Mbps低于"
                             f"{CDN_IP_HARD_REJECT['download_speed_mbps']}Mbps"
@@ -2156,40 +2251,17 @@ def fetch_cdn_ips():
                 'perf': perf,
                 'is_new': perf['total_tests'] < 3,
                 'cross_isp_score': cross_isp or 0,
+                'user_path_result': user_path_result,
             })
 
-    # [Codex] 按优先级排序：
-    # 1. 评分越高越好（真实最优优先）
-    # 2. 延迟越低越好
-    # 3. 你投喂的本地IP作为同分兜底优先
-    tested_results.sort(key=lambda x: (
-        -x['score'],
-        x['latency'],
-        0 if 'local' in x['sources'] else 1,
-    ))
     tested_results = [r for r in tested_results if match_region_filter(','.join(r['sources']))]
+    tested_results = rank_cdn_candidates(tested_results)
     tested_results = apply_fastest_limit(tested_results)
 
-    # C段分散筛选：优先选择与已选IP不在同一C段的候选IP
     def get_c_segment(ip):
         """获取IP的C段（前3个八位）"""
         parts = ip.split('.')
         return '.'.join(parts[:3]) if len(parts) == 4 else ip
-
-    selected_segments = set()
-    diversified_results = []
-    remaining_results = []
-
-    for r in tested_results:
-        seg = get_c_segment(r['ip'])
-        if seg not in selected_segments:
-            diversified_results.append(r)
-            selected_segments.add(seg)
-        else:
-            remaining_results.append(r)
-
-    # 先放不同C段的，再用同C段的补满
-    tested_results = diversified_results + remaining_results
 
     # 检查C段覆盖情况
     covered_segments = set(get_c_segment(r['ip']) for r in tested_results[:15])
@@ -2198,7 +2270,10 @@ def fetch_cdn_ips():
     logger.info(f"  存活候选: {len(tested_results)} 个")
     for i, r in enumerate(tested_results[:10]):
         tag = "[本地]" if 'local' in r['sources'] else "[外部]"
-        logger.info(f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} 延迟={r['latency']:.1f}ms")
+        logger.info(
+            f"  {i+1}. {r['ip']} | {tag} 评分={r['score']} "
+            f"可信评分={r.get('adjusted_score', r['score'])} 延迟={r['latency']:.1f}ms"
+        )
 
     # 步骤4：[TRAE SOLO CN] v4.10.2 从评分排序结果中选Top N，不再无脑保留所有存活IP
     # 之前final_ips=list(alive_ips)导致高延迟IP只要"活着"就永远留在池子里
@@ -2239,10 +2314,10 @@ def fetch_cdn_ips():
 
     if final_ips:
         logger.info(f"\n[OK] 最终优选 {len(final_ips)} 个IP: {final_ips}")
-        return final_ips, user_probe_result, isp_type
+        return final_ips, user_probe_result, isp_type, tested_results
     else:
         logger.warning("[WARN] 所有IP测试均失败，使用本地池前5个")
-        return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT], user_probe_result, isp_type
+        return CDN_PREFERRED_IPS[:CDN_TOP_IPS_COUNT], user_probe_result, isp_type, []
 
 
 def cleanup_old_history(db_path, days=7):
@@ -2265,11 +2340,22 @@ def cleanup_old_history(db_path, days=7):
             conn.close()
 
 
-def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown'):
+def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown', tested_results=None):
     if not ips:
         return
 
     db_path = os.path.join(DATA_DIR, 'singbox.db')
+
+    # v4.12.21 修复：从tested_results提取per-IP的user_path_result和cross_isp_score
+    # 之前assign_and_save_ips漏传这两个参数，导致calculate_composite_score走fallback分支
+    # 评分从96分降到83分，cdn_ips_list里的分数不反映真实IP质量
+    ip_meta = {}
+    if tested_results:
+        for r in tested_results:
+            ip_meta[r['ip']] = {
+                'user_path_result': r.get('user_path_result'),
+                'cross_isp_score': r.get('cross_isp_score'),
+            }
 
     # 这里必须信任 fetch_cdn_ips() 已经产出的顺序。
     # 上游排序已经综合了用户路径测速、跨运营商和稳定性，不能在这里再用弱化信息重排一次，
@@ -2279,10 +2365,17 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown'):
         scored_ips = []
         for ip in ips:
             perf = get_ip_performance(db_path, ip)
+            meta = ip_meta.get(ip, {})
+            # v4.12.21 修复：如果没有tested_results，至少计算cross_isp_score
+            cross_isp = meta.get('cross_isp_score')
+            if cross_isp is None:
+                cross_isp = calculate_cross_isp_score(ip)
             score = calculate_composite_score(
                 perf,
                 user_probe_result=user_probe_result,
-                isp_type=isp_type
+                isp_type=isp_type,
+                user_path_result=meta.get('user_path_result'),
+                cross_isp_score=cross_isp
             ) if perf else 50.0
             scored_ips.append((ip, score))
         logger.info(f"  使用上游排序前3名分配: {', '.join(selected_ips)}")
@@ -2291,10 +2384,16 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown'):
         scored_ips = []
         for ip in ips:
             perf = get_ip_performance(db_path, ip)
+            meta = ip_meta.get(ip, {})
+            cross_isp = meta.get('cross_isp_score')
+            if cross_isp is None:
+                cross_isp = calculate_cross_isp_score(ip)
             score = calculate_composite_score(
                 perf,
                 user_probe_result=user_probe_result,
-                isp_type=isp_type
+                isp_type=isp_type,
+                user_path_result=meta.get('user_path_result'),
+                cross_isp_score=cross_isp
             ) if perf else 50.0
             scored_ips.append((ip, score))
         while len(selected_ips) < 3:
@@ -2524,9 +2623,9 @@ def health_check(db_path):
 
     if need_refresh:
         logger.info("  执行IP池刷新...")
-        new_ips, _, refresh_isp_type = fetch_cdn_ips()
+        new_ips, _, refresh_isp_type, refresh_tested = fetch_cdn_ips()
         if new_ips:
-            assign_and_save_ips(new_ips, isp_type=refresh_isp_type)
+            assign_and_save_ips(new_ips, isp_type=refresh_isp_type, tested_results=refresh_tested)
             logger.info(f"  IP池刷新完成: {new_ips}")
 
     # [TRAE SOLO CN] v4.10.18 清理死亡IP记录+VACUUM压缩
@@ -2565,9 +2664,9 @@ def run_once():
     except Exception as e:
         print(f"[CDN测速] CDN测速开始（无法获取当前池大小: {e}）")
 
-    ips, user_probe_result, isp_type = fetch_cdn_ips()
+    ips, user_probe_result, isp_type, tested_results = fetch_cdn_ips()
     if ips:
-        assign_and_save_ips(ips, user_probe_result=user_probe_result, isp_type=isp_type)
+        assign_and_save_ips(ips, user_probe_result=user_probe_result, isp_type=isp_type, tested_results=tested_results)
     else:
         print(f"[CDN测速] CDN测速完成，无可用IP")
 

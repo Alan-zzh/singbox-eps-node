@@ -1,3 +1,4 @@
+import base64
 import json
 import importlib.util
 import sqlite3
@@ -126,7 +127,7 @@ def test_subscription_service_can_rotate_from_plain_pool_without_quality_filter(
     assert chosen == "2.2.2.2"
 
 
-def test_subscription_client_capability_defaults_to_full_for_supported_clients(subscription_service_module):
+def test_subscription_client_capability_defaults_supported_clients_to_full(subscription_service_module):
     assert subscription_service_module.detect_client_capability("v2rayN/6.60") == "full"
     assert subscription_service_module.detect_client_capability("v2rayNG/1.9") == "full"
     assert subscription_service_module.detect_client_capability("Shadowrocket/2.2") == "full"
@@ -139,8 +140,37 @@ def test_subscription_client_query_aliases(subscription_service_module):
     assert subscription_service_module.resolve_subscription_capability("clash", "v2rayN/6.60") == "full"
     assert subscription_service_module.resolve_subscription_capability("mihomo", "") == "full"
     assert subscription_service_module.resolve_subscription_capability("v2rayn", "clash") == "full"
-    assert subscription_service_module.resolve_subscription_capability("shadowrocket", "clash") == "full"
-    assert subscription_service_module.resolve_subscription_capability("", "unknown-client") == "standard"
+    assert subscription_service_module.resolve_subscription_capability("shadowrocket", "v2rayN/6.60") == "full"
+    assert subscription_service_module.resolve_subscription_capability("full", "v2rayN/6.60") == "full"
+    assert subscription_service_module.resolve_subscription_capability("", "unknown-client") == "full"
+
+
+def test_base64_subscription_body_omits_comment_lines_for_v2rayn(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "EXTERNAL_SUBS", "")
+    monkeypatch.setattr(
+        subscription_service_module,
+        "get_traffic_stats",
+        lambda: {"bytes_used": 123, "month": "2026-06", "reset_day": 14, "last_reset": None},
+    )
+    monkeypatch.setattr(
+        subscription_service_module,
+        "generate_all_links",
+        lambda capability="full": [
+            "# traffic comment",
+            "vless://uuid@example.com:443?type=tcp#SG-VLESS-Reality",
+            "trojan://password@example.com:443?type=tcp#SG-Trojan-TCP",
+        ],
+    )
+
+    app = subscription_service_module.create_app()
+    response = app.test_client().get("/sub", headers={"User-Agent": "v2rayN/6.60"})
+    decoded = base64.b64decode(response.data).decode("utf-8")
+
+    assert response.status_code == 200
+    assert decoded.splitlines() == [
+        "vless://uuid@example.com:443?type=tcp#SG-VLESS-Reality",
+        "trojan://password@example.com:443?type=tcp#SG-Trojan-TCP",
+    ]
 
 
 def test_base64_links_keep_all_nodes_for_supported_clients(subscription_service_module, monkeypatch):
@@ -149,10 +179,22 @@ def test_base64_links_keep_all_nodes_for_supported_clients(subscription_service_
     text = "\n".join(links)
 
     assert "VLESS-HTTPUpgrade-CDN" in text
-    assert "TUIC v5" in text
+    assert "TUIC%20v5" in text
     assert "VLESS-WS-CDN" in text
     assert "Trojan-WS-CDN" in text
     assert len(links) == 7
+
+
+def test_base64_share_link_fragments_are_url_encoded(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    links = subscription_service_module.generate_all_links(capability="full")
+
+    assert len(links) == 7
+    for link in links:
+        assert "#" in link
+        fragment = link.rsplit("#", 1)[1]
+        assert " " not in fragment
+    assert any(link.endswith("#" + subscription_service_module.share_fragment("TUIC v5")) for link in links)
 
 
 def test_standard_override_still_filters_extended_nodes(subscription_service_module, monkeypatch):
@@ -163,6 +205,26 @@ def test_standard_override_still_filters_extended_nodes(subscription_service_mod
     assert "VLESS-HTTPUpgrade" not in text
     assert "TUIC v5" not in text
     assert len(links) == 5
+
+
+def test_shadowrocket_subscription_keeps_all_nodes_with_compat_params(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    links = subscription_service_module.generate_all_links(capability="full")
+    text = "\n".join(links)
+
+    assert "VLESS-gRPC" in text
+    assert "mode=gun" in text
+    assert "alpn=h2" in text
+    assert "allowInsecure=1" in text
+    assert "VLESS-HTTPUpgrade" in text
+    assert "TUIC" in text
+    assert "allow_insecure=1" in text
+    assert "insecure=1" in text
+    assert "VLESS-Reality" in text
+    assert "Trojan-TCP" in text
+    assert "VLESS-WS-CDN" in text
+    assert "Trojan-WS-CDN" in text
+    assert len(links) == 7
 
 
 def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_module, monkeypatch):
@@ -277,13 +339,74 @@ def test_cdn_monitor_preserves_ranked_ip_order_for_assignment():
     assert "信任 fetch_cdn_ips() 已经产出的顺序" in source
 
 
-def test_cdn_monitor_ranks_by_score_before_local_source():
-    source = (PROJECT_ROOT / "scripts" / "cdn_monitor.py").read_text(encoding="utf-8")
+def test_cdn_monitor_ranks_trusted_user_sources_before_raw_vps_score(monkeypatch):
+    module_path = PROJECT_ROOT / "scripts" / "cdn_monitor.py"
+    spec = importlib.util.spec_from_file_location("cdn_monitor_rank_test", module_path)
+    cdn_monitor = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace(flock=lambda *args, **kwargs: None, LOCK_EX=0, LOCK_NB=0))
+    spec.loader.exec_module(cdn_monitor)
 
-    assert "tested_results.sort(key=lambda x: (" in source
-    assert "-x['score']," in source
-    assert "0 if 'local' in x['sources'] else 1," in source
-    assert source.index("-x['score'],") < source.index("0 if 'local' in x['sources'] else 1,")
+    ranked = cdn_monitor.rank_cdn_candidates([
+        {"ip": "9.9.9.9", "score": 95, "latency": 80.0, "sources": ["external"]},
+        {"ip": "1.1.1.1", "score": 88, "latency": 20.0, "sources": ["local"]},
+        {"ip": "2.2.2.2", "score": 84, "latency": 30.0, "sources": ["isp_matched"]},
+    ])
+
+    assert [item["ip"] for item in ranked[:3]] == ["1.1.1.1", "2.2.2.2", "9.9.9.9"]
+
+
+def test_cdn_monitor_keeps_top_three_by_quality_before_segment_diversification(monkeypatch):
+    module_path = PROJECT_ROOT / "scripts" / "cdn_monitor.py"
+    spec = importlib.util.spec_from_file_location("cdn_monitor_segment_test", module_path)
+    cdn_monitor = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace(flock=lambda *args, **kwargs: None, LOCK_EX=0, LOCK_NB=0))
+    spec.loader.exec_module(cdn_monitor)
+
+    ranked = cdn_monitor.rank_cdn_candidates([
+        {"ip": "1.1.1.1", "score": 95, "latency": 20.0, "sources": ["local"]},
+        {"ip": "1.1.1.2", "score": 94, "latency": 21.0, "sources": ["local"]},
+        {"ip": "1.1.1.3", "score": 93, "latency": 22.0, "sources": ["local"]},
+        {"ip": "2.2.2.2", "score": 70, "latency": 23.0, "sources": ["external"]},
+    ], protected_top_n=3)
+
+    assert [item["ip"] for item in ranked[:3]] == ["1.1.1.1", "1.1.1.2", "1.1.1.3"]
+
+
+def test_cdn_monitor_does_not_hard_reject_user_verified_ip_by_vps_metrics(tmp_path, monkeypatch):
+    module_path = PROJECT_ROOT / "scripts" / "cdn_monitor.py"
+    spec = importlib.util.spec_from_file_location("cdn_monitor_reject_test", module_path)
+    cdn_monitor = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    monkeypatch.setitem(sys.modules, "fcntl", types.SimpleNamespace(flock=lambda *args, **kwargs: None, LOCK_EX=0, LOCK_NB=0))
+    spec.loader.exec_module(cdn_monitor)
+
+    monkeypatch.setattr(cdn_monitor, "CDN_IP_HARD_REJECT", {
+        "latency_ms": 180,
+        "packet_loss_rate": 0.08,
+        "download_speed_mbps": 20,
+    })
+    monkeypatch.setattr(
+        cdn_monitor,
+        "get_ip_performance",
+        lambda *args, **kwargs: {
+            "avg_latency": 450.0,
+            "total_tests": 5,
+            "fail_count": 0,
+            "speed_mbps": 0.1,
+        },
+    )
+
+    rejected, reason = cdn_monitor.hard_reject_cdn_ip(
+        "108.162.198.43",
+        user_probe_result=None,
+        db_path=str(tmp_path / "singbox.db"),
+        sources=["local"],
+    )
+
+    assert rejected is False
+    assert reason == ""
 
 
 def test_deploy_syncs_cdn_monitor_for_runtime_selection():
@@ -295,6 +418,7 @@ def test_deploy_syncs_cdn_monitor_for_runtime_selection():
 
     assert "scripts/cdn_monitor.py" in source
     assert "/opt/singbox-eps-node/scripts/cdn_monitor.py" in source
+    assert "systemctl restart singbox-cdn" in source
 
 
 def test_cdn_config_uses_stricter_reject_thresholds():
@@ -304,6 +428,28 @@ def test_cdn_config_uses_stricter_reject_thresholds():
     assert "'user_path_latency_ms': 120" in source
     assert "'packet_loss_rate': 0.08" in source
     assert "'download_speed_mbps': 20" in source
+
+
+def test_cdn_config_contains_user_verified_fast_ips():
+    module_path = PROJECT_ROOT / "scripts" / "config.py"
+    spec = importlib.util.spec_from_file_location("config_under_test", module_path)
+    config = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(config)
+
+    user_verified_ips = {
+        "108.162.198.43",
+        "162.159.44.136",
+        "162.159.39.181",
+        "172.64.229.248",
+        "162.159.38.210",
+        "172.64.53.93",
+        "172.64.52.224",
+        "162.159.39.230",
+        "162.159.38.215",
+    }
+
+    assert user_verified_ips.issubset(set(config.CDN_PREFERRED_IPS))
 
 
 def test_cdn_health_check_refreshes_when_current_ip_user_path_exceeds_hard_reject(tmp_path, monkeypatch):

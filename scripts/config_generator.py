@@ -67,11 +67,82 @@ ai_socks5_pass = env_vars.get('AI_SOCKS5_PASS', '')
 ai_socks5_pool = env_vars.get('AI_SOCKS5_POOL', '')
 ai_socks5_routing = env_vars.get('AI_SOCKS5_ROUTING', 'off').lower()
 
-# 解析SOCKS5代理池
+warp_unlock = env_vars.get('WARP_UNLOCK', 'off').lower() == 'on'
+warp_private_key = env_vars.get('WARP_PRIVATE_KEY', '')
+warp_peer_public_key = env_vars.get('WARP_PEER_PUBLIC_KEY', 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=')
+warp_peer_endpoint = env_vars.get('WARP_PEER_ENDPOINT', '162.159.193.10:2408')
+warp_client_ipv4 = env_vars.get('WARP_CLIENT_IPV4', '')
+warp_client_ipv6 = env_vars.get('WARP_CLIENT_IPV6', '')
+warp_reserved_str = env_vars.get('WARP_RESERVED', '')
+
+def parse_warp_reserved(reserved_str):
+    if not reserved_str:
+        return None
+    try:
+        parts = [int(x.strip()) for x in reserved_str.split(',')]
+        if len(parts) != 3 or not all(0 <= v <= 255 for v in parts):
+            print(f"[WARN] WARP_RESERVED格式错误，应为3个0-255整数，已忽略: {reserved_str}")
+            return None
+        return parts
+    except ValueError:
+        print(f"[WARN] WARP_RESERVED包含非数字值，已忽略: {reserved_str}")
+        return None
+
+warp_reserved = parse_warp_reserved(warp_reserved_str)
+
+if warp_unlock and not warp_private_key:
+    print("[WARN] WARP_UNLOCK=on但WARP_PRIVATE_KEY为空，WARP解锁已禁用")
+    warp_unlock = False
+
+if warp_unlock and not warp_client_ipv4:
+    print("[WARN] WARP_UNLOCK=on但WARP_CLIENT_IPV4为空，WARP解锁已禁用")
+    warp_unlock = False
+
+ai_socks5_enabled = bool(socks5_pool and ai_socks5_routing == 'on')
+
+AI_DOMAINS = {
+    'suffix': [
+        "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
+        "oaiusercontent.com", "cdn.oaistatic.com", "ai.com",
+        "claudeusercontent.com", "auth0.com",
+        "perplexity.ai", "midjourney.com", "stability.ai",
+    ],
+    'keyword': ["openai", "chatgpt", "anthropic", "claude", "perplexity", "midjourney"]
+}
+
+AI_GOOGLE_DOMAINS = {
+    'suffix': [
+        "gemini.google.com", "bard.google.com", "aistudio.google.com",
+        "generativelanguage.googleapis.com", "gemini.googleusercontent.com",
+        "makersuite.google.com", "notebooklm.google.com", "geminicode.app",
+        "ai.google",
+    ],
+    'keyword': ["gemini", "aistudio", "notebooklm", "makersuite"]
+}
+
+STREAM_DOMAINS = {
+    'suffix': [
+        "tiktok.com", "tiktokv.com", "tiktokcdn.com", "tiktokcdn-us.com",
+        "muscdn.co", "musical.ly", "ibyteimg.com", "ipstatp.com",
+        "p16-tiktokcdn.com", "p19-tiktokcdn.com", "p20-tiktokcdn.com",
+        "p25-tiktokcdn.com", "p26-tiktokcdn.com", "p55-tiktokcdn.com",
+        "p57-tiktokcdn.com", "p58-tiktokcdn.com", "p60-tiktokcdn.com",
+        "p77-tiktokcdn.com", "p78-tiktokcdn.com", "p9-tiktokcdn.com",
+        "netflix.com", "netflix.net", "nflximg.com", "nflximg.net",
+        "nflxvideo.net", "nflxso.net", "nflxext.com",
+    ],
+    'keyword': ["tiktok", "netflix", "nflx"]
+}
+
 def parse_socks5_pool():
     if not ai_socks5_pool:
         if ai_socks5_server and ai_socks5_port:
-            return [{'server': ai_socks5_server, 'port': ai_socks5_port, 'user': ai_socks5_user, 'pass': ai_socks5_pass}]
+            try:
+                port = int(ai_socks5_port)
+            except (ValueError, TypeError):
+                print(f"[WARN] AI_SOCKS5_PORT格式错误，已忽略: {ai_socks5_port}")
+                return []
+            return [{'server': ai_socks5_server, 'port': port, 'user': ai_socks5_user, 'pass': ai_socks5_pass}]
         return []
     result = []
     for item in ai_socks5_pool.split(','):
@@ -80,7 +151,11 @@ def parse_socks5_pool():
             continue
         parts = item.split('|')
         if len(parts) >= 4:
-            result.append({'server': parts[0].strip(), 'port': parts[1].strip(), 'user': parts[2].strip(), 'pass': parts[3].strip()})
+            try:
+                port = int(parts[1].strip())
+                result.append({'server': parts[0].strip(), 'port': port, 'user': parts[2].strip(), 'pass': parts[3].strip()})
+            except (ValueError, TypeError):
+                print(f"[WARN] SOCKS5代理端口格式错误，已忽略: {parts[1]}")
     return result
 
 socks5_pool = parse_socks5_pool()
@@ -146,7 +221,7 @@ config = {
         ],
         "strategy": "prefer_ipv4"
     },
-    "inbounds": socks5_inbound + [
+    "inbounds": [inbound for inbound in socks5_inbound + [
         {
             "type": "vless",
             "tag": "vless-reality",
@@ -184,7 +259,7 @@ config = {
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                    "alpn": ["h2", "http/1.1"]
+                "alpn": ["h2", "http/1.1"]
             }
         },
         {
@@ -205,7 +280,7 @@ config = {
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                    "alpn": ["h2", "http/1.1"]
+                "alpn": ["h2", "http/1.1"]
             }
         },
         {
@@ -226,7 +301,7 @@ config = {
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                    "alpn": ["h2", "http/1.1"]
+                "alpn": ["h2", "http/1.1"]
             }
         },
         {
@@ -280,11 +355,29 @@ config = {
                 "alpn": ["h2", "http/1.1"]
             }
         }
-    ],
+    ] if inbound is not None],
     "outbounds": [
         {"type": "direct", "tag": "direct"},
         {"type": "block", "tag": "block"}
     ] + ([{
+        "type": "selector",
+        "tag": "unlock-warp",
+        "outbounds": ["warp-wg", "direct"],
+        "default": "warp-wg"
+    }, {
+        "type": "wireguard",
+        "tag": "warp-wg",
+        "local_address": [warp_client_ipv4] + ([warp_client_ipv6] if warp_client_ipv6 else []),
+        "private_key": warp_private_key,
+        "peers": [
+            {
+                "public_key": warp_peer_public_key,
+                "endpoint": warp_peer_endpoint,
+                **({"reserved": warp_reserved} if warp_reserved else {}),
+                "allowed_ips": ["0.0.0.0/0", "::/0"]
+            }
+        ]
+    }] if warp_unlock and warp_private_key else []) + ([{
         # ai-residential selector：AI网站流量自动路由到住宅代理池
         # 【故障转移机制 - Bug #26教训】：
         # outbounds包含["AI-SOCKS5-1", "AI-SOCKS5-2", ..., "direct"]
@@ -316,7 +409,7 @@ config = {
         "version": "5",
         "username": proxy['user'],
         "password": proxy['pass']
-    } for i, proxy in enumerate(socks5_pool)] if socks5_pool and ai_socks5_routing == 'on' else []),
+    } for i, proxy in enumerate(socks5_pool)] if ai_socks5_enabled else []),
     "route": {
         "rules": [
             # 【路由规则匹配顺序说明】：
@@ -327,130 +420,34 @@ config = {
         ] + [{
             "ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fd00::/8", "::1/128"],
             "outbound": "block"
-        }] + ([{
-            # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，服务器直连）- 必须放在AI规则之前！
-            # 【Bug #25 路由顺序教训】：
-            # sing-box路由规则是按数组顺序匹配的，第一条匹配到的规则生效！
-            # 如果AI规则在前，x.com/twitter.com/grok.com会被AI规则匹配（因为它们也属于AI生态），
-            # 导致走ai-residential → AI-SOCKS5，但这些网站不需要住宅IP，走VPS直连即可
-            # 正确做法：排除规则必须放在AI规则之前，确保X/groK先被拦截走direct
-            #
-            # 【设计意图】：
-            # X/推特/groK访问频率高，数据中心IP完全能正常访问，
-            # 没必要浪费住宅代理流量（住宅代理通常按流量计费）
-            # 而且住宅代理延迟更高，影响用户体验
-            #
-            # 【为什么这里outbound是direct而不是ePS-Auto】：
-            # config_generator.py是服务端配置生成器，生成的是VPS上的singbox服务端配置
-            # 服务端配置中的direct = 从VPS直连出去（不经过SOCKS5）
-            # 这与服务端config.json的定位一致：服务端只负责接收流量并转发
-            # 禁止将以下域名移入AI规则
-            # 顺序说明：sing-box按顺序匹配，先匹配到的规则生效。如果AI规则在前，X/groK会先被AI规则匹配走SOCKS5
+        }, {
+            # ⚠️ 排除X/推特/grok - 全局直连，必须放在所有代理规则之前！
             "domain_suffix": ["x.com", "twitter.com", "twimg.com", "t.co", "x.ai", "grok.com"],
             "domain_keyword": ["twitter", "grok"],
             "outbound": "direct"
-        }, {
-            # ⚠️ AI网站自动走SOCKS5（无感路由，写死的规则，禁止随意修改）
-            # 【Bug #29 致命教训 - geosite-cn 拦截】：
-            # AI规则必须在 geosite-cn 之前！否则 gemini.google.com 等 Google 子域名
-            # 会被 geosite-cn（包含所有 google.* 域名）先匹配，走了 direct 直连！
-            #
-            # 【设计意图】：
-            # OpenAI/Anthropic/Google AI等网站对数据中心IP有严格封锁，
-            # 必须使用住宅IP（residential IP）才能正常访问。
-            # AI-SOCKS5提供住宅代理出口，确保AI网站不会被403/验证码拦截。
-            #
-            # 【Bug #28 教训 - 延迟测高根因】：
-            # 之前包含了google.com/googleapis.com/gstatic.com这3个通用域名，
-            # 导致用户v2rayN延迟测试(www.google.com/generate_204)走了AI-SOCKS5住宅代理，
-            # 延迟从正常的63ms(ping)+TLS开销飙升到360ms(SOCKS5住宅代理延迟)。
-            # 必须只保留AI专用子域名，不能包含通用google域名！
-            #
-            # 【故障转移机制 - Bug #26教训】：
-            # ai-residential selector的outbounds包含["AI-SOCKS5-1", "AI-SOCKS5-2", ..., "direct"]
-            # 当某个SOCKS5代理不可用时，sing-box自动尝试下一个代理
-            # 如果所有SOCKS5代理均不可用，最终fallback到direct（从VPS直连出去）
-            # 虽然直连可能被AI网站封锁，但至少不会断网，用户仍能看到错误页面
-            #
-            # 【为什么selector而不是直接写outbound】：
-            # selector类型允许后续手动切换（如通过Clash API），
-            # 如果某个SOCKS5长期故障，管理员可以手动切到其他代理或direct
-            #
-            # 【Bug #26 故障转移教训】：
-            # 之前ai-residential的outbounds只有["AI-SOCKS5"]，没有direct备选
-            # 当AI-SOCKS5宕机时，所有AI网站流量全部中断，用户无法访问
-            # 修复后加入direct作为第二选项，确保至少不断网
-            # 出站标签ai-residential → SOCKS5代理池（故障转移：不可用时自动切direct）
-            # 触发条件：配置了AI_SOCKS5_POOL环境变量
-            # 故障转移：所有SOCKS5不可用时自动fallback到direct（outbounds已包含direct作为第二选项）
-            "domain_suffix": [
-                "openai.com", "chatgpt.com", "anthropic.com", "claude.ai",
-                "gemini.google.com", "bard.google.com", "ai.google",
-                "aistudio.google.com", "perplexity.ai", "midjourney.com",
-                "stability.ai", "cohere.com", "replicate.com",
-                "kimi.moonshot.cn", "deepseek.com",
-                "cerebras.net", "inflection.ai", "mistral.ai",
-                "meta.ai", "openai.org", "chat.openai.com",
-                "api.openai.com", "platform.openai.com", "playground.openai.com",
-                "generativelanguage.googleapis.com",
-                "gemini.googleusercontent.com",
-                "makersuite.google.com",
-                "notebooklm.google.com",
-                "geminicode.app"
+        }] + ([{
+            "domain_suffix": (AI_DOMAINS['suffix'] + AI_GOOGLE_DOMAINS['suffix'] + STREAM_DOMAINS['suffix']) if not ai_socks5_enabled else STREAM_DOMAINS['suffix'],
+            "domain_keyword": (AI_DOMAINS['keyword'] + AI_GOOGLE_DOMAINS['keyword'] + STREAM_DOMAINS['keyword']) if not ai_socks5_enabled else STREAM_DOMAINS['keyword'],
+            "outbound": "unlock-warp"
+        }] if warp_unlock and warp_private_key else []) + ([{
+            # ⚠️ AI网站自动走SOCKS5住宅代理（优先级高于WARP）
+            "domain_suffix": AI_DOMAINS['suffix'] + AI_GOOGLE_DOMAINS['suffix'] + [
+                "cohere.com", "replicate.com", "kimi.moonshot.cn", "deepseek.com",
+                "cerebras.net", "inflection.ai", "mistral.ai", "meta.ai", "openai.org"
             ],
-            "domain_keyword": ["openai", "anthropic", "claude", "gemini", "perplexity", "aistudio", "chatgpt"],
-            "domain": ["gemini.google.com"],
+            "domain_keyword": AI_DOMAINS['keyword'] + AI_GOOGLE_DOMAINS['keyword'],
             "outbound": "ai-residential"
-        }, {
-            # 非 AI 的 Google 域名排除规则：防止 geosite-cn 误匹配走 direct
-            # 【Bug #31 教训】：geosite-cn 包含 google.com 及所有子域名
-            # www.google.com、google.com 等会被 geosite-cn 先匹配走 direct 直连
-            # 但服务器在海外，国内用户通过代理访问时，这些域名应该走代理而非直连
-            # 注意：AI 子域名（gemini.google.com 等）已在上面规则中匹配，不会走到这里
+        }] if ai_socks5_enabled else []) + [{
+            # ⚠️ 非AI的Google/YouTube域名 - 全局直连（放在代理规则之后，AI子域名已被前面规则匹配）
             "domain_suffix": [
-                "google.com",
-                "googleapis.com",
-                "gstatic.com",
-                "googleusercontent.com",
-                "googlevideo.com",
-                "ggpht.com",
-                "blogger.com",
-                "blogblog.com",
-                "blogspot.com",
-                "ampproject.org",
-                "android.com",
-                "chrome.com",
-                "chromium.org",
-                "g.co",
-                "goo.gl",
-                "google.org",
-                "googleanalytics.com",
-                "googleapps.com",
-                "googlecode.com",
-                "googledrive.com",
-                "googleearth.com",
-                "googlemail.com",
-                "googlemaps.com",
-                "googlesource.com",
-                "googlestore.com",
-                "googletagmanager.com",
-                "googletagservices.com",
-                "googleweblight.com",
-                "googlezip.net",
-                "gvt1.com",
-                "gvt2.com",
-                "gvt3.com",
-                "withgoogle.com",
-                "youtube.com",
-                "youtu.be",
-                "ytimg.com",
-                "google.cn",
-                "google.com.hk",
-                "google.com.tw"
+                "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com",
+                "googlevideo.com", "ggpht.com", "youtube.com", "youtu.be", "ytimg.com",
+                "blogger.com", "blogblog.com", "blogspot.com", "ampproject.org",
+                "android.com", "chrome.com", "chromium.org", "g.co", "goo.gl"
             ],
-            "domain_keyword": ["google"],
+            "domain_keyword": ["google", "youtube"],
             "outbound": "direct"
-        }] if socks5_pool and ai_socks5_routing == 'on' else []),
+        }],
         # sing-box 1.14+ 会移除旧式 DNS 兼容开关，这里显式指定默认解析器，
         # 避免 REALITY 握手域名等内部域名解析再次依赖 ENABLE_DEPRECATED_* 环境变量。
         "default_domain_resolver": "dns_proxy",

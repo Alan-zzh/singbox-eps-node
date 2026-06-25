@@ -1,5 +1,348 @@
 # AI 调试历史与防Bug规则
 
+## 最新排查（2026-06-26 v4.12.20）[Trae CN LOOP+多智能体]
+
+### Cloudflare 403拦截反复出现 — SKIP_PHASES配置错误+病历本误导
+- **症状**: 部署v4.12.19后订阅更新间歇性403，用户反馈CDN和订阅都不正常。病历本v4.12.12记录"删除eoff override即可恢复"，按此操作后问题反而更严重。
+- **诊断过程（多智能体并行）**:
+  1. 直接调用CF API测试添加skip规则，尝试将`ddos_l7`加入SKIP_PHASES → API返回`"skip action parameter phase 'ddos_l7' is not authorized"`，明确证明免费计划CF**不允许**在skip规则中skip ddos_l7 phase。
+  2. 查阅GitHub开源项目（fscarmen/argo、ymyuuu/Cloudflare-Speed-Test、XrayR等）的CF配置脚本，确认正确方案是skip其他安全阶段 + ddos_l7 phase创建eoff override。
+  3. 回头分析v4.12.12的"删除eoff后恢复"现象：那是因为删除override后规则传播延迟导致的短暂放行（约1-2小时窗口期），CF动态保护机制重新激活后403就回来了——**不是真正的修复**。
+- **根因**:
+  1. `SKIP_PHASES`列表错误包含了`ddos_l7`，免费计划CF API不允许skip该phase，导致apply_skip_rules时创建规则失败，但错误被静默处理，skip规则实际上没有正确创建。
+  2. v4.12.17的eoff override本身是正确的，但v4.12.12病历本中"删除eoff就好"的错误结论误导了后续修复方向。
+  3. 之前测试CDN WS时使用域名+端口直连（被解析到CF边缘），而非直连CF优选IP+Host头，导致误判CDN节点不工作。
+- **修复**:
+  1. `SKIP_PHASES`修正为`["http_request_firewall_managed", "http_request_sbfm", "http_ratelimit"]`（去掉ddos_l7）。
+  2. `ensure_ddos_l7_override()`明确创建`sensitivity_level=eoff` override，这是免费计划放行ddos_l7拦截的唯一正确方式。
+  3. 重建skip规则（删除旧规则+创建新规则），等待充分传播（~50秒）。
+  4. CDN验证改为直连CF优选IP+正确Host头+SNI，正确测试WebSocket升级。
+- **教训（铁律，最高优先级）**:
+  - **Cloudflare免费计划SKIP_PHASES绝对不能包含ddos_l7**：API会直接拒绝，规则创建失败但不一定报错。正确放行方式是在ddos_l7 phase entrypoint创建`sensitivity_level=eoff` override。
+  - **病历本可能误导自己**：v4.12.12的"删除eoff就好"是错误结论（传播延迟导致的假阳性），必须以API实际返回和GitHub开源验证为准，不能盲目相信病历本。
+  - **CDN WebSocket测试必须直连CF IP**：用域名+端口测试会经过DNS解析和CDN边缘路由，不能准确验证源站CDN端口；必须提取配置中的CF优选IP，用`Host:`头+SNI直连测试。
+  - **测试必须用多轮验证**：单轮测试可能因为CF缓存/传播延迟给出假阳性/假阴性结果，至少3轮间隔测试才可靠。
+- **验证**: 3轮72项测试（JP/SG/HK × 6种UA × 3端点 + 节点数/响应头/策略组/yaml解析）全部PASS；CDN VLESS-WS(8443)和Trojan-WS(2083)直连CF IP返回101 Switching Protocols握手成功。
+
+## 最新排查（2026-06-25 v4.12.19）[Trae CN LOOP模式]
+
+### 手机端/部分客户端节点不连通 — alpn协议规范+暗病大扫除
+- **症状**: 用户反馈手机端有的节点不行，要求全部修复并确保兼容稳定，进行全面审计。
+- **根因（3子代理并行审计发现）**:
+  1. **gRPC ALPN致命错误**: sing-box VLESS-gRPC节点alpn设为`["h2","http/1.1"]`，gRPC over TLS标准要求ALPN必须仅为`h2`，携带`http/1.1`会导致部分严格客户端（特别是手机端Stash/Shadowrocket）TLS握手失败，gRPC节点完全无法连接。Clash VLESS-gRPC此前也缺alpn字段。
+  2. **WS/HTTPUpgrade节点缺ALPN**: Clash的VLESS-WS-CDN、VLESS-HTTPUpgrade-CDN、Trojan-WS-CDN三个节点均未设置alpn字段，TLS握手时不携带ALPN扩展，可能导致CDN/服务器回退异常，部分客户端连接失败。
+  3. **Content-Type重复charset**: Flask Response的mimetype包含`; charset=utf-8`时，Flask会自动追加charset，导致响应头变为`text/yaml; charset=utf-8; charset=utf-8`，严格客户端（部分手机端Clash客户端）解析Content-Type失败。
+  4. **Trojan-WS-CDN缺tls:True**: Trojan-WS-CDN节点漏写`tls: True`，部分客户端识别为非TLS节点导致连接失败。
+  5. **TUIC v5节点名含空格**: 节点名"JP-TUIC v5"含空格，部分客户端解析时截断节点名导致配置损坏。
+  6. **get_cdn_optimized_domain完全失效**: `init_db()`无返回值导致`conn=init_db()`拿到None；表名错误查询`config`而非`cdn_settings`，CDN优选IP功能长期静默失败。
+  7. **/sub端点无异常保护**: 配置生成异常时返回HTML 500错误页（非YAML），客户端解析失败显示"订阅更新失败"。
+  8. **缺少CORS头**: 浏览器端跨域请求被拦截。
+- **修复**:
+  1. sing-box VLESS-gRPC alpn修正为`["h2"]`（仅h2）；Clash VLESS-gRPC alpn设为`["h2"]`。
+  2. Clash VLESS-WS-CDN、VLESS-HTTPUpgrade-CDN、Trojan-WS-CDN均补`"alpn": ["h2", "http/1.1"]`。
+  3. mimetype改为纯类型（`text/yaml`、`application/json`、`text/plain`），charset由Flask自动处理。
+  4. Trojan-WS-CDN补`tls: True`；TUIC节点名改为"TUIC-v5"无空格。
+  5. get_cdn_optimized_domain重写DB连接逻辑；三端点加try-except；全局after_request加CORS头。
+- **教训（铁律）**:
+  - **gRPC over TLS的ALPN必须仅为h2**，绝不能带http/1.1，这是gRPC协议规范（RFC 7540 + gRPC over HTTP/2）。
+  - **所有TLS节点必须显式设置alpn字段**，不能依赖客户端默认行为——手机端客户端比桌面端更严格。
+  - **Flask Response的mimetype不要手动加charset**，让框架自动处理，否则会重复。
+  - **init_db()如果不返回conn就不要写conn=init_db()**，数据库连接错误必须在测试中覆盖到。
+  - **订阅端点必须有try-except保护**，任何配置生成失败都必须返回text/plain而非HTML。
+- **验证**: 本地QA 122项全通过；JP/SG/HK三台服务器线上7组验证全通过（full 7节点/standard 5节点/alpn/TUIC零RTT/url-test/响应头/UA检测7种/Base64链接）。
+- **兜底**: 旧客户端可加`?client=standard`使用5节点兼容模式。
+
+## 2026-06-25 v4.12.18 [Trae CN]
+
+### Clash/sing-box 订阅在部分设备/客户端更新失败（兼容性问题）
+- **症状**: 用户反馈"这台设备更新clash订阅不成功，别的设备也有不成功的，也有成功的"，要求兼容所有设备。
+- **根因**:
+  1. `/clash` 和 `/singbox` 端点在 v4.12.14 之前只返回固定 7 节点配置，其中 VLESS-HTTPUpgrade（`v2ray-http-upgrade: true`）和 TUIC v5（`type: tuic`）是较新 mihomo 内核才支持的协议类型。老版本 mihomo 内核或非 Meta 版 Clash 遇到不认识的 proxy type 或 ws-opts 字段时，YAML 解析阶段直接报错，导致整个订阅导入失败。
+  2. `/sub` 端点已有 `resolve_subscription_capability()` 做 UA 检测和 `?client=` 参数适配，但 `/clash` 和 `/singbox` 端点没有接入这套能力判断逻辑。
+  3. `/clash` 和 `/singbox` 响应头缺少 `Content-Disposition`、`profile-title`、`profile-update-interval`，部分严格客户端（如 Shadowrocket、部分版本的 Clash for Windows）可能因缺少标准订阅头而识别失败。
+- **修复**:
+  1. `generate_clash_config(capability='full')` 和 `generate_singbox_config(capability='full')` 新增 capability 参数：`full` 输出全部 7 节点；`standard` 输出 5 节点（剔除 VLESS-HTTPUpgrade-CDN 和 TUIC v5）。
+  2. `/clash` 和 `/singbox` 端点接入 `resolve_subscription_capability()`，支持 User-Agent 自动检测 + `?client=full|standard` 手动指定。
+  3. 补齐响应头：`Content-Disposition`（支持 RFC 5987 中文文件名）、`profile-update-interval: 6`、`profile-title`，与 `/sub` 端点保持一致。
+- **教训**: 新增协议类型时必须同时考虑客户端兼容性；所有订阅端点（/sub、/clash、/singbox）必须共用同一套 capability 检测逻辑，不能只改一个端点漏掉其他。
+- **验证**: 本地 py_compile 通过；full 模式 7 节点、standard 模式 5 节点生成均正常；YAML/JSON dump 无错误。
+- **用户兜底方案**: 如果某台设备仍然订阅失败，在订阅链接后加 `?client=standard` 即可使用 5 节点兼容模式。
+
+## 2026-06-23 v4.12.17 [Codex]
+
+### Clash 订阅与 CDN 入口被 Cloudflare 403
+- **症状**: 用户反馈 Clash 订阅有问题、CDN 连接不上。
+- **诊断数据**:
+  1. [Codex] 外部请求 JP/SG/HK `/clash/{CC}` 与 `/sub/{CC}?client=clash` 均返回 Cloudflare 403 `Attention Required` 页面，源站直连同一路径均 HTTP 200 且 `/clash` YAML 可解析 7 个节点。
+  2. [Codex] singbox-sub 与 sing-box 近期日志无对应错误，说明请求没有到达源站。
+  3. [Codex] Cloudflare GraphQL 显示 `source=l7ddos`、`ruleId=l7ddos`、`action=block`，命中 `/vless-ws`、`/vless-upgrade`、`/trojan-ws` 等代理入口。
+  4. [Codex] 既有 Cloudflare skip 规则漏了 `/clash`；并且 `ensure_proxy_skip_rule()` 只要看到同名规则就返回，不会修复过期表达式。
+- **根因**:
+  1. [Codex] 这次不是 sing-box 1.13.13 本身导致订阅损坏；服务端源站与订阅生成正常，Cloudflare DDoS L7 在边缘层误拦。
+  2. [Codex] 我前一轮验证只看了 `/sub`、`/info`、端口和服务状态，没有用 Clash UA 验证 `/clash`，也没有验证 CDN WebSocket 握手与 GraphQL 事件来源，这是操作验证缺口。
+- **修复**:
+  1. [Codex] Cloudflare 免费区不允许 `ddos_l7` 阶段使用窄范围表达式，已临时创建整站 `sensitivity_level=eoff` DDoS L7 override 先恢复生产流量；这是应急措施，不纳入常规自动化。
+  2. [Codex] `scripts/cloudflare_proxy_rules.py` 补齐 `/clash` 路径；当已有 skip 规则表达式或 action 参数过期时，删除旧规则并重建。
+  3. [Codex] 更新测试覆盖 `/clash` 路径。
+- **验证**:
+  1. [Codex] JP/SG/HK `/clash/{CC}` 均 HTTP 200，YAML 均解析 7 节点；`/sub/{CC}?client=clash` 均 HTTP 200。
+  2. [Codex] JP/SG/HK VLESS-WS-CDN 与 Trojan-WS-CDN 均返回 `101 Switching Protocols`。
+  3. [Codex] VLESS-HTTPUpgrade 对普通 WebSocket 探测返回 404，不能用 WebSocket 101 作为该协议的可用性判据。
+- **教训**:
+  1. [Codex] 代理恢复验证必须覆盖用户实际入口：`/clash`、`/sub?client=clash`、CDN 协议握手和 Cloudflare GraphQL source，不能只看服务 active 和源站 HTTP 200。
+  2. [Codex] Cloudflare skip 自愈必须比较表达式目标态，不能只按 description 判断规则存在。
+
+## 最新排查（2026-06-23 v4.12.16）[Codex]
+
+### sing-box 版本与 Xray 架构口径
+- **症状**: 用户询问当前是否需要同步 sing-box / Xray 更新,以及是否通过更新内核解决协议兼容 bug。
+- **诊断数据**:
+  1. [Codex] 官方 GitHub Releases latest 为 `v1.13.13`,发布时间 2026-06-04;项目 `install.sh` 曾写 `1.15.0`,但该口径不是当前官方 latest。
+  2. [Codex] 线上升级前 JP/SG 为 `sing-box version 1.13.11`,HK 为 `sing-box version 1.13.9`;三台旧版本配置检查均通过。
+  3. [Codex] 项目服务端入口、systemd 和配置生成器均使用 `/usr/local/bin/sing-box run -c ...`,没有服务端 Xray 进程或 Xray 配置;Xray/v2rayN 仅是客户端兼容语境。
+- **修复**:
+  1. [Codex] `install.sh` 将 `SINGBOX_VER` 从错误的 `1.15.0` 修正为官方 latest `1.13.13`,并增加下载失败即退出。
+  2. [Codex] JP/SG/HK 三台先用新二进制执行 `sing-box check -c /root/singbox-eps-node/config.json`,通过后再替换 `/usr/local/bin/sing-box` 并重启服务。
+  3. [Codex] README、CHANGELOG、VERSION、project_snapshot 同步当前架构与版本口径。
+- **验证**:
+  1. [Codex] JP/SG/HK 当前均为 `sing-box version 1.13.13`,`singbox/singbox-sub/singbox-cdn` 均 active。
+  2. [Codex] 三台 `sing-box check` 与 `bash -n install.sh` 均通过;VLESS-gRPC、Trojan-TCP、TUIC 端口均监听。
+  3. [Codex] 三台 Shadowrocket 订阅仍返回 7 节点,且包含 gRPC 与 TUIC;`/sub` 和 `/info` 均 HTTP 200。
+- **教训**:
+  1. [Codex] sing-box 版本必须以官方 Release 为准,不要把未发布版本号写进一键脚本。
+  2. [Codex] 服务端不要混装 Xray 来“碰运气”修 bug;本项目协议入口由 sing-box 统一承担,客户端兼容问题应优先改订阅字段或客户端能力矩阵。
+
+## 最新排查（2026-06-23 v4.12.14）[Codex]
+
+### Shadowrocket 使用 Base64/v2rayN SUB 时大量 CONNECT 测速超时
+- **症状**: Clash 订阅可用，但 Shadowrocket 使用 Base64/v2rayN SUB 后 CONNECT 测速大量超时；用户要求保留完整 7 节点，不默认删节点。
+- **诊断数据**:
+  1. [Codex] JP/SG/HK 三台远程 `config.json` 都存在 `vless-grpc` 与 `tuic-in` 入站，`singbox/singbox-sub/singbox-cdn` 均 active，gRPC TCP 端口与 TUIC UDP 端口均在监听，排除“订阅伪造节点但服务端没入站”的 v4.11.1 旧坑。
+  2. [Codex] 本地对 JP/SG/HK 的 VLESS-gRPC 端口做 TCP+TLS 探测均成功，并协商 `TLSv1.3` + `h2`，说明端口/TLS/ALPN 基础链路正常。
+  3. [Codex] `/sub/{CC}?client=shadowrocket` 返回 7 节点；Clash/mihomo YAML 可用不等于 Shadowrocket Base64 URI 导入后所有扩展参数都解释一致。
+- **根因**:
+  1. [Codex] 问题不应先通过删节点止血；用户目标是保留 7 节点，优化方向应放在分享 URI 参数兼容和测速口径解释上。
+  2. [Codex] Shadowrocket 的 CONNECT/HTTP 测速是“真实代理链路可用性”测试，不等于 ICMP；ICMP 只能看裸 IP 是否有路由，不能证明协议入站、TLS、gRPC、QUIC 或客户端解析可用。
+- **修复**:
+  1. [Codex] `scripts/subscription_service.py` 保持 Shadowrocket/v2rayN/v2rayNG 为 `full`，继续返回完整 7 节点；`?client=standard` 只作为手动 5 节点兜底。
+  2. [Codex] VLESS-gRPC 分享 URI 补充 `mode=gun`、`authority`、`alpn=h2`、`allowInsecure=1`；TUIC v5 分享 URI 补充 `allowInsecure=1`、`insecure=1`、`reduce_rtt=1`，提升 Shadowrocket/v2rayN 导入后的解析/测速兼容性。
+  3. [Codex] 更新 README、CHANGELOG、VERSION、project_snapshot 和 Clash 订阅铁律文档，明确“默认不删节点”和 CONNECT/HTTP 测速优先级。
+- **教训**:
+  1. [Codex] Clash/mihomo 的 YAML 能力不能直接套到 Shadowrocket Base64 URI；同一个协议在结构化 YAML 可用，不代表 URI 导入参数完全一致。
+  2. [Codex] 判断代理可用性优先看 CONNECT/HTTP url-test 或客户端真实连接；ICMP 只做线路延迟参考，不纳入节点可用性的硬依据。
+  3. [Codex] 如果“所有某协议在某客户端都不可用”，先区分服务端监听/TLS 是否正常，再查订阅字段与客户端解析；未经用户确认不要默认删节点。
+
+## 最新排查（2026-06-17 v4.12.13）[Trae CN]
+
+### CDN 优选与故障切换优化
+- **背景**: v4.12.12 修复 CDN 全部 403 后，研究发现 CDN 优选和故障切换机制存在三个问题：① `CdnFailoverController` 完整实现但从未启用；② 用户路径测速只测 TLS 握手延迟，不测 HTTP 真实延迟；③ 没有迟滞防抖，可能在所有 IP 评分接近时频繁切换。
+- **修复 1 - 迟滞防抖**:
+  - 文件: `scripts/subscription_service.py`
+  - 新增常量: `_IP_HYSTERESIS_THRESHOLD = 0.15`
+  - 逻辑: 在 `get_cdn_ip_for_protocol()` 换 IP 前，从原始 `ips_data` 中查找当前 IP 的评分，与新 IP 评分比较。如果新 IP 评分 < 当前 IP 评分 × 1.15，则不换（返回当前 IP）。
+  - 注意: `scored_available` 已过滤掉 `current_ip`，必须从原始 `ips_data` 中查找当前 IP 评分。
+- **修复 2 - HTTP 真实延迟测速**:
+  - 文件: `scripts/cdn_monitor.py`
+  - 函数: `test_user_path_latency()`
+  - 逻辑: 在 TLS 握手测速后，额外通过代理入口端口(SUB_PORT=2087)发 HTTP GET `/info` 请求，取 TLS 握手延迟和 HTTP 延迟中较小的。
+  - 实现: 用 socket 连接到 `cdn_ip:SUB_PORT`，SNI 设为 `sni_host`（CF_DOMAIN），手动发 HTTP GET 请求。HTTP 测速失败不影响 TLS 握手结果。
+  - 注意: 不能用 `urllib.request.urlopen`，因为它会解析域名而不是用 `cdn_ip` 连接。
+- **修复 3 - 启用故障切换状态查询**:
+  - 文件: `scripts/subscription_service.py`
+  - 端点: `/api/cdn-status`
+  - 逻辑: 在端点中实例化 `CdnFailoverController`（只读模式，不触发切换），返回故障切换状态（冷却池、切换计数、上次切换时间）。
+  - 注意: 只启用状态查询，不启用自动切换决策（避免与 `get_cdn_ip_for_protocol()` 的简单换 IP 逻辑冲突）。
+- **验证**:
+  1. [Trae CN] 三台服务器语法检查通过（`ast.parse`）。
+  2. [Trae CN] JP/SG/HK 三台部署后 `/sub`、`/info`、`/api/cdn-status` 全部 HTTP 200。
+  3. [Trae CN] JP vless-ws 入口返回 HTTP 101（WebSocket 握手成功）。
+  4. [Trae CN] singbox-sub 和 singbox-cdn 服务都 active。
+- **教训**:
+  1. [Trae CN] **迟滞检查必须从原始数据查找当前 IP 评分**：`scored_available` 已过滤掉 `current_ip`，从 `scored_available` 中查找 `current_score` 永远是 0，迟滞检查永远不会触发。
+  2. [Trae CN] **HTTP 测速不能用 `urllib.request.urlopen`**：它会解析域名而不是用 `cdn_ip` 连接，必须用 socket + ssl + 手动发 HTTP 请求。
+  3. [Trae CN] **`CdnFailoverController` 只启用状态查询，不启用自动切换**：`get_cdn_ip_for_protocol()` 已经有简单换 IP 逻辑（带冷却），叠加 `CdnFailoverController` 的 `decide_switch()` 可能导致双重切换冲突。
+
+## 最新排查（2026-06-17 v4.12.12）[Trae CN] — ⚠️ 此条目结论已被 v4.12.20 推翻
+
+### CDN 全部 403 / 订阅链接不上 / 更新错误
+- **症状**: 用户报告"CDN 全有问题，订阅链接不上，更新错误"。三台服务器 jp/sg/hk.290372913.xyz:2087 的 /sub /info /vless-ws /vless-upgrade /trojan-ws 全部返回 HTTP 403。
+- **诊断数据**:
+  1. [Trae CN] 源站直连（`curl -k --resolve` 绕过 CF）三台都返回 200，证明源站服务正常，问题在 CF 边缘层。
+  2. [Trae CN] 403 响应体是 Cloudflare "Sorry, you have been blocked" 页面。
+  3. [Trae CN] GraphQL `firewallEventsAdaptive` 查询：所有拦截事件 `source: "l7ddos"`，`action: "block"`。
+  4. [Trae CN] v4.12.7 的 skip 规则正确跳过了 WAF/SBFM/Rate Limit，但 DDoS L7 ruleset 有 100+ block 规则。
+- **⚠️ v4.12.12 的错误结论（已被 v4.12.20 推翻，禁止参考）**:
+  - ❌ "删除 DDoS L7 override 即可恢复" — 错误。删除后短暂恢复是CF规则传播延迟的假阳性，CF动态保护重新激活后403复发。
+  - ❌ "主动创建 eoff override 会触发 CF 动态保护" — 错误。eoff override 是免费计划放行 ddos_l7 的唯一正确方式。
+  - ❌ "CF 默认 DDoS L7 配置不会拦截代理入口" — 错误。默认配置会拦截，必须用 eoff override 放行。
+  - ❌ "ensure_ddos_l7_override() 只查询不创建" — 错误。该函数必须创建并维护 eoff override。
+- **v4.12.20 确认的正确结论**:
+  1. CF 免费计划不允许在 skip 规则中 skip `ddos_l7` phase（API 返回 "not authorized"）。
+  2. 正确方案：skip 规则覆盖 firewall_managed/sbfm/ratelimit + ddos_l7 phase 创建 `sensitivity_level=eoff` override。
+  3. v4.12.12 "删除 override 后恢复" 是规则传播延迟导致的短暂放行（1-2小时窗口），不是真正修复。
+  4. 详见 v4.12.20 条目（本文件顶部）。
+
+## 最新排查（2026-06-15 v4.12.11）[Codex]
+
+### v2rayN 订阅 TLS 握手失败：ProtocolVersion / SSPI
+- **症状**: 用户 v2rayN 日志显示 `net_http_ssl_connection_failed`、`net_auth_tls_alert, ProtocolVersion`、`net_auth_SSPI`，随后显示“无效的订阅内容”。
+- **诊断数据**:
+  1. [Codex] 订阅正文已经是 7 条 URI、无中文注释、URI fragment 无空格，但客户端仍失败，说明问题不在 Base64 内容。
+  2. [Codex] Cloudflare Zone 设置查询结果：`min_tls_version=1.3`、`ssl=full`。
+  3. [Codex] v2rayN 在 Windows 上使用 SChannel/SSPI，TLS 1.3 only 会触发 `ProtocolVersion`，导致订阅内容根本没被正常获取。
+- **修复**:
+  1. [Codex] 将 Cloudflare `min_tls_version` 从 `1.3` 改为 `1.2`。
+  2. [Codex] `scripts/cloudflare_proxy_rules.py apply` 新增 `ensure_tls_settings()`，每次部署/健康检查都会确认 `min_tls_version=1.2`。
+- **验证**:
+  1. [Codex] `curl --tlsv1.2 --tls-max 1.2 -I https://sg.290372913.xyz:2087/sub/SG` 返回 HTTP 200。
+  2. [Codex] `python scripts/cloudflare_proxy_rules.py status` 返回 `min_tls_version: 1.2`。
+- **教训**:
+  1. [Codex] v2rayN 报“无效内容”不一定是订阅文本坏；如果前面有 TLS/SSPI/ProtocolVersion，优先查 HTTPS 握手与 Cloudflare TLS 策略。
+  2. [Codex] Cloudflare `min_tls_version` 必须纳入自愈目标态，不能只修 WAF。
+
+## 最新排查（2026-06-15 v4.12.10）[Codex]
+
+### v2rayN 订阅提示“无效内容”
+- **症状**: 用户反馈 v2rayN 仍提示无效内容。
+- **诊断数据**:
+  1. [Codex] 线上 `https://sg.290372913.xyz:2087/sub/SG` 已是 7 条 URI，且无中文注释行。
+  2. [Codex] 第 7 条 TUIC 分享链接 fragment 为 `#SG-TUIC v5`，包含未编码空格。
+- **根因**:
+  1. [Codex] URI fragment 中空格对宽松客户端可用，但 v2rayN 严格解析时可能判定整段订阅无效。
+  2. [Codex] 之前只清掉正文注释，未统一编码分享 URI 的节点名。
+- **修复**:
+  1. [Codex] 新增 `share_fragment()`，Base64 分享链接的 `#节点名` 全部用 `urllib.parse.quote(..., safe='')` 编码。
+  2. [Codex] `SG-TUIC v5` 输出为 `SG-TUIC%20v5`；Clash/sing-box JSON/YAML 内部节点名仍保留可读格式。
+- **教训**:
+  1. [Codex] Base64 分享 URI 必须逐行满足严格 URI 语法，不能依赖客户端宽容解析。
+
+## 最新排查（2026-06-15 v4.12.9）[Codex]
+
+### v2rayN 默认节点数恢复为 7
+- **症状**: 用户指出 v2rayN 之前默认就是 7 个节点且可用，不应因为本次订阅更新问题被改成 5 个。
+- **重新判断**:
+  1. [Codex] v4.12.8 已确认 `https://sg.290372913.xyz:2087/sub/SG` HTTP/TLS 正常，真正异常点是 Base64 第一行中文注释，而不是 v2rayN 默认 7 节点本身。
+  2. [Codex] 用户当前 v2rayN 客户端历史上可用 7 节点，应按实际客户端能力恢复 full。
+- **修复**:
+  1. [Codex] v2rayN/v2rayNG/v2box 默认恢复 `full`，`?client=v2rayn` 返回 7 节点。
+  2. [Codex] `/sub/{CC}` 原始链接也默认返回 7 节点，不依赖 v2rayN 是否发送 User-Agent。
+  3. [Codex] 保留 `?client=standard` 手动兜底，旧版或异常客户端可临时取 5 节点。
+- **教训**:
+  1. [Codex] 不要把“订阅正文格式错误”误归因成“客户端不支持 7 节点”。
+  2. [Codex] 用户已经验证过的客户端能力优先于通用兼容性猜测。
+
+## 最新排查（2026-06-15 v4.12.8）[Codex]
+
+### v2rayN 精确 `/sub/SG` 仍无法更新 + Shadowrocket 节点被误降级
+- **症状**: 用户反馈 `https://sg.290372913.xyz:2087/sub/SG` 在 v2rayN 仍无法更新，并指出 Shadowrocket 之前支持全节点，不应被删 2 个。
+- **诊断数据**:
+  1. [Codex] `https://sg.290372913.xyz:2087/sub/SG` 不跳过证书也返回 HTTP 200，说明 TLS 证书与订阅入口本身正常。
+  2. [Codex] 解码 Base64 后第一行是中文注释：`# 新加坡订阅 | 当月流量...`，后面才是 5 条节点 URI。
+  3. [Codex] v2rayN 对 Base64 订阅里的非 URI 行容错差，中文注释可能导致整段订阅更新失败。
+- **根因**:
+  1. [Codex] v4.12.1 为显示流量在 Base64 头部插入中文注释行，这对 Clash/NekoBox 可能可见，但对 v2rayN 订阅解析不安全。
+  2. [Codex] v4.12.4 为修 v2rayN 兼容，把 Shadowrocket 也一起降级到 standard，误伤了用户确认支持全节点的 Shadowrocket。
+- **修复**:
+  1. [Codex] `/sub` Base64 正文改为纯节点 URI，剥离 `#` 注释行；流量仍通过 `subscription-userinfo` header、`/info`、`/api/traffic` 提供。
+  2. [Codex] Shadowrocket 默认恢复 `full`，`?client=shadowrocket` 返回 7 节点。
+  3. [Codex] v2rayN/v2rayNG 保持 `standard` 5 节点，因为 Xray-core 不稳定支持 VLESS-HTTPUpgrade（`type=httpupgrade`）与 TUIC v5（`tuic://`）；需要强制 7 节点时仍可用 `?client=full`。
+- **教训**:
+  1. [Codex] Base64 订阅正文必须按最差解析器处理，只放 URI；展示信息走 header 或独立信息端点。
+  2. [Codex] Shadowrocket 和 v2rayN 不能混为一类：Shadowrocket 可按用户确认走 full，v2rayN 仍按 Xray-core 兼容边界走 standard。
+
+## 最新排查（2026-06-14 v4.12.7）[Codex]
+
+### CDN 全部超时彻底修复：按代理域名/端口/路径放行，不再绑定用户公网 IP
+- **症状**: v4.12.6 用当前出口 IP 例外止血后，用户指出“本地 IP 怎么变也不应该和 CDN 挂钩”，并要求断联自动恢复。
+- **根因补充**:
+  1. [Codex] v4.12.6 的 zone allowlist / WAF skip 绑定 `ip.src`，只能救当前公网 IP，用户 IP 变化后仍可能复发。
+  2. [Codex] CDN 优选 IP 只解决“客户端连哪个 Cloudflare 边缘 IP”，不能自动修复 Cloudflare 账号/域名安全规则误拦代理入口。
+  3. [Codex] 现有 `cdn_monitor.py` 从 VPS 侧检测 TCP/TLS 可达，无法感知用户侧被 Cloudflare 安全层按来源拦截。
+- **修复**:
+  1. [Codex] 新增 `scripts/cloudflare_proxy_rules.py`，用 Cloudflare Rulesets API 维护代理入口例外。
+  2. [Codex] 规则表达式改为匹配 `jp/sg/hk.290372913.xyz` + 代理入口端口 `2087/8443/2053/2083` + 代理路径 `/vless-ws`、`/vless-upgrade`、`/trojan-ws`、`/sub`、`/api/cdn-status`、`/api/traffic`、`/info`，不再包含 `ip.src`。
+  3. [Codex] 规则跳过 Managed WAF / SBFM / rate limit / legacy security products，范围只限代理入口，不放大全站。
+  4. [Codex] 清理 v4.12.6 临时 IP 规则：删除 custom phase 临时 `ip.src` skip、managed phase 临时 `ip.src` skip、zone access rule IP allowlist。
+  5. [Codex] `deploy.py` 同步 `cloudflare_proxy_rules.py` 和 `health_check.sh` 到 `/opt` 与 `/root`，部署后自动执行 `python3 scripts/cloudflare_proxy_rules.py apply`。
+  6. [Codex] `health_check.sh` 新增 Cloudflare 代理入口规则自愈，每 15 分钟确认规则存在；如果 Cloudflare 规则被手动改坏，会自动恢复。
+- **验证**:
+  1. [Codex] 回归测试：`pytest -q tests/test_cloudflare_proxy_rules.py` 通过 5 项，覆盖表达式不含 `ip.src`、规则跳过目标产品、临时 IP 规则识别、部署同步、健康检查自愈。
+  2. [Codex] 全量测试：`pytest -q` 通过 `37 passed, 1 skipped`。
+  3. [Codex] `python -m py_compile scripts\cloudflare_proxy_rules.py deploy.py` 通过。
+  4. [Codex] Git Bash `bash -n scripts/health_check.sh` 通过。
+  5. [Codex] JP/SG/HK 部署完成，三服务 `singbox/singbox-sub/singbox-cdn` 均 active，三台执行 Cloudflare 规则脚本均返回 `already_exists`。
+  6. [Codex] JP/SG/HK `:2087` 与 `/api/cdn-status` 经 Cloudflare 均 HTTP 200。
+  7. [Codex] JP/SG/HK VLESS-WS / Trojan-WS CDN WebSocket 握手均返回 `101 Switching Protocols`；HTTPUpgrade 探测返回 400，表示请求已到达 sing-box，不再被 Cloudflare 403 拦截。
+- **教训**:
+  1. [Codex] Cloudflare 代理入口必须按域名/端口/路径维护安全例外，不能依赖用户公网 IP。
+  2. [Codex] CDN IP 优选和 Cloudflare 安全规则是两层系统：IP 选择负责“快”，规则自愈负责“不被边缘拦”。
+  3. [Codex] 健康检查必须覆盖 Cloudflare 规则目标态，否则规则漂移会表现成“CDN 全部超时”。
+
+## 最新排查（2026-06-14 v4.12.6）[Codex]
+
+### CDN 全部超时：Cloudflare 边缘安全层拦截当前出口 IP
+- **症状**: 用户反馈 CDN 节点全部超时。
+- **诊断数据**:
+  1. [Codex] JP/SG/HK 三域名经 Cloudflare 访问 `:2087` 均返回 403 Cloudflare block page，页面显示被拦出口 IP 为 `175.0.64.69`。
+  2. [Codex] 绕过 Cloudflare 直连源站 `:2087` 后，JP/SG/HK `/` 与 `/api/cdn-status` 均返回 HTTP 200，说明源站服务和订阅服务正常。
+  3. [Codex] 当前 CDN 优选 IP 的 TCP/TLS 均能建立，但真实 WebSocket 握手前被 Cloudflare 返回 403，说明不是优选 IP TCP 全死。
+  4. [Codex] Cloudflare 基础设置核验：`security_level=essentially_off`、`browser_check=off`、`ssl=full`、`waf=off`，不是 strict SSL 或 security level medium 复发。
+- **根因**: Cloudflare 新版安全/托管规则层拦截当前用户出口 IP，客户端表现为 CDN 协议握手失败或超时。
+- **修复**:
+  1. [Codex] 为当前出口 IP 添加 zone-level allowlist。
+  2. [Codex] 新增窄范围 WAF skip 规则：仅匹配当前出口 IP，跳过 Managed WAF / SBFM / rate limit / legacy security products。
+  3. [Codex] 清理 Cloudflare 缓存，等待边缘传播。
+- **验证**:
+  1. [Codex] JP/SG/HK `https://域名:2087/` 经 Cloudflare 从 403 恢复为 HTTP 200。
+  2. [Codex] JP/SG/HK `https://域名:2087/api/cdn-status` 经 Cloudflare 均返回 HTTP 200。
+  3. [Codex] VLESS-WS / Trojan-WS CDN WebSocket 握手返回 `101 Switching Protocols`；HTTPUpgrade 探测返回 400，表示已到达 sing-box，不再是 Cloudflare 403。
+- **剩余风险**:
+  1. [Codex] Cloudflare GraphQL Security Events 查询被限流，暂未拿到具体规则名。
+  2. [Codex] 当前修复绑定出口 IP；如果用户公网 IP 再变，可能需要按新 IP 追加例外或改用更稳定的 Cloudflare 规则策略。
+
+## 最新排查（2026-06-13 v4.12.5）[Codex]
+
+### CDN 优选 IP 延时高：服务器侧测速压过用户真实体感
+- **症状**: 用户反馈直连线路高延时可理解，但 CDN 节点已经使用用户域名 + 优选 IP，理论上应低延时，实际仍偏高；用户补充 9 个本地测速非常好的 Cloudflare IP。
+- **根因**:
+  1. [Codex] `cdn_monitor.py` 的“用户路径测速”实际仍由 VPS 发起，测的是 VPS→Cloudflare IP 的 TLS/速度，不是用户本地→Cloudflare IP。
+  2. [Codex] Clash 等客户端显示的 CDN 延时是完整代理链路：用户 → Cloudflare 边缘 → 回源 VPS → 目标测速 URL，不等同于“用户到优选 IP”的单段延时。
+  3. [Codex] v4.12.3 的排序为裸评分优先，可能让外部候选的 VPS 侧评分压过用户本地实测优质 IP。
+- **修复**:
+  1. [Codex] `cdn_monitor.py` 新增 `rank_cdn_candidates()`：用户投喂 `local` 与运营商匹配 `isp_matched` 做可信来源加权，VPS 侧测速只作为辅助。
+  2. [Codex] C 段分散改为 Top3 之后再做，避免为了分散 C 段把前三个用户真实最优 IP 挤掉。
+  3. [Codex] 用户投喂/运营商匹配来源不再被 VPS 侧延时和 VPS 侧下载速度直接硬淘汰，避免“用户本地快、服务器测慢”被误杀。
+  4. [Codex] `config.py` 新增 9 个用户本地实测优质 IP：108.162.198.43、162.159.44.136、162.159.39.181、172.64.229.248、162.159.38.210、172.64.53.93、172.64.52.224、162.159.39.230、162.159.38.215。
+  5. [Codex] 本机私有 `deploy.py` 同步后重启 `singbox-cdn`，确保线上数据库立即刷新。
+  6. [Codex] JP/SG/HK 线上 SQLite 已备份并合并新 IP 池；当前 CDN 协议切换为：VLESS-WS=108.162.198.43，VLESS-HTTPUpgrade=162.159.44.136，Trojan-WS=162.159.39.181。
+- **验证**:
+  1. [Codex] 新增回归测试覆盖：可信来源排序优先、Top3 不被 C 段分散打乱、9 个用户确认 IP 已进入 `CDN_PREFERRED_IPS`、部署脚本重启 `singbox-cdn`。
+  2. [Codex] 新增回归测试覆盖：用户投喂 IP 不会被 VPS 侧延时/速度硬淘汰。
+  3. [Codex] `pytest -q` 通过：32 passed, 1 skipped。
+  4. [Codex] `python -m py_compile scripts\config.py scripts\cdn_monitor.py scripts\subscription_service.py scripts\config_generator.py scripts\cdn_quality_filter.py scripts\direct_quality_filter.py` 通过。
+  5. [Codex] JP/SG/HK `/api/cdn-status` 均返回 HTTP 200，且 `current_ips` 显示三条 CDN 协议已使用本批用户实测 IP。
+- **教训**:
+  1. [Codex] 用户本地实测优质 IP 比 VPS 侧测速更接近真实使用体感，不能只看服务器侧裸评分。
+  2. [Codex] “C 段分散”是池子稳健性策略，不应牺牲前三个最优节点。
+  3. [Codex] 远端服务实际运行目录是 `/root/singbox-eps-node`，不要误查 `/opt/singbox-eps-node/data/singbox.db`。
+
+## 最新排查（2026-06-13 v4.12.4）[Codex]
+
+### v2rayN `/sub` 订阅无法更新
+- **症状**: 用户反馈 V2RAYN 的 `/sub` Base64 订阅没办法更新。
+- **线上验证**:
+  1. [Codex] JP/SG/HK 的 `https://域名:2087/sub?client=v2rayn` 均返回 HTTP 200，说明订阅服务和 HTTPS 入口未挂。
+  2. [Codex] 三台服务器返回均为 7 个 URI，且都包含 1 条 `type=httpupgrade` 和 1 条 `tuic://`。
+- **根因**:
+  1. [Codex] v4.12.3 把 v2rayN/v2rayNG/Shadowrocket 默认改成 `full`，`?client=v2rayn` 也返回 7 节点。
+  2. [Codex] v2rayN 的 Xray-core 对 VLESS-HTTPUpgrade（`type=httpupgrade`）和 TUIC v5（`tuic://`）兼容不稳定，部分版本会拒绝整段 Base64 订阅，用户感知为“订阅更新失败”。
+- **修复**:
+  1. [Codex] v2rayN/v2rayNG/v2box/Shadowrocket 默认恢复 `standard`（5 节点，剔除 HTTPUpgrade + TUIC）。
+  2. [Codex] `?client=v2rayn|shadowrocket` 也返回 5 节点；保留 `?client=full` 强制 7 节点用于支持完整协议栈的客户端或临时排错。
+- **教训**:
+  1. [Codex] `/sub` 端点必须优先保证客户端能更新成功；扩展协议不要默认塞给 Xray-core 客户端。
+  2. [Codex] “用户客户端支持某些节点能用”不等于“订阅解析器支持所有 URI 格式”；订阅层应按最保守解析能力分流。
+
 ## 最新排查（2026-06-13 v4.12.3）[Codex]
 
 ### 用户确认客户端支持 7 节点 + CDN优选必须评分优先

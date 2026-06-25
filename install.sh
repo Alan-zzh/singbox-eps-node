@@ -9,7 +9,7 @@
 # 阶段1-系统准备（全自动，无需用户操作）：
 #   1. 系统更新：apt upgrade + 语言包 + 时区
 #   2. 安装依赖：curl/wget/python3/openssl/sqlite3等
-#   3. BBR+FQ 网络加速（即时生效，无需重启）
+#   3. BBRv3+FQ 网络加速（安装 XanMod BBRv3 内核；首次启用需重启）
 #   4. 系统优化：文件描述符+内核参数
 # 阶段2-部署服务（交互式配置）：
 #   5. 卸载旧面板 → 安装singbox → 部署项目
@@ -43,6 +43,16 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "${CYAN}>>> $1${NC}"; }
 
+cleanup_broken_xanmod_source() {
+    if [ -f /etc/apt/sources.list.d/xanmod-release.list ]; then
+        if [ ! -f /etc/apt/keyrings/xanmod-archive-keyring.gpg ] \
+            || ! gpg --show-keys /etc/apt/keyrings/xanmod-archive-keyring.gpg >/dev/null 2>&1; then
+            log_warn "检测到损坏的 XanMod APT key/source，先清理后重建"
+            rm -f /etc/apt/sources.list.d/xanmod-release.list /etc/apt/keyrings/xanmod-archive-keyring.gpg
+        fi
+    fi
+}
+
 check_root() {
     if [ "$EUID" -ne 0 ]; then
         log_error "请使用root用户运行此脚本"
@@ -65,14 +75,20 @@ detect_os() {
 
 update_system() {
     log_step "【阶段1-步骤1/4】更新系统+安装语言包..."
+    cleanup_broken_xanmod_source
     log_info "更新软件源..."
     apt-get update -y
     log_info "升级系统已安装的包..."
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
     log_info "安装语言包和基础工具..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        locales language-pack-en-base language-pack-zh-hans \
-        sudo gnupg2 ca-certificates lsb-release
+    if [ "$OS" = "ubuntu" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            locales language-pack-en-base language-pack-zh-hans \
+            sudo gnupg2 ca-certificates lsb-release
+    else
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            locales sudo gnupg2 ca-certificates lsb-release
+    fi
     locale-gen en_US.UTF-8 2>/dev/null || true
     update-locale LANG=en_US.UTF-8 2>/dev/null || true
     timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
@@ -118,6 +134,123 @@ set_default_qdisc_fq() {
         sed -i 's|^net.core.default_qdisc=.*|net.core.default_qdisc=fq|' /etc/sysctl.conf
     else
         echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+}
+
+detect_x86_64_psabi_level() {
+    if [ "$(uname -m)" != "x86_64" ]; then
+        echo ""
+        return
+    fi
+
+    local loader
+    for loader in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+        if [ -x "$loader" ]; then
+            if "$loader" --help 2>/dev/null | grep -q "x86-64-v4 (supported"; then
+                echo "x64v4"
+                return
+            fi
+            if "$loader" --help 2>/dev/null | grep -q "x86-64-v3 (supported"; then
+                echo "x64v3"
+                return
+            fi
+            if "$loader" --help 2>/dev/null | grep -q "x86-64-v2 (supported"; then
+                echo "x64v2"
+                return
+            fi
+        fi
+    done
+
+    echo "x64v1"
+}
+
+select_xanmod_bbrv3_package() {
+    local level
+    level="$(detect_x86_64_psabi_level)"
+    case "$level" in
+        x64v4|x64v3)
+            echo "linux-xanmod-lts-x64v3"
+            ;;
+        x64v2)
+            echo "linux-xanmod-lts-x64v2"
+            ;;
+        x64v1)
+            echo "linux-xanmod-lts-x64v1"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+install_bbrv3_kernel() {
+    log_info "加速1/4：安装/确认 BBRv3 内核（XanMod）..."
+
+    if uname -r | grep -qi "xanmod"; then
+        log_info "当前已运行 XanMod 内核，按 BBRv3 内核路径处理: $(uname -r)"
+        return 0
+    fi
+
+    if [ "$(uname -m)" != "x86_64" ]; then
+        log_warn "当前架构 $(uname -m) 暂不自动安装 XanMod BBRv3；保留系统 BBR+FQ"
+        return 0
+    fi
+
+    local pkg
+    pkg="$(select_xanmod_bbrv3_package)"
+    if [ -z "$pkg" ]; then
+        log_warn "无法选择 XanMod BBRv3 包，保留系统 BBR+FQ"
+        return 0
+    fi
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y gnupg ca-certificates curl >/dev/null 2>&1 || true
+    install -d -m 0755 /etc/apt/keyrings
+    if [ -f /etc/apt/keyrings/xanmod-archive-keyring.gpg ] \
+        && ! gpg --show-keys /etc/apt/keyrings/xanmod-archive-keyring.gpg >/dev/null 2>&1; then
+        rm -f /etc/apt/keyrings/xanmod-archive-keyring.gpg
+    fi
+    if [ ! -f /etc/apt/keyrings/xanmod-archive-keyring.gpg ]; then
+        local key_tmp="/tmp/xanmod-archive.key"
+        local xanmod_key_id="86F7D09EE734E623"
+        rm -f "$key_tmp"
+        if curl -A "Mozilla/5.0" -fsSL https://dl.xanmod.org/archive.key -o "$key_tmp" \
+            || wget -qO "$key_tmp" https://dl.xanmod.org/archive.key \
+            || curl -A "Mozilla/5.0" -fsSL https://dl.xanmod.org/gpg.key -o "$key_tmp" \
+            || wget -qO "$key_tmp" https://dl.xanmod.org/gpg.key; then
+            gpg --dearmor --yes --output /etc/apt/keyrings/xanmod-archive-keyring.gpg "$key_tmp"
+        else
+            log_warn "XanMod key URL 拉取失败，改用 keyserver.ubuntu.com 获取公钥 $xanmod_key_id"
+            GNUPGHOME="$(mktemp -d)"
+            export GNUPGHOME
+            gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$xanmod_key_id"
+            gpg --batch --export "$xanmod_key_id" | gpg --dearmor --yes --output /etc/apt/keyrings/xanmod-archive-keyring.gpg
+            rm -rf "$GNUPGHOME"
+            unset GNUPGHOME
+        fi
+        rm -f "$key_tmp"
+    fi
+    if ! gpg --show-keys --with-colons /etc/apt/keyrings/xanmod-archive-keyring.gpg 2>/dev/null | grep -q "86F7D09EE734E623"; then
+        log_error "XanMod APT key 校验失败，无法安全安装 BBRv3 内核"
+        return 1
+    fi
+    local codename
+    codename="$(lsb_release -sc 2>/dev/null || true)"
+    if [ -z "$codename" ] && [ -f /etc/os-release ]; then
+        . /etc/os-release
+        codename="${VERSION_CODENAME:-}"
+    fi
+    codename=${codename:-bookworm}
+    echo "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
+
+    apt-get update -y
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"; then
+        log_info "BBRv3 内核包已安装: $pkg"
+        if ! uname -r | grep -qi "xanmod"; then
+            touch /var/run/reboot-required 2>/dev/null || true
+            log_warn "BBRv3 内核已安装但尚未运行；需要重启后生效。当前内核: $(uname -r)"
+        fi
+    else
+        log_warn "安装 $pkg 失败，保留系统 BBR+FQ"
     fi
 }
 
@@ -167,19 +300,21 @@ EOF
 }
 
 optimize_system() {
-    log_step "【阶段1-步骤3/4】启用BBR+FQ网络加速..."
+    log_step "【阶段1-步骤3/4】启用BBRv3+FQ网络加速..."
+
+    install_bbrv3_kernel
 
     if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
-        log_info "加速1/3：启用BBR（Google拥塞控制，不依赖丢包，主动探测带宽+RTT）..."
+        log_info "加速2/4：启用BBR拥塞控制（XanMod 内核重启后为 BBRv3）..."
         grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     else
-        log_info "加速1/3：BBR已启用，跳过"
+        log_info "加速2/4：BBR已启用，跳过"
     fi
 
-    log_info "加速2/3：启用FQ公平队列（为每个TCP连接独立缓冲，BBR的pacing依赖FQ）..."
+    log_info "加速3/4：启用FQ公平队列（为每个TCP连接独立缓冲，BBR pacing 依赖FQ）..."
     set_default_qdisc_fq
 
-    log_info "加速3/3：固化网卡FQ队列（避免旧qdisc残留覆盖当前基线）..."
+    log_info "加速4/4：固化网卡FQ队列（避免旧qdisc残留覆盖当前基线）..."
     setup_fq_qdisc
 
     log_info "TCP调优（缓冲区+连接队列+保活+BBR高丢包参数）..."
@@ -220,7 +355,11 @@ net.ipv4.tcp_fastopen_blackhole_timeout_sec=0"
     done
 
     sysctl -p 2>/dev/null || true
-    log_info "BBR+FQ网络加速已启用（即时生效，无需重启）"
+    if uname -r | grep -qi "xanmod"; then
+        log_info "BBRv3+FQ网络加速已启用（当前运行 XanMod 内核: $(uname -r)）"
+    else
+        log_warn "BBR+FQ参数已启用；BBRv3 内核需重启后生效（当前内核: $(uname -r)）"
+    fi
 
     # ============ 新增：内存与系统服务优化 ============
     log_info "【系统优化】限制 journald 日志大小（防止日志堆积占满磁盘/内存）..."
@@ -266,7 +405,7 @@ root hard nofile 65535
 EOF
     fi
 
-    log_info "阶段1完成：系统更新+依赖+BBR+FQ+优化（全部即时生效，无需重启）"
+    log_info "阶段1完成：系统更新+依赖+BBRv3+FQ+优化（BBRv3 内核首次启用需重启）"
 }
 
 setup_cake_qdisc() {
@@ -298,7 +437,8 @@ install_singbox() {
                              REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
                              AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
-                             TG_ADMIN_CHAT_ID; do
+                             TG_ADMIN_CHAT_ID WARP_UNLOCK WARP_PRIVATE_KEY WARP_PEER_PUBLIC_KEY \
+                             WARP_PEER_ENDPOINT WARP_CLIENT_IPV4 WARP_CLIENT_IPV6 WARP_RESERVED; do
                     VALUE=$(grep "^${FIELD}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
                     if [ -n "$VALUE" ]; then
                         echo "${FIELD}=${VALUE}" >> "$PASSWORD_BACKUP"
@@ -337,11 +477,14 @@ install_singbox() {
         *)       log_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
 
-    SINGBOX_VER="1.15.0"
+    SINGBOX_VER="1.13.13"
     SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}.tar.gz"
     log_info "下载 Singbox v${SINGBOX_VER} (${SINGBOX_ARCH})..."
     cd /tmp
-    wget -q "$SINGBOX_URL" -O singbox.tar.gz
+    if ! wget -q "$SINGBOX_URL" -O singbox.tar.gz; then
+        log_error "下载 Singbox v${SINGBOX_VER} 失败: $SINGBOX_URL"
+        exit 1
+    fi
     tar -xzf singbox.tar.gz
     cp "sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}/sing-box" /usr/local/bin/sing-box
     chmod +x /usr/local/bin/sing-box
@@ -480,6 +623,25 @@ create_env_file() {
     else
         log_info "跳过AI住宅代理配置（后续可手动编辑.env）"
     fi
+    WARP_UNLOCK="off"
+    if [ "${AUTO_YES:-0}" != "1" ]; then
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  🚀 Cloudflare WARP DNS解锁（AI+流媒体，零成本）${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  方案: sing-box内置WireGuard直连Cloudflare WARP，零额外进程"
+        echo -e "  解锁: OpenAI/ChatGPT/Gemini/Claude/TikTok/Netflix"
+        echo -e "  直连: X/Twitter/Google/YouTube/其他所有网站（不影响速度）"
+        echo -e "  成本: 完全免费，无需额外VPS或代理"
+        echo ""
+        read -p "  是否启用WARP DNS解锁？(y/N): " SETUP_WARP
+        if [[ "$SETUP_WARP" =~ ^[Yy]$ ]]; then
+            WARP_UNLOCK="on"
+            log_info "WARP解锁已启用，安装完成后将自动配置"
+        else
+            log_info "跳过WARP解锁配置（后续可运行 bash install.sh warp-unlock 单独安装）"
+        fi
+    fi
     # v4.5 用户DDNS锚点配置
     if [ "${AUTO_YES:-0}" != "1" ]; then
         echo ""
@@ -557,6 +719,15 @@ USER_DDNS_DOMAIN=${USER_DDNS_DOMAIN}
 USER_EXPECTED_ISP=${USER_EXPECTED_ISP:-电信}
 USER_PROBE_INTERVAL=300
 USER_LATENCY_SPIKE_THRESHOLD=0.5
+
+# ============ Cloudflare WARP DNS解锁（v4.13 AI+流媒体零成本解锁）============
+WARP_UNLOCK=${WARP_UNLOCK}
+WARP_PRIVATE_KEY=
+WARP_PEER_PUBLIC_KEY=bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
+WARP_PEER_ENDPOINT=162.159.193.10:2408
+WARP_CLIENT_IPV4=
+WARP_CLIENT_IPV6=
+WARP_RESERVED=
 EOF
     chmod 600 "$BASE_DIR/.env"
     log_info ".env 已创建 (服务器IP: ${SERVER_IP:-未检测到，请手动填写})"
@@ -867,9 +1038,13 @@ verify_installation() {
     echo ""
     echo -e "  系统优化:"
     if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
-        echo -e "    ${GREEN}✅${NC} BBR加速: 已启用"
+        if uname -r | grep -qi "xanmod"; then
+            echo -e "    ${GREEN}✅${NC} BBRv3加速: 已启用（XanMod $(uname -r)）"
+        else
+            echo -e "    ${YELLOW}⚠️${NC} BBR加速: 已启用；BBRv3 内核需重启后生效（当前 $(uname -r)）"
+        fi
     else
-        echo -e "    ${YELLOW}⚠️${NC} BBR加速: 未启用"
+        echo -e "    ${YELLOW}⚠️${NC} BBR/BBRv3加速: 未启用"
     fi
     VERIFY_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
     VERIFY_IF=${VERIFY_IF:-eth0}
@@ -921,8 +1096,12 @@ print_summary() {
     echo "  备选2:     WeTest.vip电信优选DNS"
     echo "  备选3:     IPDB API bestcf"
     echo ""
-    echo "⚡ 系统优化（已自动完成，即时生效无需重启）:"
-    echo "  BBR加速:      已启用（Google拥塞控制，不依赖丢包）"
+    echo "⚡ 系统优化（已自动完成；BBRv3 内核首次启用需重启）:"
+    if uname -r | grep -qi "xanmod"; then
+        echo "  BBRv3加速:    已启用（XanMod $(uname -r)）"
+    else
+        echo "  BBRv3加速:    内核已安装则重启后生效（当前 $(uname -r)）"
+    fi
     echo "  FQ公平队列:   已启用（为每个TCP连接独立缓冲）"
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1) || true
     MAIN_IF=${MAIN_IF:-eth0}
@@ -931,7 +1110,7 @@ print_summary() {
     else
         echo "  FQ队列:       未启用（建议运行 bash install.sh optimize 重新优化）"
     fi
-    echo "  TCP调优:       已优化（含BBR高丢包参数）"
+    echo "  TCP调优:       已优化（含BBRv3/BBR高丢包参数）"
     echo "  文件描述符:    65535"
     echo "  时区:          Asia/Shanghai"
     echo ""
@@ -1060,22 +1239,226 @@ cmd_reinstall() {
     bash reinstall.sh "$REINSTALL_OS" "$CURRENT_VERSION" --password "$ROOT_PASSWORD"
 }
 
+safe_update_env() {
+    local key="$1"
+    local value="$2"
+    local envfile="$3"
+    python3 - "$key" "$value" "$envfile" << 'PYEOF'
+import sys, re
+key, value, envfile = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = []
+replaced = False
+with open(envfile, 'r', encoding='utf-8') as f:
+    for line in f:
+        if re.match(rf'^{re.escape(key)}=', line):
+            lines.append(f'{key}={value}\n')
+            replaced = True
+        else:
+            lines.append(line)
+if not replaced:
+    lines.append(f'{key}={value}\n')
+with open(envfile, 'w', encoding='utf-8') as f:
+    f.writelines(lines)
+PYEOF
+}
+
+cmd_warp_unlock() {
+    local ACTION="${1:-install}"
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    if [ "$ACTION" = "uninstall" ] || [ "$ACTION" = "off" ]; then
+        echo -e "${CYAN}  关闭WARP DNS解锁${NC}"
+    else
+        echo -e "${CYAN}  🚀 Cloudflare WARP DNS解锁安装${NC}"
+    fi
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    check_root
+
+    local WGCF_DIR="/opt/wgcf"
+    local WGCF_BIN="/usr/local/bin/wgcf"
+    trap 'rm -rf "$WGCF_DIR" 2>/dev/null || true' EXIT INT TERM
+
+    if [ ! -d "$BASE_DIR" ]; then
+        log_error "项目目录不存在: $BASE_DIR，请先运行 bash install.sh 完成基础安装"
+        exit 1
+    fi
+
+    if [ "$ACTION" = "uninstall" ] || [ "$ACTION" = "off" ]; then
+        log_info "正在关闭WARP DNS解锁..."
+        if [ -f "$BASE_DIR/.env" ]; then
+            safe_update_env "WARP_UNLOCK" "off" "$BASE_DIR/.env"
+            safe_update_env "WARP_PRIVATE_KEY" "" "$BASE_DIR/.env"
+            safe_update_env "WARP_PEER_PUBLIC_KEY" "" "$BASE_DIR/.env"
+            safe_update_env "WARP_PEER_ENDPOINT" "" "$BASE_DIR/.env"
+            safe_update_env "WARP_CLIENT_IPV4" "" "$BASE_DIR/.env"
+            safe_update_env "WARP_CLIENT_IPV6" "" "$BASE_DIR/.env"
+            safe_update_env "WARP_RESERVED" "" "$BASE_DIR/.env"
+            log_info "WARP配置已清空，WARP_UNLOCK设置为off"
+        fi
+        rm -rf "$WGCF_DIR" 2>/dev/null || true
+        rm -f "$WGCF_BIN" 2>/dev/null || true
+        cd "$BASE_DIR" && python3 scripts/config_generator.py
+        systemctl restart singbox singbox-sub 2>/dev/null || true
+        sleep 2
+        if systemctl is-active --quiet singbox; then
+            echo -e "${GREEN}✅ WARP DNS解锁已关闭，所有流量恢复服务器直连${NC}"
+        else
+            log_error "服务重启失败，请检查日志"
+        fi
+        return
+    fi
+
+    log_info "安装依赖..."
+    apt-get update -qq
+    apt-get install -y -qq curl jq file > /dev/null 2>&1 || true
+
+    mkdir -p "$WGCF_DIR"
+    chmod 700 "$WGCF_DIR"
+
+    if [ ! -f "$WGCF_BIN" ]; then
+        log_info "下载wgcf工具..."
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+            WGCF_URL="https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_amd64"
+        elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+            WGCF_URL="https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_arm64"
+        else
+            log_error "不支持的架构: $ARCH"
+            exit 1
+        fi
+        if ! curl -fSL --connect-timeout 15 --max-time 60 "$WGCF_URL" -o "$WGCF_BIN"; then
+            log_error "下载wgcf失败"
+            exit 1
+        fi
+        chmod 700 "$WGCF_BIN"
+        if ! file "$WGCF_BIN" | grep -q "ELF"; then
+            log_error "下载的wgcf不是有效二进制文件"
+            rm -f "$WGCF_BIN"
+            exit 1
+        fi
+        if ! "$WGCF_BIN" --version >/dev/null 2>&1; then
+            log_error "下载的wgcf二进制无法执行"
+            rm -f "$WGCF_BIN"
+            exit 1
+        fi
+        log_info "wgcf二进制验证通过"
+    fi
+
+    log_info "注册WARP账户..."
+    cd "$WGCF_DIR"
+    rm -f wgcf-account.toml wgcf-profile.conf
+    REGISTER_OK=false
+    for i in 1 2 3; do
+        if "$WGCF_BIN" register --accept-tos >/dev/null 2>&1; then
+            REGISTER_OK=true
+            break
+        fi
+        log_warn "第${i}次注册失败，重试..."
+        sleep 3
+    done
+    if [ "$REGISTER_OK" != "true" ]; then
+        log_error "WARP账户注册失败（3次尝试均失败），请检查网络连接"
+        exit 1
+    fi
+    chmod 600 wgcf-account.toml 2>/dev/null || true
+
+    log_info "生成WireGuard配置..."
+    if ! "$WGCF_BIN" generate >/dev/null 2>&1; then
+        log_error "生成WireGuard配置失败"
+        exit 1
+    fi
+    chmod 600 wgcf-profile.conf 2>/dev/null || true
+
+    if [ ! -f wgcf-profile.conf ]; then
+        log_error "生成WARP配置失败，请检查网络连接"
+        exit 1
+    fi
+
+    log_info "解析WARP配置..."
+    PRIVATE_KEY=$(grep '^PrivateKey' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
+    PEER_PUBLIC_KEY=$(grep '^PublicKey' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
+    ENDPOINT=$(grep '^Endpoint' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
+    ADDRESS_LINE=$(grep '^Address' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
+    ADDRESS=$(echo "$ADDRESS_LINE" | cut -d',' -f1)
+    ADDRESS_V6=$(echo "$ADDRESS_LINE" | cut -d',' -f2 | grep -E '^[0-9a-fA-F:]+$' || echo "")
+
+    if [ -z "$PRIVATE_KEY" ] || [ -z "$PEER_PUBLIC_KEY" ] || [ -z "$ENDPOINT" ] || [ -z "$ADDRESS" ]; then
+        log_error "解析配置失败"
+        exit 1
+    fi
+
+    log_info "更新.env配置..."
+    safe_update_env "WARP_UNLOCK" "on" "$BASE_DIR/.env"
+    safe_update_env "WARP_PRIVATE_KEY" "$PRIVATE_KEY" "$BASE_DIR/.env"
+    safe_update_env "WARP_PEER_PUBLIC_KEY" "$PEER_PUBLIC_KEY" "$BASE_DIR/.env"
+    safe_update_env "WARP_PEER_ENDPOINT" "$ENDPOINT" "$BASE_DIR/.env"
+    safe_update_env "WARP_CLIENT_IPV4" "$ADDRESS" "$BASE_DIR/.env"
+    safe_update_env "WARP_CLIENT_IPV6" "$ADDRESS_V6" "$BASE_DIR/.env"
+    safe_update_env "WARP_RESERVED" "" "$BASE_DIR/.env"
+
+    chmod 600 "$BASE_DIR/.env"
+
+    log_info "重新生成sing-box配置..."
+    cd "$BASE_DIR" && python3 scripts/config_generator.py
+
+    if ! /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" >/dev/null 2>&1; then
+        log_error "config.json检查失败："
+        /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" 2>&1 | head -20
+        exit 1
+    fi
+
+    log_info "重启服务..."
+    systemctl restart singbox singbox-sub 2>/dev/null || true
+    sleep 3
+
+    echo ""
+    if systemctl is-active --quiet singbox; then
+        echo -e "${GREEN}=========================================${NC}"
+        echo -e "${GREEN}  ✅ WARP DNS解锁安装成功！${NC}"
+        echo -e "${GREEN}=========================================${NC}"
+        echo ""
+        echo -e "${GREEN}分流规则(走WARP住宅IP):${NC}"
+        echo -e "  ✅ OpenAI / ChatGPT"
+        echo -e "  ✅ Anthropic / Claude"
+        echo -e "  ✅ Gemini / Google AI"
+        echo -e "  ✅ TikTok"
+        echo -e "  ✅ Netflix"
+        echo ""
+        echo -e "${GREEN}直连规则(走服务器本地IP):${NC}"
+        echo -e "  ✅ X / Twitter"
+        echo -e "  ✅ Google / YouTube"
+        echo -e "  ✅ 其他所有网站（不影响速度）"
+        echo ""
+        echo -e "${YELLOW}关闭解锁: bash install.sh warp-unlock off${NC}"
+    else
+        log_error "服务启动失败，请检查日志：journalctl -u singbox -n 30"
+        exit 1
+    fi
+}
+
 cmd_optimize() {
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  一键优化系统（BBR+FQ 网络加速）${NC}"
+    echo -e "${CYAN}  一键优化系统（BBRv3+FQ 网络加速）${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. BBR加速  — Google拥塞控制，不依赖丢包，主动探测带宽+RTT"
-    echo -e "  2. FQ公平队列 — 为每个TCP连接独立缓冲，BBR的pacing依赖FQ"
-    echo -e "  3. FQ队列    — 为每个TCP连接独立排队，贴合BBR pacing"
-    echo -e "  即时生效，无需重启服务器"
+    echo -e "  1. BBRv3内核 — 安装 XanMod BBRv3 内核（首次启用需重启）"
+    echo -e "  2. BBR拥塞控制 — sysctl 启用 bbr，XanMod 内核运行为 BBRv3"
+    echo -e "  3. FQ公平队列 — 为每个TCP连接独立缓冲，贴合 BBR pacing"
+    echo -e "  4. TCP参数 — 保活、队列、缓冲区、TFO 等参数即时生效"
     echo ""
     check_root
     update_system
     optimize_system
     echo ""
-    echo -e "${GREEN}✅ 系统优化完成！BBR+FQ 网络加速已启用（即时生效，无需重启）：${NC}"
-    echo -e "  BBR加速:      $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo '未知')"
+    echo -e "${GREEN}✅ 系统优化完成！BBRv3+FQ 网络加速已配置：${NC}"
+    echo -e "  拥塞控制:     $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}' || echo '未知')"
+    echo -e "  当前内核:     $(uname -r)"
+    if uname -r | grep -qi "xanmod"; then
+        echo -e "  BBRv3状态:    已运行 XanMod BBRv3 内核"
+    else
+        echo -e "  BBRv3状态:    需重启后运行新内核"
+    fi
     echo -e "  默认队列:     $(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}' || echo '未知')"
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)
     MAIN_IF=${MAIN_IF:-eth0}
@@ -1091,13 +1474,15 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v2.0.0${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v2.1.0${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
     echo "  bash install.sh reinstall    一键重装操作系统（需输入root密码，装完自动重启）"
     echo "  bash install.sh reset        一键重装singbox（保留配置和数据，客户端无需重配）"
-    echo "  bash install.sh optimize     一键优化系统（BBR+FQ，即时生效无需重启）"
+    echo "  bash install.sh optimize     一键优化系统（BBRv3+FQ；BBRv3 内核首次启用需重启）"
+    echo "  bash install.sh warp-unlock  安装WARP DNS解锁（AI+流媒体零成本解锁）"
+    echo "  bash install.sh warp-unlock off  关闭WARP DNS解锁"
     echo "  bash install.sh help         显示此帮助"
     echo ""
     echo "子命令说明:"
@@ -1108,30 +1493,36 @@ cmd_help() {
     echo "  reset      重装singbox应用（保留.env配置和数据库）"
     echo "             - 保留所有密码和密钥，客户端无需重新配置"
     echo "             - 保留流量统计数据和证书"
+    echo "  warp-unlock  Cloudflare WARP DNS解锁（AI+流媒体，零成本）"
+    echo "             - 解锁: OpenAI/ChatGPT/Gemini/Claude/TikTok/Netflix"
+    echo "             - 直连: X/Twitter/Google/YouTube/其他所有网站（不影响速度）"
+    echo "             - 技术: sing-box内置WireGuard直连，零额外进程，低延迟"
+    echo "             - 可随时开启/关闭，不影响原有节点"
     echo ""
     echo "安装流程（全自动，无需手动操作）："
-    echo "  阶段1: 系统更新 → 安装依赖 → BBR+FQ 网络加速 → 系统优化"
+    echo "  阶段1: 系统更新 → 安装依赖 → BBRv3+FQ 网络加速 → 系统优化"
     echo "  阶段2: 卸载旧面板 → 安装singbox → 交互式配置 → 启动服务"
     echo ""
-    echo "BBR+FQ 网络加速（当前项目基线）："
-    echo "  1. BBR加速   — Google拥塞控制，不依赖丢包，主动探测带宽+RTT"
-    echo "  2. FQ公平队列 — 为每个TCP连接独立缓冲，BBR的pacing依赖FQ"
-    echo "  3. FQ队列    — 为每个TCP连接独立排队，减少相互挤压"
-    echo "  ⚠️ 即时生效，无需重启服务器"
+    echo "BBRv3+FQ 网络加速（当前项目基线）："
+    echo "  1. BBRv3内核  — XanMod BBRv3，改善高延迟/丢包 TCP 链路"
+    echo "  2. BBR拥塞控制 — sysctl 名称仍是 bbr，XanMod 内核中为 BBRv3"
+    echo "  3. FQ公平队列 — 为每个TCP连接独立排队，贴合 BBR pacing"
+    echo "  ⚠️ 内核切换需重启后生效；sysctl/FQ 参数即时生效"
     echo ""
 }
 
 main() {
     case "${1:-}" in
         --yes|-y)
-            # Non-interactive mode: auto-accept all defaults
             export AUTO_YES=1
             shift
-            # Fall through to main logic
             ;;
     esac
     
-    case "${1:-}" in
+    local subcmd="${1:-}"
+    local subcmd_arg="${2:-}"
+    
+    case "$subcmd" in
         reset)
             cmd_reset
             ;;
@@ -1141,13 +1532,16 @@ main() {
         optimize)
             cmd_optimize
             ;;
+        warp-unlock|warp)
+            cmd_warp_unlock "$subcmd_arg"
+            ;;
         help|--help|-h)
             cmd_help
             ;;
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v2.0.0${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v2.1.0${NC}"
             echo "=========================================="
             echo ""
             check_root
@@ -1173,10 +1567,15 @@ main() {
             setup_health_check_cron
             start_services
             verify_installation
+            if grep -q "^WARP_UNLOCK=on" "$BASE_DIR/.env" 2>/dev/null; then
+                echo ""
+                log_info "检测到WARP解锁已启用，正在自动配置WARP..."
+                cmd_warp_unlock install
+            fi
             print_summary
             ;;
         *)
-            log_error "未知命令: $1"
+            log_error "未知命令: $subcmd"
             cmd_help
             exit 1
             ;;

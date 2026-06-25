@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.12.3 | **更新**: 2026-06-13
+**版本**: v4.12.21 | **更新**: 2026-06-26
 
 ---
 
@@ -15,24 +15,31 @@
 
 ### 核心功能
 - **7个代理协议**：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS, TUIC v5
-- **多客户端兼容**（v4.12.3 更新）：UA 自动识别客户端能力，Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 7 节点；未知客户端默认 5 节点，`?client=standard` 可强制 5 节点兜底
+- **多客户端兼容**（v4.12.14 更新）：`/sub` 默认保留 7 节点，Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅；VLESS-gRPC 与 TUIC 分享 URI 补充 Shadowrocket/v2rayN 兼容参数；`?client=standard` 可强制 5 节点兜底
 - **CDN节点命名统一**（v4.12.2）：Base64 / Clash / sing-box 三类订阅中 CDN 节点统一显示 `-CDN` 后缀
-- **流量查询**（v4.12.1 新增）：`/info` 端点（v2rayN 也能看）+ `/api/traffic` JSON + 订阅 Base64 头部插入流量注释
+- **流量查询**（v4.12.10 更新）：`/info` 端点（v2rayN 也能看）+ `/api/traffic` JSON + `subscription-userinfo` header；Base64 正文只放节点 URI，分享链接节点名已 URL 编码
 - **流量统计修复**（v4.12.2）：iptables INPUT 按 `dpt` + OUTPUT 按 `spt` 双向计数，UDP 端口（TUIC）独立统计；每月14号更新数据库 baseline，不清零内核计数器
 - CDN三模式优选：CDN_MODE（ip_optimized/domain_optimized/domain_default）
-- CDN多维度评分（v4.12.3 更新）：用户路径 + VPS侧 + 三网均衡 + 稳定性综合评分，候选排序评分优先、延迟第二、本地投喂同分兜底
-- 本机私有 `deploy.py` 已同步 `scripts/cdn_monitor.py` 到 `/opt` 与 `/root` 双运行目录，并用于本次三服务器部署；该脚本被 `.gitignore` 忽略且不纳入 Git
+- Cloudflare 订阅入口 TLS 兼容：`min_tls_version=1.2`，由 `cloudflare_proxy_rules.py apply` 和 `health_check.sh` 自愈维护
+- CDN多维度评分（v4.12.5 更新）：用户本地实测投喂/运营商匹配源提权，VPS侧测速只作为辅助；Top3 优先保留真实最优，之后再做 C 段分散
+- CDN优选迟滞防抖（v4.12.13 新增）：`get_cdn_ip_for_protocol()` 新 IP 评分必须比当前高 15% 才触发切换，避免频繁切换加剧封禁
+- CDN用户路径HTTP测速（v4.12.13 新增）：`test_user_path_latency()` 新增通过代理入口端口(2087)的 HTTP `/info` 测速，取 TLS 握手和 HTTP 延迟中较小值
+- CDN故障切换状态查询（v4.12.13 新增）：`/api/cdn-status` 启用 `CdnFailoverController` 状态查询（冷却池、切换计数、上次切换时间）
+- Cloudflare 代理入口规则自愈（v4.12.7 更新）：`cloudflare_proxy_rules.py` 按 `jp/sg/hk.290372913.xyz` + 代理端口/路径维护 Rulesets API skip 规则，不绑定用户公网 IP；`health_check.sh` 每 15 分钟确认目标态
+- Clash 订阅/CDN 入口恢复（v4.12.20 更新）：Cloudflare skip 规则覆盖 firewall_managed/sbfm/ratelimit 三个阶段（不含ddos_l7），ddos_l7 phase 创建 `sensitivity_level=eoff` override 放行代理端口流量
+- CDN优选评分修复（v4.12.21 更新）：`assign_and_save_ips()` 修复漏传 `user_path_result` 和 `cross_isp_score` 参数的bug，CDN IP评分从83分恢复到95-96分；HK服务器USER_DDNS_DOMAIN修复为zzpzgroup.com
+- 本机私有 `deploy.py` 已同步 `scripts/cdn_monitor.py`、`scripts/cloudflare_proxy_rules.py`、`scripts/health_check.sh` 到 `/opt` 与 `/root` 双运行目录，并在同步后重启 `singbox-cdn`、确认 Cloudflare 规则；该脚本被 `.gitignore` 忽略且不纳入 Git
 - CDN IP自动同步：cdn_monitor写数据库+信号文件 → subscription_service检测信号清缓存
-- 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高
+- 用户投喂IP池：config.py的CDN_PREFERRED_IPS为真理来源，优先级最高；v4.12.5 新增 9 个用户本地实测优质 IP
 - 按月流量统计：iptables内核级 INPUT+OUTPUT 双向计数器，每月14号由订阅服务更新 baseline
-- BBR+FQ 网络加速
+- BBRv3+FQ 网络加速（`install.sh optimize` 安装 XanMod BBRv3 内核；首次启用需重启）
 - 三层自愈机制：systemd ExecStartPre + health_check.sh（v4.10.20 升级为详细日志版） + StartLimitBurst
 - 一键诊断脚本：diagnose.sh 18项检查
 - SQLite WAL 模式：多进程并发读写零阻塞（v4.10.20）
 - Reality 强随机 short_id：openssl rand -hex 8 生成，禁止 abcd1234 弱预设
 - TLS ALPN: ["h2", "http/1.1"] 启用 HTTP/2 多路复用
 - 随机端口配置：VLESS-gRPC/Trojan-TCP 端口首次安装随机生成（10000-65535），避免固定端口被识别
-- sing-box 版本：1.15.0（v4.11.0 升级）
+- sing-box 版本:1.13.13(JP/SG/HK);服务端为单独 sing-box,不混装 Xray
 
 ### CDN优选IP学习系统
 **核心理念：现有IP存活则不换，死亡才替换 + 用户反馈驱动**
@@ -60,7 +67,7 @@
 ### 定时任务
 | 任务 | 频率 | 说明 |
 |------|------|------|
-| health_check.sh | 每15分钟 | 内存/服务/端口/config自愈/磁盘/日志/estab连接告警/iptables 完整 8 项 |
+| health_check.sh | 每15分钟 | 内存/服务/端口/config自愈/磁盘/日志/estab连接告警/iptables/Cloudflare代理入口规则自愈 |
 | cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签 |
 | subscription_service baseline | 每月14号 00:03 | 更新月度流量基准，不清零 iptables 内核计数器 |
 
@@ -89,6 +96,7 @@
 │   ├── subscription_service.py # HTTPS订阅服务
 │   ├── cert_manager.py     # 证书管理+HY2端口跳跃
 │   ├── cdn_monitor.py      # CDN优选IP监控
+│   ├── cloudflare_proxy_rules.py # Cloudflare代理入口规则自愈
 │   ├── tg_bot.py           # Telegram机器人
 │   ├── logger.py           # 日志管理
 │   ├── health_check.sh     # 健康检查（每15分钟）
@@ -109,32 +117,18 @@
 
 ## 关键避坑记录
 
-1. DNS服务器detour必须为direct，不能走代理
-2. ~~AI规则禁止包含通用域名如google.com~~ (AI-SOCKS5 路由 v4.10.20 已废除)
-3. ~~排除规则必须在AI规则之前~~ (AI 路由已废除，无相关排除规则)
-4. 修改subscription_service.py必须同步修改config_generator.py
-5. 修复服务器问题必须同步更新install.sh
-6. 服务重启必须覆盖所有相关服务：singbox + singbox-sub + singbox-cdn
-7. 数据库连接必须在finally中关闭
-8. 414MB小内存VPS必须配Swap（2GB）+ MemoryMin + GOMEMLIMIT
-9. singbox日志必须配logrotate
-10. 禁止硬编码IP/域名/凭据/路径，统一从.env和config.py读取（v4.10.20 复查通过：仓库内已无明文密码）
-11. 从Windows上传shell脚本到Linux后必须转换换行符
-12. systemd服务文件中所有路径必须使用绝对路径
-13. 守护进程必须加进程锁（fcntl.flock），防止多实例运行
-14. CDN→Google测速不影响用户体验，不应纳入评分（v4.10.20 已 DROP google_latency_ms/google_speed_mbps 两列）
-15. 获取IP时不应强制过滤IP段，应先全部获取→测速筛选→反复不好的再淘汰
-16. 评分维度必须全部有效，无效维度等于白算且拉低区分度
-17. "网页正常但推特私信发不出去"先判平台限流，再判代理闪断
-18. CDN 443端口不提供HTTP服务，测速只能用TCP+TLS握手
-19. pkill -f "服务名.py" 会自杀，改用 fuser -k 端口/tcp
-20. sing-box 字段必须查官方文档确认合法性，禁止凭直觉猜测
-21. **v4.10.20 新增**：服务器代码同步必须覆盖根目录文档 + scripts/ + 辅助脚本，不能只 push "经常改的核心 .py"
-22. **v4.10.20 新增**：临时调试脚本必须归档到 docs/archive/scripts/，禁止散落在 scripts/ 根目录
-23. **v4.10.20 新增**：SQLite 多进程并发场景必须用 WAL 模式（PRAGMA journal_mode = WAL）
-24. **v4.10.20 新增**：Reality short_id 严禁使用 abcd1234 等弱预设，必须 `openssl rand -hex 8` 生成
+完整避坑记录见 [AGENTS.md](AGENTS.md) 重点禁忌 + [AI_DEBUG_HISTORY.md](AI_DEBUG_HISTORY.md)。
 
-完整避坑记录见 [AI_DEBUG_HISTORY.md](AI_DEBUG_HISTORY.md)
+snapshot 仅补充部署相关要点:
+
+1. 修改 subscription_service.py 必须同步修改 config_generator.py(订阅层与服务端层)
+2. 修复服务器问题必须同步更新 install.sh(新部署能复现修复)
+3. 服务重启必须覆盖所有相关服务:singbox + singbox-sub + singbox-cdn
+4. 从 Windows 上传 shell 脚本到 Linux 后必须转换换行符
+5. systemd 服务文件中所有路径必须使用绝对路径
+6. 守护进程必须加进程锁(fcntl.flock),防止多实例运行
+7. singbox 日志必须配 logrotate
+8. 禁止硬编码 IP/域名/凭据/路径,统一从 .env 和 config.py 读取
 
 ---
 
@@ -144,26 +138,25 @@
 - 域名：sg.290372913.xyz
 - 部署时间：2026-05-04
 - 状态：正常运行
-- 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, Hysteria2
+- 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, TUIC v5
 - vless-grpc 端口: 51263
 - trojan-tcp 端口: 14497
-- sing-box：1.13.11（CHANGELOG v4.11.0 计划升级 1.15.0 未实际执行）
+- sing-box：1.13.13
 
 ### 日本服务器（52.195.179.240）
 - 域名：jp.290372913.xyz
 - 部署时间：2026-05-03
 - 状态：正常运行
-- 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, Hysteria2
+- 协议：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, TUIC v5
 - vless-grpc 端口: 36848
 - trojan-tcp 端口: 64688
-- sing-box：1.13.11（CHANGELOG v4.11.0 计划升级 1.15.0 未实际执行）
+- sing-box：1.13.13
 
 ### 香港服务器 (43.249.174.222)
 - 域名: hk.290372913.xyz
 - 系统: Debian 12
-- 协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN
-- TUIC v5: 已启用（ENABLE_TUIC=true）
+- 协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, VLESS-HTTPUpgrade-CDN, Trojan-WS-CDN, TUIC v5
 - 部署时间: 2026-06-04
 - vless-grpc 端口: 51794
 - trojan-tcp 端口: 65004
-- sing-box：1.13.9（CHANGELOG v4.11.0 计划升级 1.15.0 未实际执行）
+- sing-box：1.13.13

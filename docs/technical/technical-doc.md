@@ -1,19 +1,18 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v4.11.0 | **更新**: 2026-06-06
+**版本**: v4.12.13 | **更新**: 2026-06-17
 
-> 注意：本文档从根目录 TECHNICAL_DOC.md 迁移而来，原版本标注为 v4.3.6 已严重过时。
-> 当前项目实际版本为 v4.11.0，本文档中的架构和模块说明仍具参考价值，但版本历史部分请以 CHANGELOG.md 为准。
+> 版本历史以 CHANGELOG.md 为准。本文档描述当前架构和模块说明。
 
 ---
 
 ## 一、项目概述
 
-全自动CDN优选IP管理 + 多协议代理订阅生成系统。一条命令完成部署，客户端导入订阅即可使用。
+全自动CDN优选IP管理 + 多协议代理订阅生成系统。一条命令完成部署,客户端导入订阅即可使用。
 
-- **代理内核**: sing-box 1.15.0
+- **代理内核**: sing-box 1.13.11(JP/SG) / 1.13.9(HK)
 - **后端**: Python 3 + Flask
-- **数据库**: SQLite
+- **数据库**: SQLite(WAL 模式)
 - **CDN**: Cloudflare
 - **证书**: Let's Encrypt / Cloudflare Origin CA
 
@@ -32,7 +31,7 @@
 | 节点 | 地址 | 方式 |
 |------|------|------|
 | {CC}-VLESS-Reality | {IP}:443 | 直连 |
-| {CC}-VLESS-gRPC | {IP}:VLESS_GRPC_PORT | 直连 |
+| {CC}-VLESS-gRPC | {IP}:VLESS_GRPC_PORT | 直连（Base64 URI 补充 gRPC 兼容参数） |
 | {CC}-Trojan-TCP | {IP}:TROJAN_TCP_PORT | 直连 |
 | {CC}-VLESS-WS-CDN | 优选IP:8443 | CDN |
 | {CC}-VLESS-HTTPUpgrade-CDN | 优选IP:2053 | CDN |
@@ -610,6 +609,15 @@
 ### 规则19：日志必须配logrotate
 **教训**: singbox日志12MB+且持续增长，无轮转机制（运维#1）
 **做法**: /etc/logrotate.d/singbox 配置 daily + rotate 7 + maxsize 50M
+
+### 规则20：免费版 CF 禁止主动创建 DDoS L7 override（v4.12.12）
+**教训**: v4.12.12 CDN 全部 403，最初以为是 DDoS L7 拦截，创建了 ddos_l7 zone override（sensitivity_level=eoff）。短暂恢复 200 后又全部 403，且 override、IP 白名单、managed_challenge 都无法解除。实测发现**主动创建 DDoS L7 override 反而触发 CF 动态保护机制**，把整个 zone 标记为"被攻击"。
+**做法**:
+- **不要主动创建 DDoS L7 override**：CF 默认 DDoS L7 配置不会拦截代理入口，v4.12.7 的 skip 规则（WAF/SBFM/Rate Limit）已经足够
+- `scripts/cloudflare_proxy_rules.py ensure_ddos_l7_override()` 只查询不创建
+- CDN 全部 403 诊断顺序：① 源站直连确认服务正常 → ② 检查是否有 DDoS L7 override（有则删除）→ ③ 检查 skip 规则 → ④ 检查 zone settings → ⑤ GraphQL 查 source
+- "短暂有效然后失效"是 CF 动态保护的典型特征，应反向操作（删除而非添加）
+- CF DDoS L7 动态签名优先级最高，一旦激活 override/IP 白名单/managed_challenge 都无法解除，只能删除 override 等待 CF 重新评估
 
 ---
 

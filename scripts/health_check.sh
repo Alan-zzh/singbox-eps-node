@@ -251,6 +251,26 @@ check_cert() {
 }
 
 # ============================================================
+# 9. Cloudflare 代理入口规则自愈（v4.12.6 新增）
+# ============================================================
+check_cloudflare_proxy_rules() {
+    log_section "9. Cloudflare 代理入口规则"
+    if [ ! -f "$BASE_DIR/scripts/cloudflare_proxy_rules.py" ]; then
+        log "  ⚠️  cloudflare_proxy_rules.py 不存在，跳过"
+        return
+    fi
+    if ! grep -q '^CF_API_TOKEN=' "$BASE_DIR/.env" 2>/dev/null; then
+        log "  ⚠️  CF_API_TOKEN 未配置，跳过 Cloudflare 规则自愈"
+        return
+    fi
+    if cd "$BASE_DIR" && python3 scripts/cloudflare_proxy_rules.py apply >> "$LOG_FILE" 2>&1; then
+        log "  ✓  Cloudflare 代理入口规则已确认"
+    else
+        log "  ❌ Cloudflare 代理入口规则修复失败，请检查 CF_API_TOKEN 权限"
+    fi
+}
+
+# ============================================================
 # 主流程
 # ============================================================
 log "===== 健康检查开始 ====="
@@ -264,6 +284,7 @@ check_log_size
 check_disk
 check_database
 check_cert
+check_cloudflare_proxy_rules
 
 log "===== 健康检查完成 ====="
 log ""

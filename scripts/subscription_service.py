@@ -14,7 +14,7 @@ Date: 2026-06-13
 
 订阅链接格式:
   - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
-    - 自动识别客户端 UA：Clash/sing-box → 7 节点，v2rayN/v2rayNG/Shadowrocket → 5 节点
+    - 自动识别客户端 UA：Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 7 节点
     - 强制控制：?client=full|standard|clash|v2rayn|shadowrocket
   - sing-box JSON: https://{CF_DOMAIN}:{SUB_PORT}/singbox/{国家代码}
   - Clash Meta YAML: https://{CF_DOMAIN}:{SUB_PORT}/clash/{国家代码}
@@ -31,9 +31,11 @@ Date: 2026-06-13
 - {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，独立优选IP)
 - {COUNTRY_CODE}-TUIC v5 (直连节点，UDP加速，仅 Clash/sing-box 显示)
 
-【v4.12.2 客户端能力适配】:
-  - Clash/sing-box/NekoBox/v2rayN/Shadowrocket：返回全部 7 节点
-  - 未知客户端：默认 5 节点，避免不明客户端解析不稳定
+【v4.12.4 客户端能力适配】:
+  - Clash/sing-box/NekoBox：返回全部 7 节点
+  - Shadowrocket：返回全部 7 节点
+  - v2rayN/v2rayNG：返回全部 7 节点；旧客户端可用 ?client=standard 手动兜底
+  - 默认返回 7 节点；旧客户端可用 ?client=standard 手动兜底
   - 自动通过 User-Agent 识别，强制控制用 ?client=full|standard|clash|v2rayn|shadowrocket
 
 【v4.12.1 流量显示增强】:
@@ -125,39 +127,49 @@ logger = get_logger('subscription_service')
 IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
 
-# [Codex] v4.12.2 客户端能力矩阵
+# [Codex] v4.12.14 客户端能力矩阵
 # 决定 /sub 端点返回哪些节点
 #   full     = 支持全部 7 节点
 #   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，作为手动兜底）
-#   unknown  = 按 standard 处理（安全降级）
+#   unknown  = 按 full 处理（项目默认 7 节点）
 CLIENT_CAPABILITIES = {
     # Clash 系（mihomo 内核支持 Reality/gRPC/TUIC/HTTPUpgrade）
     'clash-meta': 'full',
     'clash-verge': 'full',
     'clash verge': 'full',
     'clashforwindows': 'full',
+    'clash for windows': 'full',
+    'clashforandroid': 'full',
+    'clash for android': 'full',
     'clashx': 'full',
     'mihomo': 'full',
+    'mihomo-party': 'full',
     'stash': 'full',
     # sing-box 原生客户端（支持所有）
     'sing-box': 'full',
+    'singbox': 'full',
     'nekobox': 'full',
     'nekoray': 'full',
-    # [Codex] 用户确认当前客户端支持扩展协议，默认给 7 节点
+    # 用户要求保留完整 7 节点，客户端侧问题通过 URI 参数与测速口径优化处理。
     'v2rayn': 'full',
     'v2rayng': 'full',
+    'v2ray ng': 'full',
     'v2box': 'full',
     'shadowrocket': 'full',
-    # 以下客户端兼容性不确定，保守降级
-    'quantumult': 'standard',
-    'surfboard': 'standard',
-    # 浏览器/未知客户端
-    'mozilla': 'standard',
-    'chrome': 'standard',
-    'safari': 'standard',
-    'curl': 'standard',
-    'wget': 'standard',
-    'python-requests': 'standard',
+    'quantumult': 'full',
+    'quantumult x': 'full',
+    'surge': 'full',
+    'surfboard': 'full',
+    'loon': 'full',
+    'pharos': 'full',
+    'potatso': 'full',
+    # 浏览器/curl/wget 默认 full
+    'mozilla': 'full',
+    'chrome': 'full',
+    'safari': 'full',
+    'curl': 'full',
+    'wget': 'full',
+    'python-requests': 'full',
 }
 
 CLIENT_QUERY_ALIASES = {
@@ -165,6 +177,7 @@ CLIENT_QUERY_ALIASES = {
     'standard': 'standard',
     'clash': 'full',
     'clash-meta': 'full',
+    'clashforandroid': 'full',
     'mihomo': 'full',
     'singbox': 'full',
     'sing-box': 'full',
@@ -172,7 +185,11 @@ CLIENT_QUERY_ALIASES = {
     'nekoray': 'full',
     'v2rayn': 'full',
     'v2rayng': 'full',
+    'v2box': 'full',
     'shadowrocket': 'full',
+    'surge': 'full',
+    'quantumult-x': 'full',
+    'loon': 'full',
 }
 
 
@@ -182,10 +199,15 @@ def node_name(protocol, cdn=False):
     return f"{COUNTRY_CODE}-{protocol}{suffix}"
 
 
+def share_fragment(protocol, cdn=False):
+    """分享 URI 的 fragment 必须 URL 编码，避免 v2rayN 将空格等字符判为无效内容。"""
+    return urllib.parse.quote(node_name(protocol, cdn=cdn), safe='')
+
+
 def detect_client_capability(user_agent=''):
     """根据 User-Agent 判断客户端能力
     返回 'full' / 'standard' / 'unknown'
-    原则：识别不出的一律按 standard（剔除 HTTPUpgrade + TUIC），保证订阅可解析
+    原则：识别不出按 full，保持项目默认 7 节点；兼容问题用 ?client=standard 兜底
     """
     if not user_agent:
         return 'unknown'
@@ -202,7 +224,7 @@ def resolve_subscription_capability(forced='', user_agent=''):
     if forced_key in CLIENT_QUERY_ALIASES:
         return CLIENT_QUERY_ALIASES[forced_key]
     detected = detect_client_capability(user_agent)
-    return detected if detected != 'unknown' else 'standard'
+    return detected if detected != 'unknown' else 'full'
 
 
 def is_valid_ipv4(ip):
@@ -773,6 +795,8 @@ _ip_switch_fail_count = 0
 _ip_switch_cooldown_until = 0  # 冷却结束时间戳
 _IP_SWITCH_MAX_FAILS = 3
 _IP_SWITCH_COOLDOWN_SECONDS = 900  # 15分钟
+# [Trae CN] v4.12.13 迟滞阈值：新IP评分必须比当前高15%才触发切换（避免频繁切换加剧封禁）
+_IP_HYSTERESIS_THRESHOLD = 0.15
 
 def get_cdn_ip_for_protocol(protocol_key):
     """获取指定协议的CDN优选IP（被阻断自动换IP，不切换域名）
@@ -910,7 +934,22 @@ def get_cdn_ip_for_protocol(protocol_key):
         cqf = get_cdn_quality_filter()
         if scored_available:
             new_ip = scored_available[0]['ip']
-            logger.info(f"从{len(scored_available)}个候选IP中按评分选择: {new_ip} (score={scored_available[0].get('score',0):.1f})")
+            new_score = scored_available[0].get('score', 0)
+            logger.info(f"从{len(scored_available)}个候选IP中按评分选择: {new_ip} (score={new_score:.1f})")
+
+            # [Trae CN] v4.12.13 迟滞检查：新IP评分必须比当前高15%才换（避免频繁切换加剧封禁）
+            # 从原始 ips_data 中查找当前 IP 的评分（scored_available 已过滤掉 current_ip）
+            current_score = 0
+            for item in ips_data if isinstance(ips_data, list) else []:
+                if isinstance(item, dict) and item.get('ip') == current_ip:
+                    current_score = item.get('score', 0)
+                    break
+            if current_score > 0 and new_score > 0:
+                threshold = current_score * (1 + _IP_HYSTERESIS_THRESHOLD)
+                if new_score < threshold:
+                    logger.info(f"迟滞保护：新IP {new_ip}({new_score:.1f}) 未比当前 {current_ip}({current_score:.1f}) 好15%（需>{threshold:.1f}），保持当前IP")
+                    _ip_switch_fail_count = 0
+                    return current_ip
         elif cqf:
             user_probe = cqf.probe_user_network()
             ranked = cqf.filter_and_rank(available_ips, user_probe)
@@ -945,14 +984,13 @@ def get_sub_address():
 def get_cdn_optimized_domain():
     """获取优选域名（从数据库读取cdn_monitor测速选出的最优域名）
     [TRAE SOLO CN] v4.8：优选域名模式，走优化线路
+    [v4.12.19] 修复 init_db() 无返回值导致数据库读取永远失效的bug
     """
+    init_db()
     try:
-        db_path = init_db()
-        if not db_path:
-            return None
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT value FROM config WHERE key='cdn_optimized_domain'")
+        c.execute("SELECT value FROM cdn_settings WHERE key='cdn_optimized_domain'")
         row = c.fetchone()
         conn.close()
         if row and row[0]:
@@ -970,7 +1008,7 @@ def generate_all_links(capability='full'):
     - capability='full'：返回全部 7 节点（所有主流客户端）
     - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
       （手动兜底或不确定客户端降级使用）
-    - capability='unknown'：按 standard 处理，安全降级
+    - capability='unknown'：按 full 处理，保持 7 节点
     """
     links = []
 
@@ -1017,19 +1055,24 @@ def generate_all_links(capability='full'):
         'headerType': 'none'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#{node_name('VLESS-Reality')}")
+    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#{share_fragment('VLESS-Reality')}")
 
     # 2. VLESS-gRPC (直连)
+    # Shadowrocket/v2rayN Base64 URI 对 gRPC 参数名容错不一，保留标准字段并补充兼容字段。
     params = {
         'encryption': 'none',
         'type': 'grpc',
         'serviceName': 'gun',
+        'mode': 'gun',
+        'authority': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
         'security': 'tls',
         'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
+        'alpn': 'h2',
         'fp': 'chrome',
+        'allowInsecure': '1',
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:{VLESS_GRPC_PORT}?{param_str}#{node_name('VLESS-gRPC')}")
+    links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:{VLESS_GRPC_PORT}?{param_str}#{share_fragment('VLESS-gRPC')}")
 
     # 3. Trojan-TCP (直连)
     params = {
@@ -1040,7 +1083,7 @@ def generate_all_links(capability='full'):
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-    links.append(f"trojan://{TROJAN_PASSWORD}@{SERVER_IP}:{TROJAN_TCP_PORT}?{param_str}#{node_name('Trojan-TCP')}")
+    links.append(f"trojan://{TROJAN_PASSWORD}@{SERVER_IP}:{TROJAN_TCP_PORT}?{param_str}#{share_fragment('Trojan-TCP')}")
 
     # 4. VLESS-WS (CDN)
     params = {
@@ -1053,7 +1096,7 @@ def generate_all_links(capability='full'):
         'allowInsecure': '1'
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-    links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{node_name('VLESS-WS', cdn=True)}")
+    links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=True)}")
 
     # 3. VLESS-HTTPUpgrade (CDN)
     # 仅在 standard 模式（?client=standard / 老旧客户端）时剔除
@@ -1068,7 +1111,7 @@ def generate_all_links(capability='full'):
             'allowInsecure': '1'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{node_name('VLESS-HTTPUpgrade', cdn=True)}")
+        links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{share_fragment('VLESS-HTTPUpgrade', cdn=True)}")
 
     # 4. Trojan-WS (CDN)
     params = {
@@ -1081,7 +1124,7 @@ def generate_all_links(capability='full'):
         'host': cdn_sni,
     }
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-    links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{node_name('Trojan-WS', cdn=True)}")
+    links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=True)}")
 
     # 7. TUIC v5 (直连) - UDP加速，TCP+UDP双栈
     # TUIC v5 内置 TLS 1.3（QUIC 强制），不需要 Reality，不需要端口跳跃
@@ -1090,17 +1133,25 @@ def generate_all_links(capability='full'):
         params = {
             'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
             'allow_insecure': '1',
+            'allowInsecure': '1',
+            'insecure': '1',
             'alpn': 'h3',
             'congestion_control': 'bbr',
+            'reduce_rtt': '1',
             'udp_relay_mode': 'native'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-        links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT_ENV}?{param_str}#{node_name('TUIC v5')}")
+        links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT_ENV}?{param_str}#{share_fragment('TUIC-v5')}")
 
     return links
 
-def generate_singbox_config():
-    """生成完整sing-box JSON配置（含自动路由规则）"""
+def generate_singbox_config(capability='full'):
+    """生成完整sing-box JSON配置（含自动路由规则）
+
+    【v4.12.18 客户端能力适配】:
+    - capability='full'：返回全部 7 节点
+    - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
+    """
     if CDN_MODE == 'domain_default':
         vless_ws_addr = CF_DOMAIN
         vless_upgrade_addr = CF_DOMAIN
@@ -1122,6 +1173,21 @@ def generate_singbox_config():
             trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+
+    # 根据 capability 动态生成 outbounds 列表
+    _base_proxies = [
+        node_name("VLESS-Reality"),
+        node_name("VLESS-gRPC"),
+        node_name("Trojan-TCP"),
+        node_name("VLESS-WS", cdn=True),
+    ]
+    _full_extra = []
+    if capability == 'full':
+        _full_extra.append(node_name("VLESS-HTTPUpgrade", cdn=True))
+    _base_proxies.append(node_name("Trojan-WS", cdn=True))
+    if ENABLE_TUIC and capability == 'full':
+        _full_extra.append(node_name("TUIC-v5"))
+    _auto_test_proxies = _base_proxies + _full_extra
 
     config = {
         "log": {
@@ -1241,41 +1307,27 @@ def generate_singbox_config():
             }
         ],
         "outbounds": [
-            # ePS-Auto: 用户可见的节点选择器（只包含5个代理节点+direct）
-            # ⚠️ AI-SOCKS5不在此列表中，它是幕后路由出站，用户不应手动选择
+            # ePS-Auto: 用户可见的节点选择器
             # [TRAE SOLO CN] v4.12.0: ENABLE_TUIC=false时selector不含TUIC
+            # [v4.12.18] 根据 capability 动态剔除 HTTPUpgrade/TUIC
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
-                "outbounds": [
-                    node_name("VLESS-Reality"),
-                    node_name("VLESS-gRPC"),
-                    node_name("Trojan-TCP"),
-                    node_name("VLESS-WS", cdn=True),
-                    node_name("VLESS-HTTPUpgrade", cdn=True),
-                    node_name("Trojan-WS", cdn=True),
-                ] + ([node_name("TUIC v5")] if ENABLE_TUIC else []) + [
+                "outbounds": _auto_test_proxies + [
                     "ePS-Auto-Test",
                     "direct"
                 ],
                 "default": "ePS-Auto-Test"
             },
             # ePS-Auto-Test: 自动测速选优节点（urltest类型，每60秒测速一次）
-            # 全部 7 协议加入 urltest，与 Clash url-test 同步。用户要求"全部协议加入自动选择"
             {
                 "type": "urltest",
                 "tag": "ePS-Auto-Test",
-                "outbounds": [
-                    node_name("VLESS-Reality"),
-                    node_name("VLESS-gRPC"),
-                    node_name("Trojan-TCP"),
-                    node_name("VLESS-WS", cdn=True),
-                    node_name("VLESS-HTTPUpgrade", cdn=True),
-                    node_name("Trojan-WS", cdn=True),
-                ] + ([node_name("TUIC v5")] if ENABLE_TUIC else []),
+                "outbounds": _auto_test_proxies,
                 "interval": "60s",
                 "tolerance": 150,
-                "url": "http://cp.cloudflare.com/generate_204"
+                "url": "http://cp.cloudflare.com/generate_204",
+                "timeout": "5s"
             },
         ] + ([{
                 # ai-residential: 幕后路由出站，AI网站流量自动走此出站
@@ -1322,7 +1374,7 @@ def generate_singbox_config():
                     "reality": {
                         "enabled": True,
                         "public_key": REALITY_PUBLIC_KEY,
-                        "short_id": list(dict.fromkeys([REALITY_SHORT_ID, 'abcd1234']))
+                        "short_id": [REALITY_SHORT_ID]
                     }
                 }
             },
@@ -1347,7 +1399,7 @@ def generate_singbox_config():
                         "enabled": True,
                         "fingerprint": "chrome"
                     },
-                    "alpn": ["h2", "http/1.1"]
+                    "alpn": ["h2"]
                 },
                 "transport": {
                     "type": "grpc",
@@ -1408,8 +1460,8 @@ def generate_singbox_config():
                     }
                 }
             },
-            # VLESS-HTTPUpgrade (CDN)
-            {
+            # VLESS-HTTPUpgrade (CDN) - 仅 full 模式返回
+        ] + ([{
                 "type": "vless",
                 "tag": node_name("VLESS-HTTPUpgrade", cdn=True),
                 "server": vless_upgrade_addr,
@@ -1436,7 +1488,7 @@ def generate_singbox_config():
                     "path": "/vless-upgrade",
                     "host": cdn_sni
                 }
-            },
+            }] if capability == 'full' else []) + [
             # Trojan-WS (CDN)
             {
                 "type": "trojan",
@@ -1471,13 +1523,14 @@ def generate_singbox_config():
             # QUIC 内置 TLS 1.3，不需要 Reality，不需要端口跳跃
         ] + ([{
                 "type": "tuic",
-                "tag": node_name("TUIC v5"),
+                "tag": node_name("TUIC-v5"),
                 "server": SERVER_IP,
                 "server_port": TUIC_PORT_ENV,
                 "uuid": TUIC_UUID,
                 "password": TUIC_PASSWORD,
                 "congestion_control": "bbr",
                 "udp_relay": True,
+                "zero_rtt_handshake": True,
                 "tls": {
                     "enabled": True,
                     "server_name": cdn_sni,
@@ -1485,7 +1538,7 @@ def generate_singbox_config():
                     "alpn": ["h3"]
                 },
                 "connect_timeout": "5s"
-            }] if ENABLE_TUIC else []) + ([
+            }] if ENABLE_TUIC and capability == 'full' else []) + ([
             # AI-SOCKS5代理池 - 多代理自动容错切换
             # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
             {
@@ -1759,9 +1812,14 @@ def generate_singbox_config():
     return config
 
 
-def generate_clash_config():
+def generate_clash_config(capability='full'):
     """生成Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
-    
+
+    【v4.12.18 客户端能力适配】:
+    - capability='full'：返回全部 7 节点（Clash Meta/mihomo 内核）
+    - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
+      （原版 Clash/旧 Clash for Windows/ClashX 非 Meta 内核手动兜底）
+
     ⚠️ Clash Meta v1.18.0+ 支持 VLESS-Reality 协议
     Clash Verge Rev 内置 mihomo 内核，完全支持所有协议
     配置自带url-test节点组，每60秒自动测速，断线3秒内自动切换
@@ -1830,6 +1888,7 @@ def generate_clash_config():
         },
         "client-fingerprint": "chrome",
         "servername": cdn_sni,
+        "alpn": ["h2"],
         "skip-cert-verify": True
     })
     
@@ -1844,7 +1903,8 @@ def generate_clash_config():
         "udp": True,
         "network": "tcp",
         "client-fingerprint": "chrome",
-        "servername": cdn_sni,
+        "sni": cdn_sni,
+        "alpn": ["h2", "http/1.1"],
         "skip-cert-verify": True
     })
     
@@ -1864,44 +1924,47 @@ def generate_clash_config():
         "servername": cdn_sni,
         "ws-opts": {
             "path": "/vless-ws",
-            "headers": {"Host": cdn_sni},
-            "ping-interval": 90
+            "headers": {"Host": cdn_sni}
         },
         "client-fingerprint": "chrome",
+        "alpn": ["h2", "http/1.1"],
         "skip-cert-verify": True
     })
     
     # 3. VLESS-HTTPUpgrade (CDN) - Clash Meta通过ws-opts.v2ray-http-upgrade启用
-    proxies.append({
-        "name": node_name("VLESS-HTTPUpgrade", cdn=True),
-        "type": "vless",
-        "server": vless_upgrade_addr,
-        "port": VLESS_UPGRADE_PORT,
-        "uuid": VLESS_WS_UUID,
-        "tls": True,
-        "udp": True,
-        "network": "ws",
-        "multiplex": {
-            "enabled": False
-        },
-        "servername": cdn_sni,
-        "ws-opts": {
-            "path": "/vless-upgrade",
-            "headers": {"Host": cdn_sni},
-            "ping-interval": 90,
-            "v2ray-http-upgrade": True
-        },
-        "client-fingerprint": "chrome",
-        "skip-cert-verify": True
-    })
+    # standard 模式（旧 Clash 内核）不支持，仅 full 返回
+    if capability == 'full':
+        proxies.append({
+            "name": node_name("VLESS-HTTPUpgrade", cdn=True),
+            "type": "vless",
+            "server": vless_upgrade_addr,
+            "port": VLESS_UPGRADE_PORT,
+            "uuid": VLESS_WS_UUID,
+            "tls": True,
+            "udp": True,
+            "network": "ws",
+            "multiplex": {
+                "enabled": False
+            },
+            "servername": cdn_sni,
+            "ws-opts": {
+                "path": "/vless-upgrade",
+                "headers": {"Host": cdn_sni},
+                "v2ray-http-upgrade": True
+            },
+            "client-fingerprint": "chrome",
+            "alpn": ["h2", "http/1.1"],
+            "skip-cert-verify": True
+        })
     
-    # 4. Trojan-WS (CDN) - Clash Meta支持
+    # 6. Trojan-WS (CDN) - Clash Meta支持
     proxies.append({
         "name": node_name("Trojan-WS", cdn=True),
         "type": "trojan",
         "server": trojan_ws_addr,
         "port": TROJAN_WS_PORT,
         "password": TROJAN_PASSWORD,
+        "tls": True,
         "udp": True,
         "network": "ws",
         "multiplex": {
@@ -1910,8 +1973,7 @@ def generate_clash_config():
         "sni": cdn_sni,
         "ws-opts": {
             "path": "/trojan-ws",
-            "headers": {"Host": cdn_sni},
-            "ping-interval": 90
+            "headers": {"Host": cdn_sni}
         },
         "client-fingerprint": "chrome",
         "skip-cert-verify": True,
@@ -1919,33 +1981,38 @@ def generate_clash_config():
     })
     
     # 7. TUIC v5 (直连) - Clash Meta支持
-    if ENABLE_TUIC:
+    # standard 模式（旧 Clash 内核）不支持，仅 full 返回
+    if ENABLE_TUIC and capability == 'full':
         proxies.append({
-            "name": node_name("TUIC v5"),
+            "name": node_name("TUIC-v5"),
             "type": "tuic",
             "server": SERVER_IP,
             "port": TUIC_PORT_ENV,
             "uuid": TUIC_UUID,
             "password": TUIC_PASSWORD,
+            "tls": True,
             "udp": True,
             "sni": cdn_sni,
+            "alpn": ["h3"],
             "skip-cert-verify": True,
             "congestion-control": "bbr",
-            "reduce-rtt": True
+            "reduce-rtt": True,
+            "udp-relay-mode": "native"
         })
     
     proxy_names = [p["name"] for p in proxies]
-    # 全部 7 协议加入 url-test 自动测速，用户要求"全部协议加入自动选择且稳定不反复切换"
-    # Reality 走 xtls-rprx-vision 流控，延迟最低；TUIC v5 走 QUIC/UDP，url-test 发 HTTP 请求也能通过
-    # 稳定性靠 tolerance=150 + interval=60 + lazy=false 保证（详见 AGENTS.md Clash 订阅生成铁律）
+    # auto_proxy_names 根据当前 proxies 动态生成，剔除 standard 模式下不存在的节点
     auto_proxy_names = [
         node_name("VLESS-Reality"),
         node_name("VLESS-gRPC"),
         node_name("Trojan-TCP"),
         node_name("VLESS-WS", cdn=True),
-        node_name("VLESS-HTTPUpgrade", cdn=True),
-        node_name("Trojan-WS", cdn=True),
-    ] + ([node_name("TUIC v5")] if ENABLE_TUIC else [])
+    ]
+    if capability == 'full':
+        auto_proxy_names.append(node_name("VLESS-HTTPUpgrade", cdn=True))
+    auto_proxy_names.append(node_name("Trojan-WS", cdn=True))
+    if ENABLE_TUIC and capability == 'full':
+        auto_proxy_names.append(node_name("TUIC-v5"))
     
     config = {
         "mixed-port": 7890,
@@ -2009,6 +2076,17 @@ def create_app():
 
     app = Flask(__name__)
 
+    @app.after_request
+    def add_cors_and_security_headers(response):
+        """统一添加CORS和安全相关响应头，避免各端点重复设置
+        [v4.12.19] 新增CORS支持，解决浏览器/在线订阅工具跨域问题
+        """
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Max-Age'] = '86400'
+        return response
+
     @app.route('/')
     def home():
         # 获取当月流量统计
@@ -2050,8 +2128,8 @@ def create_app():
             <div class="sub-box">
                 <p><strong>🔗 Base64订阅链接（自动适配客户端）</strong></p>
                 <p class="sub-link">https://{server}:{port}/sub/{country}</p>
-                <p class="info">- Clash Meta / sing-box / NekoBox：返回 7 节点（含 VLESS-HTTPUpgrade + TUIC v5）</p>
-                <p class="info">- v2rayN / v2rayNG / Shadowrocket：返回 5 节点（剔除 HTTPUpgrade + TUIC，自动识别）</p>
+                <p class="info">- Clash Meta / sing-box / NekoBox / v2rayN / v2rayNG / Shadowrocket：返回 7 节点（保留完整协议）</p>
+                <p class="info">- Shadowrocket CONNECT/HTTP 测速更接近真实可用性；ICMP 仅作裸线路参考</p>
                 <p class="info">- 强制 7 节点：<code>/sub/{country}?client=full</code></p>
                 <p class="info">- 强制 5 节点：<code>/sub/{country}?client=standard</code></p>
             </div>
@@ -2059,11 +2137,13 @@ def create_app():
                 <p><strong>📦 sing-box JSON配置（含自动路由）</strong></p>
                 <p class="sub-link">https://{server}:{port}/singbox/{country}</p>
                 <p class="info">（导入后AI流量自动走SOCKS5，无需手动选择）</p>
+                <p class="info">- 老旧客户端兼容：<code>/singbox/{country}?client=standard</code>（5节点）</p>
             </div>
             <div class="sub-box">
                 <p><strong>⚔️ Clash Meta 配置（含 url-test 自动测速）</strong></p>
                 <p class="sub-link">https://{server}:{port}/clash/{country}</p>
-                <p class="info">（Clash Verge Rev / Clash for Windows 适用）</p>
+                <p class="info">（Clash Verge Rev / mihomo-party / Clash Nyanpasu 适用）</p>
+                <p class="info">- 老旧客户端兼容：<code>/clash/{country}?client=standard</code>（5节点，剔除TUIC/HTTPUpgrade）</p>
             </div>
             <div class="sub-box">
                 <p><strong>📈 流量查询（所有客户端通用）</strong></p>
@@ -2167,62 +2247,58 @@ def create_app():
 
         【客户端能力适配】:
         - 根据 User-Agent 自动判断客户端能力
-        - Clash / v2rayN / Shadowrocket 等已确认支持客户端 → 返回 7 节点（full）
-        - 不确定兼容性的客户端 → 返回 5 节点（standard，剔除 HTTPUpgrade + TUIC）
+        - Clash / sing-box / NekoBox / v2rayN / Shadowrocket 等已确认支持客户端 → 返回 7 节点（full）
+        - 默认返回 7 节点；不确定兼容性的客户端可用 ?client=standard 手动兜底
         - ?client=full / ?client=clash 强制返回 7 节点
         - ?client=standard 强制返回 5 节点
+        【v4.12.19】添加异常保护，避免配置生成失败返回HTML 500
         """
-        ua = request.headers.get('User-Agent', '')
-        forced = request.args.get('client', '').lower().strip()
-        capability = resolve_subscription_capability(forced, ua)
+        try:
+            ua = request.headers.get('User-Agent', '')
+            forced = request.args.get('client', '').lower().strip()
+            capability = resolve_subscription_capability(forced, ua)
 
-        links = generate_all_links(capability=capability)
-        if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
-            for sub_url in EXTERNAL_SUBS.split('|'):
-                sub_url = sub_url.strip()
-                if sub_url:
-                    try:
-                        req = urllib.request.Request(sub_url, headers={'User-Agent': 'Mozilla/5.0'})
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            raw = resp.read().decode('utf-8').strip()
-                            try:
-                                padded_raw = raw + '=' * (-len(raw) % 4)
-                                decoded = base64.b64decode(padded_raw).decode('utf-8')
-                                links.extend([line for line in decoded.split('\n') if line.strip()])
-                            except Exception:
-                                links.append(raw)
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch external sub {sub_url}: {e}")
+            links = generate_all_links(capability=capability)
+            if EXTERNAL_SUBS and EXTERNAL_SUBS.strip():
+                for sub_url in EXTERNAL_SUBS.split('|'):
+                    sub_url = sub_url.strip()
+                    if sub_url:
+                        try:
+                            req = urllib.request.Request(sub_url, headers={'User-Agent': 'Mozilla/5.0'})
+                            with urllib.request.urlopen(req, timeout=5) as resp:
+                                raw = resp.read().decode('utf-8').strip()
+                                try:
+                                    padded_raw = raw + '=' * (-len(raw) % 4)
+                                    decoded = base64.b64decode(padded_raw).decode('utf-8')
+                                    links.extend([line for line in decoded.split('\n') if line.strip()])
+                                except Exception:
+                                    links.append(raw)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch external sub {sub_url}: {e}")
 
-        # [TRAE SOLO CN] v4.12.1 在 Base64 头部插入流量信息行（注释形式）
-        # 注释行以 # 开头，部分客户端（如 NekoBox、Clash for Windows）会显示第一个非 URI 行
-        # v2rayN 不解析此注释，但 Clash 系客户端通过 subscription-userinfo header 显示流量
-        traffic = get_traffic_stats()
-        total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
-        traffic_gb = round(traffic['bytes_used'] / (1024**3), 2)
-        total_gb = round(total_bytes / (1024**3), 0)
-        info_line = f"# {get_country_name()}订阅 | 当月流量: {traffic_gb} GB / {int(total_gb)} GB | 月份: {traffic['month']} | 每月{traffic['reset_day']}号归零 | 共 {len(links)} 个节点"
-        sub_text = info_line + '\n' + '\n'.join(links)
-        sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
+            traffic = get_traffic_stats()
+            total_bytes = 900 * 1024 * 1024 * 1024
+            traffic_gb = round(traffic['bytes_used'] / (1024**3), 2)
+            total_gb = round(total_bytes / (1024**3), 0)
+            sub_text = '\n'.join(line for line in links if line.strip() and not line.lstrip().startswith('#'))
+            sub_b64 = base64.b64encode(sub_text.encode('utf-8')).decode('utf-8')
 
-        userinfo = f"upload=0; download={traffic['bytes_used']}; total={total_bytes}; expire=0"
-        # [TRAE SOLO CN] v4.12.1 修复：Content-Disposition 不能含中文字符（HTTP header latin-1 编码限制）
-        # 使用 RFC 5987 标准：filename*=UTF-8''URL编码（支持中文文件名）
-        import urllib.parse
-        sub_name_cn = f"{get_country_name()}_{traffic_gb}GB_{int(total_gb)}GB订阅"
-        sub_name_encoded = urllib.parse.quote(sub_name_cn, safe='')
-        sub_name_ascii = f"{COUNTRY_CODE}_{traffic_gb}GB_sub"
-        profile_title = f"{get_country_name()}订阅 ({traffic_gb}/{int(total_gb)}GB)"
-        # profile-title 用 ASCII 安全字符，兼容所有客户端
-        profile_title_ascii = f"{COUNTRY_CODE} subscription ({traffic_gb}/{int(total_gb)}GB)"
-        return Response(sub_b64, mimetype='text/plain',
-                        headers={
-                            'subscription-userinfo': userinfo,
-                            # RFC 5987: filename*=UTF-8''<url-encoded> 兼容中文文件名（现代浏览器）
-                            'Content-Disposition': f"attachment; filename=\"{sub_name_ascii}.txt\"; filename*=UTF-8''{sub_name_encoded}.txt",
-                            'profile-update-interval': '6',
-                            'profile-title': profile_title_ascii,
-                        })
+            userinfo = f"upload=0; download={traffic['bytes_used']}; total={total_bytes}; expire=0"
+            sub_name_cn = f"{get_country_name()}"
+            sub_name_encoded = urllib.parse.quote(sub_name_cn, safe='')
+            sub_name_ascii = f"{COUNTRY_CODE}.txt"
+            profile_title = urllib.parse.quote(f"{get_country_name()}", safe='')
+            return Response(sub_b64, mimetype='text/plain',
+                            headers={
+                                'subscription-userinfo': userinfo,
+                                'Content-Disposition': f"attachment; filename=\"{sub_name_ascii}\"; filename*=UTF-8''{sub_name_encoded}.txt",
+                                'profile-update-interval': '6',
+                                'profile-title': profile_title,
+                                'profile-web-page-url': f'https://{CF_DOMAIN}:{SUB_PORT}/info',
+                            })
+        except Exception as e:
+            logger.error(f"sub订阅生成失败: {e}")
+            return Response("", mimetype='text/plain', status=500)
 
     @app.route(f'/singbox/{COUNTRY_CODE}')
     @app.route(f'/singbox/{COUNTRY_CODE.lower()}')
@@ -2230,20 +2306,38 @@ def create_app():
     def get_singbox_config():
         """完整sing-box JSON配置（含自动路由规则）
         ⚠️ 禁止加token认证！同/sub路由，直接访问。
+        【v4.12.19】支持 ?client=full|standard 和 UA 自动检测，补齐RFC5987中文文件名
         """
-        config = generate_singbox_config()
-        config_json = json.dumps(config, indent=2, ensure_ascii=False)
-        traffic = get_traffic_stats()
-        total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
-        userinfo = f"upload=0; download={traffic['bytes_used']}; total={total_bytes}; expire=0"
-        return Response(
-            config_json,
-            mimetype='application/json; charset=utf-8',
-            headers={
-                'Content-Disposition': 'attachment; filename=singbox-config.json',
-                'subscription-userinfo': userinfo
-            }
-        )
+        try:
+            ua = request.headers.get('User-Agent', '')
+            forced = request.args.get('client', '').lower().strip()
+            capability = resolve_subscription_capability(forced, ua)
+            config = generate_singbox_config(capability=capability)
+            config_json = json.dumps(config, indent=2, ensure_ascii=False)
+            traffic = get_traffic_stats()
+            bytes_used = traffic['bytes_used']
+            total_bytes = 900 * 1024 * 1024 * 1024
+            total_gb = 900
+            userinfo = f"upload=0; download={bytes_used}; total={total_bytes}; expire=0"
+            sub_name_ascii = f"{COUNTRY_CODE}.json"
+            sub_name_cn = f"{get_country_name()}"
+            sub_name_encoded = urllib.parse.quote(sub_name_cn, safe='')
+            profile_title = urllib.parse.quote(f"{get_country_name()}", safe='')
+            return Response(
+                config_json,
+                mimetype='application/json',
+                headers={
+                    'subscription-userinfo': userinfo,
+                    'Content-Disposition': f'attachment; filename="{sub_name_ascii}"; filename*=UTF-8\'\'{sub_name_encoded}',
+                    'profile-update-interval': '6',
+                    'profile-title': profile_title,
+                    'profile-web-page-url': f'https://{CF_DOMAIN}:{SUB_PORT}/info',
+                }
+            )
+        except Exception as e:
+            logger.error(f"singbox配置生成失败: {e}")
+            return Response(json.dumps({"error": "config generation failed"}),
+                            mimetype='application/json', status=500)
 
     @app.route(f'/clash/{COUNTRY_CODE}')
     @app.route(f'/clash/{COUNTRY_CODE.lower()}')
@@ -2252,22 +2346,39 @@ def create_app():
         """Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
         ⚠️ 禁止加token认证！同/sub路由，直接访问。
         ⚠️ Clash Meta v1.18.0+ 支持 Reality 协议
+        【v4.12.19】支持 ?client= 参数/UA检测，补alpn/tls/udp-relay，text/yaml，异常保护
         """
-        import yaml
-        config = generate_clash_config()
-        config_yaml = yaml.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        traffic = get_traffic_stats()
-        bytes_used = traffic['bytes_used']
-        total_bytes = 900 * 1024 * 1024 * 1024  # 900GB 月流量套餐
-        userinfo = f"upload=0; download={bytes_used}; total={total_bytes}; expire=0"
-        sub_name = f"{get_country_name()}订阅.yaml"
-        return Response(
-            config_yaml,
-            mimetype='text/plain; charset=utf-8',
-            headers={
-                'subscription-userinfo': userinfo
-            }
-        )
+        try:
+            import yaml
+            ua = request.headers.get('User-Agent', '')
+            forced = request.args.get('client', '').lower().strip()
+            capability = resolve_subscription_capability(forced, ua)
+            config = generate_clash_config(capability=capability)
+            config_yaml = yaml.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            traffic = get_traffic_stats()
+            bytes_used = traffic['bytes_used']
+            total_bytes = 900 * 1024 * 1024 * 1024
+            total_gb = 900
+            userinfo = f"upload=0; download={bytes_used}; total={total_bytes}; expire=0"
+            sub_name_ascii = f"{COUNTRY_CODE}.yaml"
+            sub_name_cn = f"{get_country_name()}"
+            sub_name_encoded = urllib.parse.quote(sub_name_cn, safe='')
+            profile_title = urllib.parse.quote(f"{get_country_name()}", safe='')
+            return Response(
+                config_yaml,
+                mimetype='text/yaml',
+                headers={
+                    'subscription-userinfo': userinfo,
+                    'Content-Disposition': f'attachment; filename="{sub_name_ascii}"; filename*=UTF-8\'\'{sub_name_encoded}',
+                    'profile-update-interval': '6',
+                    'profile-title': profile_title,
+                    'profile-web-page-url': f'https://{CF_DOMAIN}:{SUB_PORT}/info',
+                }
+            )
+        except Exception as e:
+            logger.error(f"clash配置生成失败: {e}")
+            return Response(f"# config generation failed: {e}",
+                            mimetype='text/plain', status=500)
 
     @app.route('/api/traffic')
     def traffic_api():
@@ -2637,10 +2748,22 @@ def create_app():
                     if ip:
                         health_checks[name] = _health_monitor.check_ip(ip)
 
+            # [Trae CN] v4.12.13 启用故障切换控制器状态查询（只读，不触发切换）
+            if _failover_controller is None and _health_monitor:
+                try:
+                    from cdn_quality_filter import CdnFailoverController
+                    _failover_controller = CdnFailoverController(
+                        db_path=DB_PATH, health_monitor=_health_monitor)
+                except Exception:
+                    pass
+
             # 故障切换控制器状态
             failover_status = None
             if _failover_controller:
-                failover_status = _failover_controller.get_status()
+                try:
+                    failover_status = _failover_controller.get_status()
+                except Exception:
+                    failover_status = None
 
             # 冷却池IP
             cooldown_ips = [c['ip'] for c in failover_status['cooldown_pool']] if failover_status else []
