@@ -1,3 +1,36 @@
+## [4.14.0] - 2026-06-27
+- [Trae CN+多智能体协同] **协议栈精简优化 7→6 节点**：经 anyTLS 协议可行性调研（联网实时调研 + 架构/稳定性/实用性三角色并行评估），确认 sing-box 1.12+ 原生支持 anyTLS 且用户全用 sing-box 客户端，决定精简协议栈。
+- [Trae CN] **删除 VLESS-HTTPUpgrade-CDN**：故障最多（v4.13.3 才修复 bad host 问题）+ 兼容最窄（仅 Clash Meta/sing-box/NekoBox 支持，v2rayN/v2rayNG 不支持）+ HTTPUpgrade 握手方式特殊（期望 `Upgrade: websocket` 但不带 `Sec-WebSocket-Key`，测试困难）。端口 2053 释放。
+- [Trae CN] **删除 TUIC v5**：UDP 易被封 + QUIC 长流量被 QoS + VPS 提供商封非标准 UDP 端口（v4.13.0 WARP 解锁因此失败）。`ENABLE_TUIC=false` 默认关闭，`config_generator.py` 完全删除 TUIC 入站块（不仅是默认关闭）。`TUIC_PORT`/`TUIC_UUID`/`TUIC_PASSWORD` 变量保留仅为兼容旧 .env。
+- [Trae CN] **新增 anyTLS（端口 2096）**：sing-box 1.12+ 原生支持，缓解 TLS-in-TLS 指纹检测，配置极简（无 path/Host/serviceName）。端口 2096 是 CF CDN 支持端口之一，替换已下线的 2053。`ANYTLS_PASSWORD` 与 `TROJAN_PASSWORD` 独立（避免一处泄露影响多协议），空值时降级用 `TROJAN_PASSWORD` 向后兼容。anyTLS 直连源站不走 CDN，使用主域名证书（不需要 sub-* 子域名）。
+- [Trae CN] **三处生成函数同步更新**：`subscription_service.py` 的 Base64 URI / sing-box JSON / Clash YAML 三处生成函数全部同步加 anyTLS 节点 + 删 HTTPUpgrade 和 TUIC 节点。`CLIENT_CAPABILITIES` 中 `full`/`standard` 等同（HTTPUpgrade/TUIC 已下线，无差别），保留 `?client=standard` 参数兼容旧客户端。
+- [Trae CN] **辅助脚本端口/协议同步更新**：`install.sh` `setup_iptables_traffic_counter` 删 2053 规则加 2096 规则；`verify_installation` 端口列表改为 `443 8443 2083 2087 2096`；`setup_tuic_firewall` 新增 `ENABLE_TUIC` 检查（false 时跳过）。`health_check.sh` + `diagnose.sh` 端口列表同步更新，TUIC 检查改为条件性。
+- [Trae CN+多智能体QA审查] **P0 问题修复**：多智能体审查（架构/稳定性/实用性三角色并行 + 防复发/QA 补充审查）发现 4 个 WARN，其中 P0 级 2 个全部修复：
+  - **WARN-1（P0）**：`config_generator.py` 保留了条件性 TUIC 入站块（`if enable_tuic`），但订阅端完全删除了 TUIC，导致 `ENABLE_TUIC=true` 时服务端有入站但客户端无节点。**修复**：完全删除 TUIC 入站块。
+  - **WARN-2（P0）**：生产代码中 2053/HTTPUpgrade 残留（`cdn_monitor.py` / `cloudflare_proxy_rules.py` / `diagnose_disconnect.py` / `subscription_service.py` 共 4 个文件 6 处残留）。**修复**：全部清理。
+  - **WARN-3**：`.env.example` 缺失（误报，文件实际存在）。
+  - **WARN-4**：文档未同步（README.md / project_snapshot.md / docs/technical/technical-doc.md 仍说 7 协议）—— 本条本次同步更新。
+- [Trae CN] **部署验证**：部署到 JP/SG/HK 三台服务器，6 个 Python 脚本远程 py_compile 通过，`sing-box check` 通过，端口 443/8443/2083/2087/2096 全监听，三台订阅端点 HTTP 200 + anytls 节点 1 + 总节点 6（完全符合 v4.14.0 期望）。
+- [Trae CN] **AGENTS.md 铁律扩展**：第 3 条"订阅层与服务端层必须同时部署且 Host 字段同步修改"扩展为"协议增删必须订阅层 + 服务端层 + 辅助脚本三处同步"，新增第 4 条"verify_installation 必须覆盖所有入站端口"已在 v4.13.x 记录，本次确认覆盖 2096。
+
+## [4.13.3] - 2026-06-27
+- [Trae CN] **修复 CDN 节点连接失败**：用户反馈"cdn连接不上，订阅也还是有问题"。诊断发现 v4.13.2 只改了**订阅层**（subscription_service.py）让客户端 CDN 节点 server/Host 用 sub-* 子域名，但**服务端层**（config_generator.py）的 sing-box config.json 中 CDN 入站（vless-ws/vless-upgrade/trojan-ws）的 `headers.Host` 和 `host` 字段仍用主域名 `CF_DOMAIN`。sing-box 期望 Host 是主域名（如 `jp.290372913.xyz`），客户端发送的是 sub-* 子域名（如 `sub-jp.290372913.xyz`），Host 校验失败报 `bad host` 拒绝连接。
+- [Trae CN] **代码修复**：`config_generator.py` 新增 `build_sub_domain()` 函数和 `cdn_sub_domain` 变量，三处 CDN 入站（vless-ws 的 `headers.Host`、vless-upgrade 的 `host`、trojan-ws 的 `headers.Host`）从 `cf_domain or server_ip` 改为 `cdn_sub_domain`，与订阅配置保持一致。
+- [Trae CN] **部署验证**：部署 config_generator.py 到 JP/SG/HK 三台服务器，重新生成 config.json 并重启 singbox。三台服务器 VLESS-WS(8443) + VLESS-HTTPUpgrade(2053) + Trojan-WS(2083) 全部 `101 Switching Protocols` 握手成功。sing-box 日志中 `bad host` 错误已消失（修复后残留的 bad host 错误都来自 CF 代理 IP 的旧客户端请求，Host 是主域名）。
+- [Trae CN] **教训铁律**：**修改订阅层必须同步修改服务端层 config_generator.py**——订阅层改了客户端发送的 Host，服务端 sing-box config.json 的入站 headers.Host/host 也必须同步改，否则 sing-box Host 校验失败拒绝连接。这正是 AGENTS.md 之前已记录的"修改 subscription_service.py 必须同步修改 config_generator.py（订阅层与服务端层）"铁律，但 v4.13.2 执行时遗漏了。
+## [4.13.2] - 2026-06-26
+- [Trae CN+多智能体审查] **修复 v4.13.1 遗留 P0 问题**：4个并行审查子代理（架构/部署/防复发/文档）发现 v4.13.1 只改了证书层（cert_manager.py SAN），但**订阅服务代码未改**——`config.py` 的 `get_sub_domain()` 仍返回主域名 `CF_DOMAIN` 而非 sub-* 子域名，导致首页订阅链接、三端点 `profile-web-page-url` header、install.sh 安装提示全部仍走 CF 代理被 403 拦截。用户复制订阅链接还是会被 DDoS L7 拦截，问题会再次出现。
+- [Trae CN] **代码修复**：(1) `config.py` `get_sub_domain()` 改为从主域名生成 sub-* 子域名（如 `jp.290372913.xyz` → `sub-jp.290372913.xyz`）；(2) `subscription_service.py` 首页4处订阅链接改用 `get_sub_domain()`、三端点 `/clash` `/sub` `/singbox` 的 `profile-web-page-url` header 改用 `get_sub_domain()`、降级版 `get_sub_domain()` 同步修复；(3) `install.sh` 安装完成提示改用 `sub-${CF_DOMAIN}` 子域名。
+- [Trae CN] **部署验证**：部署 config.py + subscription_service.py 到 JP/SG/HK 三台服务器，重启 singbox-sub，15项验证（3服务器 × 首页订阅链接用sub-* + 首页不用主域名 + /clash+/sub+/singbox 的 profile-web-page-url 用 sub-*）全部通过。
+- [Trae CN] **文档矛盾修复**：(1) AGENTS.md 第11条与第16条 proxied 矛盾——第11条说"proxied=false 致命绝对不能改"，第16条说"sub-* 必须 proxied=false"，修正为按用途区分（CDN节点 proxied=true / 订阅端点 sub-* proxied=false）；(2) AI_DEBUG_HISTORY.md v4.12.20 教训部分标注推翻（eoff 和多轮测试两条铁律已划线标注）；(3) CHANGELOG.md v4.12.20 条目顶部标注推翻；(4) README.md 版本号从 v4.12.17 更新到 v4.13.2；(5) project_snapshot.md eoff override 描述标注为"兜底降级，非订阅端点主路径"。
+
+## [4.13.1] - 2026-06-26
+- [Trae CN] **订阅端点架构级修复（彻底解决CF 403反复复发）**：经CF GraphQL Analytics查询确认拦截源是 `l7ddos`（基于ML的动态保护系统），并通过API实测验证了3种绕过方案全部被拒（`sensitivity_level=off`、skip `ddos_l7` phase、skip `ddosL7` product）。**v4.12.20的eoff方案是假阳性**——3轮72项测试在CF规则传播延迟窗口内（~1-2小时）通过，传播完成后ML重新激活导致403再次复发。
+- [Trae CN] **架构级解决方案**：创建 `sub-jp.290372913.xyz`、`sub-sg.290372913.xyz`、`sub-hk.290372913.xyz` 三个 gray cloud（`proxied=false`）DNS记录直连源站IP，订阅端点改走 sub-* 子域名完全绕过CF代理层。CF DDoS L7 ML系统只在CF代理路径生效，gray cloud直连不经过CF边缘节点，从根本上避开拦截。
+- [Trae CN] **证书SAN扩展**：`cert_manager.py` 的 `generate_self_signed_cert()` 和 `request_cf_ssl_certificate()` 同步更新，SAN 同时包含主域名（如 `jp.290372913.xyz`）和订阅子域名（如 `sub-jp.290372913.xyz`），客户端访问 sub-* 域名时证书校验通过。
+- [Trae CN] **验证**：3轮108项回归测试（JP/SG/HK × /clash+/sub+/singbox × Clash Meta/CFW/v2rayN/sing-box 4种UA）全部PASS，三个 sub-* 域名订阅均稳定返回 HTTP 200；对比 `jp.290372913.xyz:2087/clash`（走CF代理）仍返回 HTTP 403，证明 sub-* 直连方案是唯一稳定路径。
+- [Trae CN] **病历本修正**：v4.12.20 条目"eoff是正确方案"已标注 `⚠️ 已被v4.13.1推翻`；AGENTS.md 第16条禁忌更新为"eoff不可靠，必须用sub-*直连子域名绕过CF代理层"。
+
 ## [4.13.0] - 2026-06-26
 - [Trae CN+多智能体QA] **新增Cloudflare WARP DNS解锁功能**：零成本原生解锁AI+流媒体（OpenAI/ChatGPT/Gemini/Claude/TikTok/Netflix），使用sing-box内置WireGuard直连Cloudflare WARP住宅IP，无额外进程、低延迟、完全免费。
 - [Trae CN+多智能体QA] **精准分流**：AI网站+流媒体(TikTok/Netflix)走WARP住宅IP解锁；X/Twitter/Grok、Google/YouTube及其他所有网站走服务器本地IP直连，不影响速度。
@@ -19,6 +52,7 @@
 - [Trae CN] **清理**：删除5个临时审计脚本；移除不存在的docs/plans/和docs/vision/目录声明。
 
 ## [4.12.20] - 2026-06-26
+> ⚠️ **已被 v4.13.1 推翻**：eoff 方案是传播延迟窗口内假阳性，正确方案是 sub-* gray cloud 直连绕过（见 v4.13.1 条目）。下文保留作为历史记录。
 - [Trae CN LOOP+多智能体] **彻底修复Cloudflare 403拦截（纠正v4.12.12错误结论）**：经GitHub开源方案调研和CF API实际验证，免费计划CF不允许在skip规则中skip `ddos_l7` phase（API返回"skip action parameter phase 'ddos_l7' is not authorized"）。正确方案是：(1)skip规则覆盖http_request_firewall_managed、http_request_sbfm、http_ratelimit三个安全阶段；(2)在ddos_l7 phase entrypoint创建`sensitivity_level=eoff` override放行代理端口流量。
 - [Trae CN LOOP+多智能体] **修正病历本错误**：v4.12.12记录"删除eoff override即可恢复"是错误结论——当时恢复正常是因为删除override后规则传播延迟导致的短暂放行，而非eoff本身有问题。eoff override + 正确的skip规则组合才是稳定方案。
 - [Trae CN LOOP+多智能体] **CDN WebSocket直连验证**：使用直连CF IP+正确Host头+SNI的方式验证CDN节点，VLESS-WS-CDN(8443)和Trojan-WS-CDN(2083)均返回101 Switching Protocols握手成功；VLESS-HTTPUpgrade-CDN(2053)返回404是源站路径配置问题（预配置问题，非CF拦截）。

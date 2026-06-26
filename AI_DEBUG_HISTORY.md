@@ -1,6 +1,115 @@
+## 最新排查（2026-06-27 v4.14.0）[Trae CN+多智能体协同+QA审查]
+
+### 协议栈精简优化 — 多智能体审查发现 P0 级"服务端有入站但客户端无节点"问题
+- **背景**: 用户调研 anyTLS 协议可行性，要求精简 7 协议栈。经联网实时调研 + 架构/稳定性/实用性三角色并行评估，决定删 VLESS-HTTPUpgrade-CDN（故障最多）+ TUIC v5（UDP 易被封）+ 加 anyTLS（sing-box 1.12+ 原生）。
+- **首轮修改**: 主代理完成代码修改 + 部署 + 验证，三台服务器 6 节点 + anytls 1 + HTTP 200 全部通过。
+- **多智能体审查发现 P0 问题**:
+  1. **WARN-1（P0）服务端有入站但客户端无节点**: `config_generator.py` 保留了 `if enable_tuic:` 条件性 TUIC 入站块（之前是为兼容旧 .env 设计），但订阅端 `subscription_service.py` 已完全删除 TUIC 节点。导致 `ENABLE_TUIC=true` 时服务端监听 TUIC 端口但客户端订阅无该节点，用户拿到订阅却无法用 TUIC——配置不一致。
+  2. **WARN-2（P0）生产代码 2053/HTTPUpgrade 残留**: 4 个文件 6 处残留——`cdn_monitor.py` 的 `VLESS_UPGRADE_PORT` import + CDN IP 分配逻辑；`cloudflare_proxy_rules.py` 的 `PROXY_PORTS=[2087,8443,2053,2083]` + `PROXY_PATHS` 含 `/vless-upgrade`；`diagnose_disconnect.py` 的 `PROTOCOLS` 字典含 `vless-upgrade`；`subscription_service.py` 的 `CDN_PROTOCOL_KEYS` 含 `vless_upgrade_cdn_ip` + `generate_clash_config` 的 `vless_upgrade_addr` 变量 + `cdn_status_api` 的 `vless-httpupgrade` 协议条目。残留代码不会立即报错但会污染数据库（cdn_monitor 仍会为已下线协议分配 IP）和诊断输出。
+  3. **WARN-3（误报）**: `.env.example` 缺失——实际文件存在，子代理路径检查方式有问题。
+  4. **WARN-4（待修复）**: 文档未同步——README.md / project_snapshot.md / docs/technical/technical-doc.md 仍说 7 协议。
+- **根因**: 首轮修改时主代理聚焦核心三文件（config_generator.py / subscription_service.py / install.sh），辅助脚本和订阅服务的边缘函数（CDN 状态查询、CDN IP 分配）未同步清理。多智能体审查的并行子代理从不同角度（架构/稳定性/实用性/防复发/QA）扫描才发现这些残留。
+- **修复**:
+  1. `config_generator.py`: 完全删除 TUIC 入站块（不再条件性保留），更新末尾 print 语句移除 TUIC v5 提及。
+  2. `cdn_monitor.py`: 删除 `VLESS_UPGRADE_PORT` import 和 fallback 定义；CDN IP 分配从 3 协议缩减为 2 协议（VLESS-WS / Trojan-WS）；删除 `vless_upgrade_cdn_ip` 的 DB INSERT 语句。
+  3. `cloudflare_proxy_rules.py`: `PROXY_PORTS = [2087, 8443, 2083]`（删除 2053，anyTLS 直连不加 2096）；`PROXY_PATHS` 删除 `/vless-upgrade`。
+  4. `diagnose_disconnect.py`: `PROTOCOLS` 字典删除 `vless-upgrade` 条目。
+  5. `subscription_service.py`: `CDN_PROTOCOL_KEYS` 删除 `vless_upgrade_cdn_ip`；`generate_clash_config` 删除 `vless_upgrade_addr` 变量及所有赋值；`cdn_status_api` 删除 `vless-httpupgrade` 协议条目。
+- **验证**: 6 个 Python 脚本 py_compile 全部通过；部署 JP/SG/HK 三台服务器，远程 py_compile 通过，`sing-box check` 通过，端口 443/8443/2083/2087/2096 全监听，订阅端点 HTTP 200 + anytls 节点 1 + 总节点 6。
+- **教训（铁律）**:
+  - **协议增删必须订阅层 + 服务端层 + 辅助脚本三处同步**: 不能只改核心三文件（config_generator.py / subscription_service.py / install.sh），辅助脚本（cdn_monitor.py / cloudflare_proxy_rules.py / diagnose_disconnect.py）和订阅服务的边缘函数（CDN 状态查询、CDN IP 分配）也必须同步清理，否则残留代码会污染数据库和诊断输出。AGENTS.md 第 3 条已扩展为"协议增删必须订阅层 + 服务端层 + 辅助脚本三处同步"。
+  - **条件性保留废弃协议入站是反模式**: 之前为"兼容旧 .env"在 `config_generator.py` 保留 `if enable_tuic:` 条件性 TUIC 入站块，但订阅端完全删除了 TUIC 节点，导致 `ENABLE_TUIC=true` 时服务端有入站但客户端无节点——配置不一致。**废弃协议必须完全删除入站块**，不能条件性保留。如需恢复，回退到旧版本。
+  - **多智能体审查必须覆盖辅助脚本**: 主代理聚焦核心三文件时容易遗漏辅助脚本。多智能体审查的子代理必须明确扫描辅助脚本和边缘函数，不能只看核心文件。
+  - **anyTLS 端口选择**: anyTLS 直连源站不走 CDN，但仍选 CF CDN 支持端口（2096）以便未来如需走 CDN 时无需改端口。替换已下线的 2053（HTTPUpgrade）。
+
+---
+
+## 最新排查（2026-06-27 v4.13.3）[Trae CN]
+
+### CDN 节点连接失败 — 订阅层改了 sub-* 但服务端层 config_generator.py 没改，sing-box Host 校验失败
+- **症状**: 用户反馈"cdn连接不上，订阅也还是有问题啊"。v4.13.2 部署后订阅端点已正常（三台 /clash 返回 200），但 CDN 节点（VLESS-WS/HTTPUpgrade/Trojan-WS）无法连接。
+- **诊断过程**:
+  1. **外部连通性测试**：sub-* DNS 解析正常（直连源站 IP），订阅端点三台全部 200，但 CDN 节点 WS 握手测试返回 400（用错误 path）或 404（用正确 path）。
+  2. **SSH 查看 sing-box 日志**（关键）：三台服务器日志全部报 `ERROR inbound/vless[vless-upgrade]: process connection from 220.168.240.26:xxxx: bad host: sub-jp.290372913.xyz`。用户 IP 220.168.240.26 正在访问，但 sing-box 拒绝连接。
+  3. **检查 config.json**：sing-box config.json 中 CDN 入站的 `headers.Host`（vless-ws/trojan-ws）和 `host`（vless-upgrade）字段全部是主域名 `jp.290372913.xyz`，但客户端发送的 Host 是 `sub-jp.290372913.xyz`（因为 v4.13.2 订阅配置改了）。**Host 不匹配 → sing-box 报 "bad host" 拒绝连接**。
+- **根因**: v4.13.2 只改了**订阅层**（subscription_service.py + config.py）让客户端拿到的 CDN 节点 server/Host 是 sub-* 子域名，但**没有同步修改服务端层**（config_generator.py）的 sing-box config.json 中 CDN 入站的 `headers.Host`/`host` 字段。sing-box 期望 Host 是主域名，客户端发送 sub-*，Host 校验失败。这正是 AGENTS.md 已记录的铁律"修改 subscription_service.py 必须同步修改 config_generator.py（订阅层与服务端层）"，但 v4.13.2 执行时遗漏了。
+- **修复**:
+  1. `config_generator.py` 新增 `build_sub_domain()` 函数（从主域名生成 sub-* 子域名）和 `cdn_sub_domain` 变量。
+  2. 三处 CDN 入站的 Host 字段从 `cf_domain or server_ip` 改为 `cdn_sub_domain`：
+     - vless-ws (8443): `"headers": {"Host": cdn_sub_domain}`
+     - vless-upgrade (2053): `"host": cdn_sub_domain`
+     - trojan-ws (2083): `"headers": {"Host": cdn_sub_domain}`
+  3. 部署到 JP/SG/HK 三台服务器，重新生成 config.json，sing-box check 通过，重启 singbox。
+- **验证**: 三台服务器全部通过：
+  - VLESS-WS(8443): `101 Switching Protocols` ✅
+  - VLESS-HTTPUpgrade(2053): `101 Switching Protocols` ✅（需用 httpupgrade 握手方式：`Upgrade: websocket` 但不带 `Sec-WebSocket-Key`）
+  - Trojan-WS(2083): `101 Switching Protocols` ✅
+  - sing-box 日志中 "bad host" 错误已消失（修复后残留的 bad host 错误都来自 CF 代理 IP 104.23.x.x/172.70.x.x 的旧客户端请求，Host 是主域名，不是 sub-* 直连的问题）。
+- **教训（铁律，最高优先级）**:
+  - **修改订阅层必须同步修改服务端层 config_generator.py**：订阅层改了客户端发送的 Host，服务端 sing-box config.json 的入站 `headers.Host`/`host` 也必须同步改，否则 sing-box Host 校验失败报 "bad host" 拒绝连接。AGENTS.md 之前已记录此铁律，但 v4.13.2 执行时遗漏了。**接手 AI 必须在修改订阅层时强制检查 config_generator.py 是否需要同步修改**。
+  - **sing-box httpupgrade 类型握手方式特殊**：期望 `Upgrade: websocket` 但**不带** `Sec-WebSocket-Key`（不是标准 WebSocket）。用标准 WS 握手（带 Sec-WebSocket-Key）会报 "real websocket request received" 拒绝；用 `Upgrade: foo`（非 websocket）会报 "not a websocket request" 拒绝。测试 HTTPUpgrade 节点必须用正确的握手方式。
+  - **诊断 CDN 节点问题必须看 sing-box 日志**：外部 WS 握手测试返回 400/404 只能说明连接有问题，但看不到具体原因。必须 SSH 查看 sing-box 日志的 ERROR 行（如 "bad host"、"bad path"、"not a websocket request"）才能定位根因。
+
+---
 # AI 调试历史与防Bug规则
 
-## 最新排查（2026-06-26 v4.12.20）[Trae CN LOOP+多智能体]
+## 最新排查（2026-06-26 v4.13.2）[Trae CN+多智能体审查]
+
+### v4.13.1 遗留 P0 问题 — 订阅服务代码未改，用户仍走 CF 代理被 403
+- **症状**: v4.13.1 声称"已彻底解决 sub-* 直连绕过 CF DDoS L7"，但用户反馈问题可能仍会复现。多智能体审查启动验证。
+- **诊断过程（4个并行子代理）**:
+  1. **架构审查员**发现：`config.py` 的 `get_sub_domain()` 函数名暗示"获取订阅域名"，但实际返回主域名 `CF_DOMAIN`，没有调用 `_build_sub_domain()` 转换。`subscription_service.py` 首页4处订阅链接、三端点 `profile-web-page-url` header、`install.sh` 安装提示全部使用主域名。**用户复制订阅链接还是走 CF 代理被 403 拦截**。
+  2. **部署验证员**确认：三台服务器证书 SAN 正确（含 sub-*），sub-* 域名 curl 返回 200，主域名返回 403——证明证书层已修复但代码层未修复。
+  3. **防复发审查员**确认：health_check.sh / cloudflare_proxy_rules.py / cert_manager.py 续签链路都不会破坏 sub-* 方案，但 install.sh reset 保留旧证书有中危风险。
+  4. **文档审查员**发现：AGENTS.md 第11条（"proxied=false 致命绝对不能改"）与第16条（"sub-* 必须 proxied=false"）直接矛盾；AI_DEBUG_HISTORY v4.12.20 教训部分未标注推翻；CHANGELOG v4.12.20 条目未标注推翻；README 版本号落后14个版本。
+- **根因**: v4.13.1 只改了证书层（cert_manager.py SAN），没有改订阅服务代码（config.py + subscription_service.py + install.sh）。`get_sub_domain()` 函数名有误导性——名为"获取 sub 域名"但实际返回主域名。
+- **修复**:
+  1. `config.py` `get_sub_domain()` 改为从主域名生成 sub-* 子域名（`jp.290372913.xyz` → `sub-jp.290372913.xyz`）
+  2. `subscription_service.py` 首页 `server=get_sub_domain()`、三端点 `profile-web-page-url` 用 `get_sub_domain()`、降级版 `get_sub_domain()` 同步修复
+  3. `install.sh` 安装提示用 `sub-${CF_DOMAIN}` 子域名
+  4. 部署到三台服务器，15项验证全部通过
+  5. 修复5处文档矛盾（AGENTS 第11条、AI_DEBUG_HISTORY 教训、CHANGELOG v4.12.20、README 版本号、project_snapshot eoff 描述）
+- **验证**: 15项验证（3服务器 × 首页订阅链接用sub-* + 首页不用主域名 + /clash+/sub+/singbox 的 profile-web-page-url 用 sub-*）全部通过。
+- **教训（铁律）**:
+  - **"修复"必须端到端验证，不能只改一层**：v4.13.1 只改了证书层就宣布"彻底解决"，实际上用户接触到的订阅 URL 还是主域名。修复必须从证书 → 代码 → 部署 → 用户实际访问的 URL 全链路验证。
+  - **函数名必须与行为一致**：`get_sub_domain()` 返回主域名是命名误导，导致后续代码信任函数名而未检查返回值。函数名有误导性时，必须重构函数或重命名。
+  - **多智能体审查是必要的**：4个并行子代理从不同角度审查，发现了主对话遗漏的 P0 问题。复杂修复后必须做多角色审查。
+  - **文档矛盾会导致接手 AI 走错路**：AGENTS.md 第11条与第16条 proxied 矛盾，如果新 AI 按第11条操作会把 sub-* 改回 proxied=true，直接推翻修复方案。文档间矛盾必须立即修复。
+
+---
+
+## 最新排查（2026-06-26 v4.13.1）[Trae CN]
+
+### CF 403反复复发 — v4.12.20的eoff方案是假阳性，订阅端点架构级绕过
+- **症状**: 用户反馈"为什么香港日本新加坡的CDN订阅又更新不了了，为什么反复出这样的问题"。三台服务器订阅端点 `/clash`、`/sub`、`/singbox` 经 CF 代理域名（`jp/sg/hk.290372913.xyz:2087`）访问时返回 HTTP 403，与 v4.12.20 修复后的现象完全相同。
+- **诊断过程**:
+  1. **重读 v4.12.20 病历本**：当时结论是"eoff override 是免费计划放行 ddos_l7 的唯一正确方案"，并经3轮72项测试全部PASS。但用户反馈"反复出现"——这是关键信号：测试窗口期通过 ≠ 长期稳定。
+  2. **CF GraphQL Analytics 查询**：用 `firewallEventsAdaptive` 查询近24小时拦截事件，`source` 字段明确返回 `l7ddos`（不是 WAF/rate limit/sbfm），证明拦截源就是 CF DDoS L7 动态保护系统的 ML 模型。
+  3. **API 实测3种关闭方案全部被拒**：
+     - `sensitivity_level=off` → API 返回 `"unknown variant for sensitivity_level: off"`
+     - skip `ddos_l7` phase → API 返回 `"skip action parameter phase 'ddos_l7' is not authorized"`
+     - skip `ddosL7` product → API 返回 `"invalid"`
+  4. **对比验证**：直接 curl `jp.290372913.xyz:2087/clash`（走 CF 代理）→ HTTP 403；同时 curl 服务器 IP `43.207.152.47:2087/clash`（绕过 CF）→ HTTP 200。证实拦截确实来自 CF 代理层，与源站无关。
+- **根因**:
+  1. **CF 免费计划 DDoS L7 是基于 ML 的动态保护系统**，不是固定规则。`sensitivity_level=eoff` 只是把灵敏度调到最低，但 ML 模型仍会基于流量模式（代理端口、TLS-in-TLS、长连接特征）动态拦截，无法通过任何 API 配置完全关闭。
+  2. **v4.12.20 的"3轮72项测试全PASS"是假阳性**：CF 规则传播延迟约 1-2 小时，测试恰好落在传播窗口内（旧规则刚被替换、新 ML 模型还没重新激活），传播完成后 ML 重新学习流量模式并重新拦截，导致 403 复发。
+  3. **架构层面错了**：只要订阅端点走 CF 代理路径（橙云 DNS），就一定会被 DDoS L7 ML 系统盯上。免费计划没有任何配置能完全关闭它，只能改路径绕过。
+- **修复（架构级，不是配置级）**:
+  1. **创建3个 gray cloud DNS 记录**：`sub-jp.290372913.xyz` → `43.207.152.47`、`sub-sg.290372913.xyz` → `13.212.37.11`、`sub-hk.290372913.xyz` → `43.249.174.222`，全部 `proxied=false`（灰云直连，不经过 CF 代理层）。
+  2. **cert_manager.py SAN 扩展**：`_build_sub_domain()` 从主域名生成 `sub-*` 子域名，`generate_self_signed_cert()` 和 `request_cf_ssl_certificate()` 的 SAN 同时包含主域名+sub-* 子域名，客户端访问 sub-* 时证书校验通过。
+  3. **部署到 JP/SG/HK 三台服务器**：上传 cert_manager.py → 备份旧证书 → 重新生成证书 → 验证 SAN 包含 sub-* → 重启 singbox-sub → 本地+外部 curl 验证。
+- **验证**: 3轮108项回归测试（JP/SG/HK × /clash+/sub+/singbox × Clash Meta/CFW/v2rayN/sing-box 4种UA）全部 PASS，三个 sub-* 域名订阅均稳定返回 HTTP 200。
+- **教训（铁律，最高优先级，覆盖v4.12.20教训）**:
+  - **CF 免费计划 DDoS L7 ML 系统无法通过任何 API 配置完全关闭**：`eoff` 只是降低灵敏度，ML 仍会动态拦截；`off`/`skip ddos_l7 phase`/`skip ddosL7 product` 全部被 API 拒绝。任何"通过 CF API 配置就能稳定放行"的方案都是假阳性，传播延迟窗口一过就复发。
+  - **测试窗口期通过 ≠ 长期稳定**：CF 规则传播延迟约 1-2 小时，单轮/多轮短期测试都可能在传播窗口内给出假阳性。验证 CF 修复方案必须等待至少 4-6 小时后再复测，或直接用架构级绕过（gray cloud 直连）从根本上避开问题。
+  - **架构级绕过优先于配置级修复**：当某个第三方系统的行为无法通过配置完全控制时，正确的做法是改路径绕过它（gray cloud 直连不经过 CF 代理层），而不是反复尝试配置级修复。
+  - **"反复出现"是假阳性的最强信号**：用户反馈问题"反复出现"时，必须假设之前的修复是假阳性，重新做根因分析，而不是再试一遍同样的方案。
+
+---
+
+## ⚠️ 已被 v4.13.1 推翻（2026-06-26 v4.12.20）[Trae CN LOOP+多智能体]
+
+> **以下结论已被 v4.13.1 推翻**：原文"eoff override 是免费计划放行 ddos_l7 的唯一正确方案"是假阳性——3轮72项测试在 CF 规则传播延迟窗口内通过，传播完成后 ML 重新激活 403 复发。**正确结论见上方 v4.13.1 病历**：必须用 sub-* gray cloud 直连子域名架构级绕过，不能依赖任何 CF API 配置。下文保留作为排查过程参考，但**禁止再走 eoff 路线**。
 
 ### Cloudflare 403拦截反复出现 — SKIP_PHASES配置错误+病历本误导
 - **症状**: 部署v4.12.19后订阅更新间歇性403，用户反馈CDN和订阅都不正常。病历本v4.12.12记录"删除eoff override即可恢复"，按此操作后问题反而更严重。
@@ -18,10 +127,11 @@
   3. 重建skip规则（删除旧规则+创建新规则），等待充分传播（~50秒）。
   4. CDN验证改为直连CF优选IP+正确Host头+SNI，正确测试WebSocket升级。
 - **教训（铁律，最高优先级）**:
-  - **Cloudflare免费计划SKIP_PHASES绝对不能包含ddos_l7**：API会直接拒绝，规则创建失败但不一定报错。正确放行方式是在ddos_l7 phase entrypoint创建`sensitivity_level=eoff` override。
-  - **病历本可能误导自己**：v4.12.12的"删除eoff就好"是错误结论（传播延迟导致的假阳性），必须以API实际返回和GitHub开源验证为准，不能盲目相信病历本。
-  - **CDN WebSocket测试必须直连CF IP**：用域名+端口测试会经过DNS解析和CDN边缘路由，不能准确验证源站CDN端口；必须提取配置中的CF优选IP，用`Host:`头+SNI直连测试。
-  - **测试必须用多轮验证**：单轮测试可能因为CF缓存/传播延迟给出假阳性/假阴性结果，至少3轮间隔测试才可靠。
+  > ⚠️ **本节教训已被 v4.13.1 推翻**：eoff 方案是假阳性（传播延迟窗口内通过），多轮短期测试也可能假阳性。正确做法是架构级绕过（sub-* gray cloud 直连），不能依赖任何 CF API 配置。下文保留作为排查过程参考，但**禁止再走 eoff 路线**。
+  - ~~**Cloudflare免费计划SKIP_PHASES绝对不能包含ddos_l7**：API会直接拒绝，规则创建失败但不一定报错。正确放行方式是在ddos_l7 phase entrypoint创建`sensitivity_level=eoff` override。~~（⚠️ 已推翻：eoff 只是降低灵敏度，ML 仍会动态拦截）
+  - **病历本可能误导自己**：v4.12.12的"删除eoff就好"是错误结论（传播延迟导致的假阳性），必须以API实际返回和GitHub开源验证为准，不能盲目相信病历本。（✅ 此条仍有效，v4.13.1 再次证明）
+  - **CDN WebSocket测试必须直连CF IP**：用域名+端口测试会经过DNS解析和CDN边缘路由，不能准确验证源站CDN端口；必须提取配置中的CF优选IP，用`Host:`头+SNI直连测试。（✅ 此条仍有效）
+  - ~~**测试必须用多轮验证**：单轮测试可能因为CF缓存/传播延迟给出假阳性/假阴性结果，至少3轮间隔测试才可靠。~~（⚠️ 已推翻：3轮72项测试也可能全部落在传播延迟窗口内给出假阳性，必须等 4-6 小时后复测或直接架构级绕过）
 - **验证**: 3轮72项测试（JP/SG/HK × 6种UA × 3端点 + 节点数/响应头/策略组/yaml解析）全部PASS；CDN VLESS-WS(8443)和Trojan-WS(2083)直连CF IP返回101 Switching Protocols握手成功。
 
 ## 最新排查（2026-06-25 v4.12.19）[Trae CN LOOP模式]

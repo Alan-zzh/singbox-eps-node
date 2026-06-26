@@ -2,8 +2,8 @@
 """
 统一配置模块
 Author: Alan
-Version: v4.3.5
-Date: 2026-05-01
+Version: v4.14.0
+Date: 2026-06-27
 功能：集中管理所有配置参数
 
 【⚠️ 端口锁定声明 - 严禁修改】
@@ -11,9 +11,8 @@ Date: 2026-05-01
   SUB_PORT = 2087  （订阅服务端口，已固定，走CDN）
   SINGBOX_PORT = 443
   VLESS_WS_PORT = 8443
-  VLESS_UPGRADE_PORT = 2053
   TROJAN_WS_PORT = 2083
-  TUIC_PORT = (random, from .env)
+  ANYTLS_PORT = 2096  （v4.14.0 新增，直连隐蔽协议）
 修改端口号必须由用户明确指令，否则视为违规操作。
 历史教训：
   - v1.0.42之前默认端口6969导致防火墙不匹配、服务不可达
@@ -21,6 +20,11 @@ Date: 2026-05-01
     用IP访问时证书域名不匹配，V2rayN等客户端拒绝连接。
     9443不在Cloudflare CDN代理端口列表中，无法通过域名走CDN。
   - v1.0.44改用2087端口（CDN支持），通过域名访问解决证书匹配问题。
+【v4.14.0 协议栈精简】：
+  - 删除 VLESS-HTTPUpgrade-CDN（故障最多，兼容最窄）
+  - 删除 TUIC v5（UDP 易被封，QUIC 长流量被 QoS）
+  - 新增 anyTLS（sing-box 1.12+ 原生，缓解 TLS-in-TLS 指纹，配置极简）
+  - VLESS_UPGRADE_PORT / TUIC_PORT 保留常量定义以兼容旧 .env，但不再使用
 """
 
 import os
@@ -122,8 +126,11 @@ CF_DOMAIN = os.getenv('CF_DOMAIN', '') or _load_env_value('CF_DOMAIN', '')
 SUB_PORT = 2087
 SINGBOX_PORT = 443
 VLESS_WS_PORT = 8443
+# v4.14.0: VLESS_UPGRADE_PORT 保留以兼容旧 .env，但不再使用（HTTPUpgrade 协议已下线）
 VLESS_UPGRADE_PORT = 2053
 TROJAN_WS_PORT = 2083
+ANYTLS_PORT = 2096  # v4.14.0 新增：anyTLS 直连隐蔽协议（固定端口）
+# v4.14.0: TUIC_PORT 保留以兼容旧 .env，但默认不启用（ENABLE_TUIC=false）
 TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
 # VLESS-gRPC / Trojan-TCP 可配置端口（从 .env 读取，不固定，随机更安全）
 VLESS_GRPC_PORT = int(os.getenv('VLESS_GRPC_PORT', '0')) or 50051
@@ -136,6 +143,7 @@ LOCKED_PORTS = {
     'VLESS_WS_PORT': VLESS_WS_PORT,
     'VLESS_UPGRADE_PORT': VLESS_UPGRADE_PORT,
     'TROJAN_WS_PORT': TROJAN_WS_PORT,
+    'ANYTLS_PORT': ANYTLS_PORT,
     'TUIC_PORT': TUIC_PORT,
     'VLESS_GRPC_PORT': VLESS_GRPC_PORT,
     'TROJAN_TCP_PORT': TROJAN_TCP_PORT,
@@ -144,6 +152,9 @@ LOCKED_PORTS = {
 
 SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
+
+# v4.14.0: anyTLS 协议密码（安装时随机生成，与 TROJAN_PASSWORD 独立）
+ANYTLS_PASSWORD = os.getenv('ANYTLS_PASSWORD', '')
 
 
 REALITY_SHORT_ID = 'abcd1234'  # v4.10.20 弱预设已弃用，安装时通过 openssl rand -hex 8 写入 .env
@@ -581,12 +592,18 @@ def get_env(key, default=''):
 
 
 def get_sub_domain():
-    """获取订阅服务访问域名（优先域名，无域名则用IP）
-    ⚠️ HTTPS订阅服务必须用域名访问（SSL证书颁发给域名）
+    """获取订阅服务访问域名（sub-* 直连子域名，绕过 CF DDoS L7）
+    v4.13.2: 从主域名生成 sub-* 子域名（gray cloud 直连源站），
+    避免订阅端点走 CF 代理被 DDoS L7 ML 系统拦截。
+    ⚠️ HTTPS订阅服务必须用域名访问（SSL证书已包含 sub-* SAN）
     如果没有配置域名，返回IP（此时客户端需跳过证书验证）
     """
     if CF_DOMAIN and CF_DOMAIN.strip():
-        return CF_DOMAIN.strip()
+        domain = CF_DOMAIN.strip()
+        if '.' in domain:
+            parts = domain.split('.', 1)
+            return f"sub-{parts[0]}.{parts[1]}"
+        return domain
     return SERVER_IP
 
 

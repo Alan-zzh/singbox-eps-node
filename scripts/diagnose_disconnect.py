@@ -44,10 +44,10 @@ SERVERS = {
 }
 
 # 协议与端口映射（用于日志匹配）
+# v4.14.0: VLESS-HTTPUpgrade (vless-upgrade/2053) 已下线，从协议映射中移除
 PROTOCOLS = {
     'vless-reality': {'port': 443, 'label': 'VLESS-Reality', 'transport': 'tcp'},
     'vless-ws': {'port': 8443, 'label': 'VLESS-WS', 'transport': 'tcp'},
-    'vless-upgrade': {'port': 2053, 'label': 'VLESS-HTTPUpgrade', 'transport': 'tcp'},
     'trojan-ws': {'port': 2083, 'label': 'Trojan-WS', 'transport': 'tcp'},
     'tuic': {'port_env': 'TUIC_PORT', 'label': 'TUIC v5', 'transport': 'udp'},
 }

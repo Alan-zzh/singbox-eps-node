@@ -68,15 +68,26 @@ def request_cf_ssl_certificate(domain, cf_api_token):
     """
     使用 Cloudflare API 获取SSL证书
     Cloudflare API 可以签发源证书，有效期15年
+
+    v4.12.22: 同时包含主域名和 sub-* 子域名，让订阅端点可直连。
     """
     try:
-        logger.info(f">>> 请求 Cloudflare SSL 证书 for {domain}...")
+        sub_domain = _build_sub_domain(domain)
+        hostnames = [domain]
+        if sub_domain:
+            hostnames.append(sub_domain)
+
+        logger.info(f">>> 请求 Cloudflare SSL 证书 for {hostnames}...")
         ensure_cert_dir()
 
         csr_file = os.path.join(CERT_DIR, 'domain.csr')
+        san_arg = f"subjectAltName=DNS:{domain}"
+        if sub_domain:
+            san_arg += f",DNS:{sub_domain}"
         subprocess.run(
             ['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
-             '-keyout', KEY_FILE, '-out', csr_file, '-subj', f'/CN={domain}'],
+             '-keyout', KEY_FILE, '-out', csr_file, '-subj', f'/CN={domain}',
+             '-addext', san_arg],
             capture_output=True, check=True
         )
 
@@ -91,7 +102,7 @@ def request_cf_ssl_certificate(domain, cf_api_token):
         }
 
         payload = {
-            'hostnames': [domain],
+            'hostnames': hostnames,
             'requested_validity': 5475,
             'request_type': 'origin-rsa',
             'csr': csr_content
@@ -125,12 +136,33 @@ def request_cf_ssl_certificate(domain, cf_api_token):
         logger.error(f"[ERROR] 获取证书异常: {e}")
         return None
 
+def _build_sub_domain(domain):
+    """从主域名生成订阅直连子域名。
+    例: jp.290372913.xyz -> sub-jp.290372913.xyz
+        hk1.290372913.xyz -> sub-hk1.290372913.xyz
+    """
+    if not domain or '.' not in domain:
+        return None
+    parts = domain.split('.', 1)
+    return f"sub-{parts[0]}.{parts[1]}"
+
+
 def generate_self_signed_cert(domain=None):
-    """生成自签名证书（备用方案）"""
+    """生成自签名证书（备用方案）
+
+    v4.12.22: SAN 同时包含主域名和 sub-* 子域名，
+    让订阅端点可通过非代理子域名直连（绕过 CF DDoS L7）。
+    """
     if domain is None:
         domain = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
-    logger.info(f">>> 生成自签名证书 for {domain}...")
+    sub_domain = _build_sub_domain(domain)
+    if sub_domain:
+        san = f"subjectAltName=DNS:{domain},DNS:{sub_domain}"
+    else:
+        san = f"subjectAltName=DNS:{domain}"
+
+    logger.info(f">> 生成自签名证书 for {domain} (SAN: {san})...")
     ensure_cert_dir()
 
     result = subprocess.run(
@@ -138,7 +170,7 @@ def generate_self_signed_cert(domain=None):
         '-keyout', KEY_FILE, '-out', CERT_FILE,
         '-days', str(CERT_VALIDITY_DAYS),
         '-subj', f'/CN={domain}',
-        '-addext', f'subjectAltName=DNS:{domain}'],
+        '-addext', san],
         capture_output=True, text=True
     )
 

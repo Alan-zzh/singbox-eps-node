@@ -80,7 +80,7 @@ try:
         CDN_API_001315_CT, CDN_API_001315_CU, CDN_API_001315_CMCC,
         CDN_API_090227_CT, CDN_API_090227_CU, CDN_API_090227_CMCC,
         CDN_API_VVHAN,
-        VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT,
+        VLESS_WS_PORT, TROJAN_WS_PORT,
         CDN_CUSTOM_SOURCE_URLS, CDN_FASTEST_LIMIT, CDN_REGION_FILTER,
         USER_DDNS_DOMAIN, USER_EXPECTED_ISP, USER_PROBE_INTERVAL,
         USER_LATENCY_SPIKE_THRESHOLD, HUNAN_CT_OPTIMAL_PREFIXES,
@@ -98,7 +98,7 @@ except ImportError:
     CF_DOMAIN = ''
     SUB_PORT = 2087
     VLESS_WS_PORT = 8443
-    VLESS_UPGRADE_PORT = 2053
+    # v4.14.0: VLESS-HTTPUpgrade (2053) 已下线，删除 fallback 定义
     TROJAN_WS_PORT = 2083
     DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
     CDN_PREFERRED_IPS = [
@@ -2360,8 +2360,8 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown', tested_
     # 这里必须信任 fetch_cdn_ips() 已经产出的顺序。
     # 上游排序已经综合了用户路径测速、跨运营商和稳定性，不能在这里再用弱化信息重排一次，
     # 否则会把阶段化测速选出的最优IP换成次优甚至更差的IP。
-    if len(ips) >= 3:
-        selected_ips = list(ips[:3])
+    if len(ips) >= 2:
+        selected_ips = list(ips[:2])
         scored_ips = []
         for ip in ips:
             perf = get_ip_performance(db_path, ip)
@@ -2378,7 +2378,7 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown', tested_
                 cross_isp_score=cross_isp
             ) if perf else 50.0
             scored_ips.append((ip, score))
-        logger.info(f"  使用上游排序前3名分配: {', '.join(selected_ips)}")
+        logger.info(f"  使用上游排序前2名分配: {', '.join(selected_ips)}")
     else:
         selected_ips = list(ips)
         scored_ips = []
@@ -2396,15 +2396,14 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown', tested_
                 cross_isp_score=cross_isp
             ) if perf else 50.0
             scored_ips.append((ip, score))
-        while len(selected_ips) < 3:
+        while len(selected_ips) < 2:
             selected_ips.append(ips[len(selected_ips) % len(ips)] if ips else '0.0.0.0')
+    # v4.14.0: VLESS-HTTPUpgrade (2053) 已下线，CDN IP 分配从 3 个缩减为 2 个
     vless_ws_ip = selected_ips[0]
-    vless_upgrade_ip = selected_ips[1]
-    trojan_ws_ip = selected_ips[2]
+    trojan_ws_ip = selected_ips[1]
 
     logger.info(f"\n>>> CDN优选IP（每个协议独立IP）:")
     logger.info(f"  VLESS-WS IP: {vless_ws_ip}")
-    logger.info(f"  VLESS-HTTPUpgrade IP: {vless_upgrade_ip}")
     logger.info(f"  Trojan-WS IP: {trojan_ws_ip}")
 
     conn = None
@@ -2412,7 +2411,6 @@ def assign_and_save_ips(ips, user_probe_result=None, isp_type='unknown', tested_
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_ws_cdn_ip', vless_ws_ip))
-        cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('vless_upgrade_cdn_ip', vless_upgrade_ip))
         cursor.execute("INSERT OR REPLACE INTO cdn_settings (key, value) VALUES (?, ?)", ('trojan_ws_cdn_ip', trojan_ws_ip))
         # [TRAE SOLO CN] v4.10.2 cdn_ips_list存JSON格式（含评分+延迟），订阅服务换IP时按评分选
         ips_json = json.dumps([{

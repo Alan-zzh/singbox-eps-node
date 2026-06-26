@@ -1,6 +1,6 @@
 # Singbox EPS Node 技术文档
 
-**版本**: v4.12.13 | **更新**: 2026-06-17
+**版本**: v4.14.0 | **更新**: 2026-06-27
 
 > 版本历史以 CHANGELOG.md 为准。本文档描述当前架构和模块说明。
 
@@ -10,7 +10,7 @@
 
 全自动CDN优选IP管理 + 多协议代理订阅生成系统。一条命令完成部署,客户端导入订阅即可使用。
 
-- **代理内核**: sing-box 1.13.11(JP/SG) / 1.13.9(HK)
+- **代理内核**: sing-box 1.13.13(SG/HK) / 1.13.14(JP)
 - **后端**: Python 3 + Flask
 - **数据库**: SQLite(WAL 模式)
 - **CDN**: Cloudflare
@@ -23,35 +23,36 @@
 ### 服务列表
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| singbox | 443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT | 代理内核 |
+| singbox | 443, 8443, 2083, 2096, VLESS_GRPC_PORT, TROJAN_TCP_PORT | 代理内核（v4.14.0 精简 6 协议） |
 | singbox-sub | 2087 | HTTPS订阅（走CDN） |
 | singbox-cdn | - | CDN优选IP监控（v4.0 用户反馈驱动版，每小时存活检测） |
 
-### 节点列表
+### 节点列表（v4.14.0 精简 7→6）
 | 节点 | 地址 | 方式 |
 |------|------|------|
 | {CC}-VLESS-Reality | {IP}:443 | 直连 |
 | {CC}-VLESS-gRPC | {IP}:VLESS_GRPC_PORT | 直连（Base64 URI 补充 gRPC 兼容参数） |
 | {CC}-Trojan-TCP | {IP}:TROJAN_TCP_PORT | 直连 |
 | {CC}-VLESS-WS-CDN | 优选IP:8443 | CDN |
-| {CC}-VLESS-HTTPUpgrade-CDN | 优选IP:2053 | CDN |
 | {CC}-Trojan-WS-CDN | 优选IP:2083 | CDN |
-| {CC}-TUIC-v5 | {IP}:TUIC_PORT | 直连，TCP+UDP双栈 |
+| {CC}-anyTLS | {IP}:2096 | 直连（v4.14.0 新增，缓解 TLS-in-TLS 指纹） |
 
+⚠️ v4.14.0 删除：VLESS-HTTPUpgrade-CDN（故障最多+兼容最窄）、TUIC v5（UDP 易被封+QUIC 被 QoS）
 ⚠️ AI-SOCKS5是幕后路由出站，不是用户可见节点。不出现在订阅链接和selector中，AI网站流量自动走SOCKS5，用户无感。
 
-### 端口分配
+### 端口分配（v4.14.0 更新）
 | 端口 | 用途 | CDN |
 |------|------|-----|
 | 443 | VLESS-Reality | ✅ |
-| 2053 | VLESS-HTTPUpgrade-CDN | ✅ |
 | 2083 | Trojan-WS-CDN | ✅ |
 | 2087 | 订阅服务 | ✅ |
 | 8443 | VLESS-WS-CDN | ✅ |
+| 2096 | anyTLS（v4.14.0 新增） | ❌（直连源站） |
 | VLESS_GRPC_PORT | VLESS-gRPC（随机10000-65535） | ❌ |
 | TROJAN_TCP_PORT | Trojan-TCP（随机10000-65535） | ❌ |
 | 1080 | SOCKS5本地代理 | ❌ |
-| TUIC_PORT | TUIC v5（随机10000-65535） | ❌ |
+| ~~2053~~ | ~~VLESS-HTTPUpgrade-CDN（v4.14.0 已下线）~~ | - |
+| ~~TUIC_PORT~~ | ~~TUIC v5（v4.14.0 已下线）~~ | - |
 
 ### 文件结构
 ```

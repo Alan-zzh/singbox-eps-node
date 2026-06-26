@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.12.17`
+**当前版本**: `v4.14.0`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -43,8 +43,10 @@ bash install.sh optimize     # 只做系统优化（BBRv3 + FQ；首次启用需
 
 ## 当前功能
 
-- **7 协议**(按客户端能力自动适配):VLESS-Reality / VLESS-gRPC / Trojan-TCP / VLESS-WS / VLESS-HTTPUpgrade / Trojan-WS / TUIC v5
-- **多客户端兼容**:`/sub` 默认保留 7 节点,Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅;旧客户端可用 `?client=standard` 强制 5 节点兼容订阅
+- **6 协议**(v4.14.0 精简 7→6,按客户端能力自动适配):VLESS-Reality / VLESS-gRPC / Trojan-TCP / VLESS-WS / Trojan-WS / anyTLS
+  - v4.14.0 删除:VLESS-HTTPUpgrade（故障最多+兼容最窄）、TUIC v5（UDP 易被封+QUIC 被 QoS）
+  - v4.14.0 新增:anyTLS（sing-box 1.12+ 原生，端口 2096，缓解 TLS-in-TLS 指纹检测）
+- **多客户端兼容**:`/sub` 默认返回 6 节点,Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅;`?client=full` 与 `?client=standard` 等同（HTTPUpgrade/TUIC 已下线，无差别），保留 `standard` 参数兼容旧客户端
 - **流量查询端点**:`/info` 文本端点(v2rayN 也能看流量)+ `/api/traffic` JSON + `subscription-userinfo` header;Base64 正文只放节点 URI,分享链接节点名已 URL 编码
 - HTTPS 订阅:Base64 + sing-box JSON + Clash Meta
 - CDN 优选 IP 自动维护(IP 池 10-15 个/服务器,用户本地实测/运营商匹配源优先,Top3 之后再做 C 段分散,`/api/cdn-status` 可查看当前IP/评分/更新时间)
@@ -64,22 +66,23 @@ bash install.sh optimize     # 只做系统优化（BBRv3 + FQ；首次启用需
 | `{CC}-VLESS-gRPC` | VLESS | 直连 `IP:随机端口` | 全平台（Base64 URI 已补兼容参数） |
 | `{CC}-Trojan-TCP` | Trojan | 直连 `IP:随机端口` | 全平台 |
 | `{CC}-VLESS-WS-CDN` | VLESS + WS | CDN 优选 IP `:8443` | 全平台 |
-| `{CC}-VLESS-HTTPUpgrade-CDN` | VLESS + HTTPUpgrade | CDN 优选 IP `:2053` | Clash Meta / sing-box / NekoBox |
 | `{CC}-Trojan-WS-CDN` | Trojan + WS | CDN 优选 IP `:2083` | 全平台 |
-| `{CC}-TUIC v5` | TUIC v5 | 直连 `IP:随机端口` | Clash Meta / sing-box / NekoBox |
+| `{CC}-anyTLS` | anyTLS | 直连 `IP:2096` | sing-box 1.12+ / Clash Meta (mihomo) 1.18+ |
 
-> **客户端能力自动识别**：`/sub` 端点按 User-Agent 自动返回对应节点。`?client=full` 强制 7 节点，`?client=standard` 强制 5 节点。
+> **v4.14.0 协议栈精简**：删除 VLESS-HTTPUpgrade-CDN（故障最多+兼容最窄）和 TUIC v5（UDP 易被封+QUIC 被 QoS），新增 anyTLS（sing-box 1.12+ 原生，缓解 TLS-in-TLS 指纹检测）。
+>
+> **客户端能力自动识别**：`/sub` 端点按 User-Agent 自动返回 6 节点。`?client=full` 与 `?client=standard` 等同（HTTPUpgrade/TUIC 已下线，无差别），保留 `standard` 参数兼容旧客户端。
 
 ## 订阅端点
 
 | 端点 | 用途 |
 |------|------|
-| `https://{域名}:2087/sub/{CC}` | Base64 订阅（自动识别客户端能力） |
-| `https://{域名}:2087/sub/{CC}?client=full` | 强制 7 节点 |
-| `https://{域名}:2087/sub/{CC}?client=standard` | 强制 5 节点 |
+| `https://{域名}:2087/sub/{CC}` | Base64 订阅（自动识别客户端能力，默认 6 节点） |
+| `https://{域名}:2087/sub/{CC}?client=full` | 强制 6 节点（v4.14.0 起 full=standard） |
+| `https://{域名}:2087/sub/{CC}?client=standard` | 强制 6 节点（兼容旧客户端参数） |
 | `https://{域名}:2087/sub/{CC}?client=clash` | 强制 Clash/mihomo 完整订阅 |
-| `https://{域名}:2087/sub/{CC}?client=v2rayn` | 强制 v2rayN 完整订阅（7 节点） |
-| `https://{域名}:2087/sub/{CC}?client=shadowrocket` | 强制 Shadowrocket 完整订阅（7 节点） |
+| `https://{域名}:2087/sub/{CC}?client=v2rayn` | 强制 v2rayN 完整订阅（6 节点） |
+| `https://{域名}:2087/sub/{CC}?client=shadowrocket` | 强制 Shadowrocket 完整订阅（6 节点） |
 | `https://{域名}:2087/singbox/{CC}` | sing-box JSON 配置 |
 | `https://{域名}:2087/clash/{CC}` | Clash Meta YAML 配置 |
 | `https://{域名}:2087/info/{CC}` | 流量查询（纯文本，v2rayN 也能看） |

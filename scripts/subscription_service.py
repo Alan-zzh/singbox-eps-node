@@ -2,8 +2,8 @@
 """
 订阅服务 - Flask应用
 Author: Alan
-Version: v4.12.2
-Date: 2026-06-13
+Version: v4.14.0
+Date: 2026-06-27
 功能：
   - 提供Base64订阅链接（包含所有节点）
   - 提供完整sing-box JSON配置（含自动路由规则）
@@ -14,7 +14,7 @@ Date: 2026-06-13
 
 订阅链接格式:
   - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
-    - 自动识别客户端 UA：Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 7 节点
+    - 自动识别客户端 UA：Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 6 节点
     - 强制控制：?client=full|standard|clash|v2rayn|shadowrocket
   - sing-box JSON: https://{CF_DOMAIN}:{SUB_PORT}/singbox/{国家代码}
   - Clash Meta YAML: https://{CF_DOMAIN}:{SUB_PORT}/clash/{国家代码}
@@ -22,26 +22,19 @@ Date: 2026-06-13
   ⚠️ 必须使用域名访问（走CDN），IP访问会导致SSL证书不匹配
   ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
-节点命名规则: {国家代码}-{协议}（最多 7 个用户可见节点）
+节点命名规则: {国家代码}-{协议}（v4.14.0 起 6 个用户可见节点）
 - {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
 - {COUNTRY_CODE}-VLESS-gRPC (直连节点，gRPC 传输)
 - {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
-- {COUNTRY_CODE}-VLESS-WS-CDN (CDN节点，独立优选IP)
-- {COUNTRY_CODE}-VLESS-HTTPUpgrade-CDN (CDN节点，仅 Clash/sing-box 显示)
-- {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，独立优选IP)
-- {COUNTRY_CODE}-TUIC v5 (直连节点，UDP加速，仅 Clash/sing-box 显示)
+- {COUNTRY_CODE}-VLESS-WS-CDN (CDN节点，sub-* 直连源站绕过 CF DDoS L7)
+- {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，sub-* 直连源站绕过 CF DDoS L7)
+- {COUNTRY_CODE}-anyTLS (直连节点，v4.14.0 新增，缓解 TLS-in-TLS 指纹)
 
-【v4.12.4 客户端能力适配】:
-  - Clash/sing-box/NekoBox：返回全部 7 节点
-  - Shadowrocket：返回全部 7 节点
-  - v2rayN/v2rayNG：返回全部 7 节点；旧客户端可用 ?client=standard 手动兜底
-  - 默认返回 7 节点；旧客户端可用 ?client=standard 手动兜底
-  - 自动通过 User-Agent 识别，强制控制用 ?client=full|standard|clash|v2rayn|shadowrocket
-
-【v4.12.1 流量显示增强】:
-  - Clash/Stash：通过 subscription-userinfo header 显示（原有）
-  - v2rayN：直接访问 /info 端点查看（v2rayN 不解析 subscription-userinfo header）
-  - 首页增加 /info 和 /api/traffic 链接
+【v4.14.0 协议栈精简】:
+  - 删除 VLESS-HTTPUpgrade-CDN（故障最多，兼容最窄）
+  - 删除 TUIC v5（UDP 易被封，QUIC 长流量被 QoS）
+  - 新增 anyTLS（sing-box 1.12+ 原生，配置极简）
+  - 节点数从 7 → 6
 
 【v4.12.1 流量统计修复】:
   - 原版 iptables 只统计 INPUT 方向，导致下载流量被低估 50%
@@ -80,7 +73,7 @@ try:
     from config import (
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
         VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, TUIC_PORT, SOCKS5_PORT,
-        VLESS_GRPC_PORT, TROJAN_TCP_PORT,
+        VLESS_GRPC_PORT, TROJAN_TCP_PORT, ANYTLS_PORT, ANYTLS_PASSWORD,
         REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
         AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR,
@@ -101,6 +94,7 @@ except ImportError:
     VLESS_WS_PORT = int(os.getenv('VLESS_WS_PORT', '8443'))
     VLESS_UPGRADE_PORT = int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
     TROJAN_WS_PORT = int(os.getenv('TROJAN_WS_PORT', '2083'))
+    ANYTLS_PORT = int(os.getenv('ANYTLS_PORT', '2096'))  # v4.14.0 新增
     TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
     SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '1080'))
     REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID') or __import__('secrets').token_hex(8)
@@ -119,21 +113,28 @@ except ImportError:
     CDN_IP_BLACKLIST = []
     CDN_IP_HARD_REJECT = {'latency_ms': 500, 'packet_loss_rate': 0.3, 'download_speed_mbps': 5}
     def get_sub_domain():
-        """降级：config.py导入失败时，用CF_DOMAIN或SERVER_IP作为订阅地址"""
-        return CF_DOMAIN if CF_DOMAIN else SERVER_IP
+        """降级：config.py导入失败时，生成 sub-* 子域名绕过 CF DDoS L7"""
+        if CF_DOMAIN and CF_DOMAIN.strip():
+            domain = CF_DOMAIN.strip()
+            if '.' in domain:
+                parts = domain.split('.', 1)
+                return f"sub-{parts[0]}.{parts[1]}"
+            return domain
+        return SERVER_IP
 
 logger = get_logger('subscription_service')
 
 IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
-CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'vless_upgrade_cdn_ip', 'trojan_ws_cdn_ip']
+# v4.14.0: 删除 vless_upgrade_cdn_ip（HTTPUpgrade 已下线）
+CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
 
 # [Codex] v4.12.14 客户端能力矩阵
 # 决定 /sub 端点返回哪些节点
-#   full     = 支持全部 7 节点
-#   standard = 仅支持 5 节点（剔除 HTTPUpgrade + TUIC v5，作为手动兜底）
-#   unknown  = 按 full 处理（项目默认 7 节点）
+#   full     = v4.14.0 起支持全部 6 节点（VLESS-Reality/VLESS-gRPC/Trojan-TCP/VLESS-WS/Trojan-WS/anyTLS）
+#   standard = v4.14.0 起 standard 等同 full（HTTPUpgrade/TUIC 已下线，无差别），保留参数兼容旧客户端
+#   unknown  = 按 full 处理（项目默认 6 节点）
 CLIENT_CAPABILITIES = {
-    # Clash 系（mihomo 内核支持 Reality/gRPC/TUIC/HTTPUpgrade）
+    # Clash 系（mihomo 内核支持 Reality/gRPC/anyTLS）
     'clash-meta': 'full',
     'clash-verge': 'full',
     'clash verge': 'full',
@@ -150,7 +151,8 @@ CLIENT_CAPABILITIES = {
     'singbox': 'full',
     'nekobox': 'full',
     'nekoray': 'full',
-    # 用户要求保留完整 7 节点，客户端侧问题通过 URI 参数与测速口径优化处理。
+    # v4.14.0: anyTLS 由 sing-box 1.12+ 原生支持，v2rayN/v2rayNG 基于 Xray-core 不支持 anyTLS
+    # 但仍返回 6 节点配置，v2rayN 会自动忽略不支持的节点类型
     'v2rayn': 'full',
     'v2rayng': 'full',
     'v2ray ng': 'full',
@@ -452,9 +454,13 @@ VLESS_WS_UUID = os.getenv('VLESS_WS_UUID', '')
 # 如果config.py导入失败，降级使用环境变量
 VLESS_UPGRADE_PORT = VLESS_UPGRADE_PORT if 'VLESS_UPGRADE_PORT' in dir() else int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
 TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
+# v4.14.0: anyTLS 密码，优先使用 config.py 的 ANYTLS_PASSWORD，降级时从 .env 读取
+ANYTLS_PASSWORD_ENV = ANYTLS_PASSWORD if 'ANYTLS_PASSWORD' in dir() and ANYTLS_PASSWORD else os.getenv('ANYTLS_PASSWORD', '')
+# v4.14.0: anyTLS 密码为空时降级使用 TROJAN_PASSWORD（保持向后兼容旧 .env）
+ANYTLS_PASSWORD_ENV = ANYTLS_PASSWORD_ENV or TROJAN_PASSWORD
 TUIC_PASSWORD = os.getenv('TUIC_PASSWORD', '')
 TUIC_UUID = os.getenv('TUIC_UUID', '')
-ENABLE_TUIC = os.getenv('ENABLE_TUIC', 'true').lower() == 'true'
+ENABLE_TUIC = os.getenv('ENABLE_TUIC', 'false').lower() == 'true'  # v4.14.0: 默认 false
 TUIC_PORT_ENV = int(os.getenv('TUIC_PORT', '0')) or TUIC_PORT
 REALITY_PUBLIC_KEY = os.getenv('REALITY_PUBLIC_KEY', '')
 EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
@@ -497,13 +503,14 @@ def setup_iptables_traffic_counters():
     机场面板标准做法：
     - 在INPUT/OUTPUT链中添加针对sing-box各入站端口的统计规则
     - iptables计数器是内核级别的，持久化、重启不丢失
-    - 端口：443(VLESS-Reality), 8443(VLESS-WS), 2053(VLESS-HTTPUpgrade), 2083(Trojan-WS)
-    - 加上 VLESS-gRPC / Trojan-TCP 随机端口 + TUIC v5
+    - v4.14.0 端口：443(VLESS-Reality), 8443(VLESS-WS), 2083(Trojan-WS), 2096(anyTLS)
+    - 加上 VLESS-gRPC / Trojan-TCP 随机端口 + TUIC v5（默认关闭）
     - [TRAE SOLO CN] v4.12.1 修复：原版只统计 INPUT，导致用户实际流量被低估50%（OUTPUT 没算）
       修复方案：INPUT + OUTPUT 同时计数，反映真实双向流量
     幂等操作：重复调用不会添加重复规则
     """
-    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT, TUIC_PORT_ENV]
+    # v4.14.0: 删除 2053(HTTPUpgrade)，新增 2096(anyTLS)
+    singbox_ports = [443, 8443, 2083, 2096, VLESS_GRPC_PORT, TROJAN_TCP_PORT, TUIC_PORT_ENV]
 
     for port in singbox_ports:
         if not port or port == 0:
@@ -546,7 +553,7 @@ def get_iptables_traffic_bytes():
     取所有sing-box端口规则的bytes总和（INPUT + OUTPUT 双向）
     [TRAE SOLO CN] v4.12.1 修复：原版只取 INPUT，下载流量被低估50%
     """
-    singbox_ports = [443, 8443, 2053, 2083, VLESS_GRPC_PORT, TROJAN_TCP_PORT, TUIC_PORT_ENV]
+    singbox_ports = [443, 8443, 2083, 2096, VLESS_GRPC_PORT, TROJAN_TCP_PORT, TUIC_PORT_ENV]
     total_bytes = 0
 
     # 同时统计 INPUT 和 OUTPUT，反映真实双向流量
@@ -1004,42 +1011,41 @@ def get_cdn_optimized_domain():
 def generate_all_links(capability='full'):
     """生成所有节点链接
 
-    【v4.12.2 客户端能力适配】:
-    - capability='full'：返回全部 7 节点（所有主流客户端）
-    - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
-      （手动兜底或不确定客户端降级使用）
-    - capability='unknown'：按 full 处理，保持 7 节点
+    【v4.14.0 协议栈精简】:
+    - 节点数从 7 → 6（删除 VLESS-HTTPUpgrade + TUIC v5，新增 anyTLS）
+    - capability='full' / 'standard' 等同（v4.14.0 起两者无差异，保留参数兼容旧客户端）
+    - capability='unknown'：按 full 处理
     """
     links = []
 
     # CDN节点地址：根据CDN_MODE选择 [TRAE SOLO CN] v4.8
     if CDN_MODE == 'domain_default':
         vless_ws_addr = CF_DOMAIN
-        vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
         cdn_suffix = "-CDN"
         use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
     elif CDN_MODE == 'domain_optimized':
         optimized_domain = get_cdn_optimized_domain()
         vless_ws_addr = optimized_domain or CF_DOMAIN
-        vless_upgrade_addr = optimized_domain or CF_DOMAIN
         trojan_ws_addr = optimized_domain or CF_DOMAIN
         cdn_suffix = "-CDN"
         use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
     else:
         vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
         trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
         use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
         cdn_suffix = "-CDN"
         if not vless_ws_addr or vless_ws_addr == SERVER_IP:
             vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
         if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
             trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
-    cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+    cdn_sni = get_sub_domain()
+    # v4.13.3: CDN 节点改走 sub-* 直连源站，绕过 CF DDoS L7 ML 拦截
+    # CF 免费计划 DDoS L7 对 WebSocket 升级流量全部 403 拦截（9条链路全拦证实）
+    # CDN 优选 IP 功能保留但默认不使用（CF 代理路径已不可用）
+    vless_ws_addr = cdn_sni
+    trojan_ws_addr = cdn_sni
 
     # 1. VLESS-Reality (直连)
     params = {
@@ -1098,22 +1104,7 @@ def generate_all_links(capability='full'):
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
     links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=True)}")
 
-    # 3. VLESS-HTTPUpgrade (CDN)
-    # 仅在 standard 模式（?client=standard / 老旧客户端）时剔除
-    if capability == 'full':
-        params = {
-            'encryption': 'none',
-            'type': 'httpupgrade',
-            'security': 'tls',
-            'sni': cdn_sni,
-            'path': '/vless-upgrade',
-            'host': cdn_sni,
-            'allowInsecure': '1'
-        }
-        param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"vless://{VLESS_WS_UUID}@{vless_upgrade_addr}:{VLESS_UPGRADE_PORT}?{param_str}#{share_fragment('VLESS-HTTPUpgrade', cdn=True)}")
-
-    # 4. Trojan-WS (CDN)
+    # 5. Trojan-WS (CDN)
     params = {
         'type': 'ws',
         'security': 'tls',
@@ -1126,68 +1117,60 @@ def generate_all_links(capability='full'):
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
     links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=True)}")
 
-    # 7. TUIC v5 (直连) - UDP加速，TCP+UDP双栈
-    # TUIC v5 内置 TLS 1.3（QUIC 强制），不需要 Reality，不需要端口跳跃
-    # 【v4.12.2 修复】: insecure → allow_insecure（v2rayN 标准参数名）+ udp_relay_mode=native
-    if ENABLE_TUIC and capability == 'full':
-        params = {
-            'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
-            'allow_insecure': '1',
-            'allowInsecure': '1',
-            'insecure': '1',
-            'alpn': 'h3',
-            'congestion_control': 'bbr',
-            'reduce_rtt': '1',
-            'udp_relay_mode': 'native'
-        }
-        param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
-        links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT_ENV}?{param_str}#{share_fragment('TUIC-v5')}")
+    # 6. anyTLS (直连) - v4.14.0 新增
+    # anyTLS 分享 URI 格式：anytls://password@server:port/?params#name
+    # 参数：sni（TLS SNI）、insecure（1/0）、fp（utls 指纹）
+    # 直连源站不走 CDN，使用主域名 SNI（与证书匹配）
+    anytls_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+    params = {
+        'sni': anytls_sni,
+        'insecure': '1',
+        'fp': 'chrome',
+    }
+    param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
+    links.append(f"anytls://{ANYTLS_PASSWORD_ENV}@{SERVER_IP}:{ANYTLS_PORT}/?{param_str}#{share_fragment('anyTLS')}")
 
     return links
 
 def generate_singbox_config(capability='full'):
     """生成完整sing-box JSON配置（含自动路由规则）
 
-    【v4.12.18 客户端能力适配】:
-    - capability='full'：返回全部 7 节点
-    - capability='standard'：返回 5 节点，剔除 VLESS-HTTPUpgrade + TUIC v5
+    【v4.14.0 协议栈精简】:
+    - 节点数从 7 → 6（删除 VLESS-HTTPUpgrade + TUIC v5，新增 anyTLS）
+    - capability='full' / 'standard' 等同（v4.14.0 起两者无差异）
     """
     if CDN_MODE == 'domain_default':
         vless_ws_addr = CF_DOMAIN
-        vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
     elif CDN_MODE == 'domain_optimized':
         optimized_domain = get_cdn_optimized_domain()
         vless_ws_addr = optimized_domain or CF_DOMAIN
-        vless_upgrade_addr = optimized_domain or CF_DOMAIN
         trojan_ws_addr = optimized_domain or CF_DOMAIN
     else:
         vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
         trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
         if not vless_ws_addr or vless_ws_addr == SERVER_IP:
             vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
         if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
             trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
-    cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+    cdn_sni = get_sub_domain()
+    # v4.13.3: CDN 节点改走 sub-* 直连源站，绕过 CF DDoS L7 ML 拦截
+    # CF 免费计划 DDoS L7 对 WebSocket 升级流量全部 403 拦截（9条链路全拦证实）
+    # CDN 优选 IP 功能保留但默认不使用（CF 代理路径已不可用）
+    vless_ws_addr = cdn_sni
+    trojan_ws_addr = cdn_sni
 
     # 根据 capability 动态生成 outbounds 列表
-    _base_proxies = [
+    # v4.14.0: 6 节点固定列表（full/standard 等同）
+    _auto_test_proxies = [
         node_name("VLESS-Reality"),
         node_name("VLESS-gRPC"),
         node_name("Trojan-TCP"),
         node_name("VLESS-WS", cdn=True),
+        node_name("Trojan-WS", cdn=True),
+        node_name("anyTLS"),
     ]
-    _full_extra = []
-    if capability == 'full':
-        _full_extra.append(node_name("VLESS-HTTPUpgrade", cdn=True))
-    _base_proxies.append(node_name("Trojan-WS", cdn=True))
-    if ENABLE_TUIC and capability == 'full':
-        _full_extra.append(node_name("TUIC-v5"))
-    _auto_test_proxies = _base_proxies + _full_extra
 
     config = {
         "log": {
@@ -1308,8 +1291,7 @@ def generate_singbox_config(capability='full'):
         ],
         "outbounds": [
             # ePS-Auto: 用户可见的节点选择器
-            # [TRAE SOLO CN] v4.12.0: ENABLE_TUIC=false时selector不含TUIC
-            # [v4.12.18] 根据 capability 动态剔除 HTTPUpgrade/TUIC
+            # v4.14.0: 6 节点固定列表（full/standard 等同）
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
@@ -1460,35 +1442,7 @@ def generate_singbox_config(capability='full'):
                     }
                 }
             },
-            # VLESS-HTTPUpgrade (CDN) - 仅 full 模式返回
-        ] + ([{
-                "type": "vless",
-                "tag": node_name("VLESS-HTTPUpgrade", cdn=True),
-                "server": vless_upgrade_addr,
-                "server_port": VLESS_UPGRADE_PORT,
-                "uuid": VLESS_WS_UUID,
-                "packet_encoding": "xudp",
-                "tcp_multi_path": False,
-                "multiplex": {
-                    "enabled": False
-                },
-                "connect_timeout": "5s",
-                "tls": {
-                    "enabled": True,
-                    "server_name": cdn_sni,
-                    "insecure": True,
-                    "utls": {
-                        "enabled": True,
-                        "fingerprint": "chrome"
-                    },
-                    "alpn": ["h2", "http/1.1"]
-                },
-                "transport": {
-                    "type": "httpupgrade",
-                    "path": "/vless-upgrade",
-                    "host": cdn_sni
-                }
-            }] if capability == 'full' else []) + [
+            # v4.14.0: 删除 VLESS-HTTPUpgrade outbound（协议已下线）
             # Trojan-WS (CDN)
             {
                 "type": "trojan",
@@ -1519,26 +1473,29 @@ def generate_singbox_config(capability='full'):
                     }
                 }
             },
-            # TUIC v5 - UDP加速协议，TCP+UDP双栈
-            # QUIC 内置 TLS 1.3，不需要 Reality，不需要端口跳跃
-        ] + ([{
-                "type": "tuic",
-                "tag": node_name("TUIC-v5"),
+            # anyTLS (直连) - v4.14.0 新增
+            # 缓解 TLS-in-TLS 指纹检测，配置极简（无 path/Host/serviceName）
+            # 直连源站不走 CDN，SNI 用主域名（与证书匹配）
+            {
+                "type": "anytls",
+                "tag": node_name("anyTLS"),
                 "server": SERVER_IP,
-                "server_port": TUIC_PORT_ENV,
-                "uuid": TUIC_UUID,
-                "password": TUIC_PASSWORD,
-                "congestion_control": "bbr",
-                "udp_relay": True,
-                "zero_rtt_handshake": True,
+                "server_port": ANYTLS_PORT,
+                "password": ANYTLS_PASSWORD_ENV,
                 "tls": {
                     "enabled": True,
-                    "server_name": cdn_sni,
+                    "server_name": CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
                     "insecure": True,
-                    "alpn": ["h3"]
+                    "utls": {
+                        "enabled": True,
+                        "fingerprint": "chrome"
+                    },
+                    "alpn": ["h2", "http/1.1"]
                 },
                 "connect_timeout": "5s"
-            }] if ENABLE_TUIC and capability == 'full' else []) + ([
+            },
+            # v4.14.0: 删除 TUIC v5 outbound（协议已下线）
+        ] + ([
             # AI-SOCKS5代理池 - 多代理自动容错切换
             # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
             {
@@ -1826,28 +1783,28 @@ def generate_clash_config(capability='full'):
     """
     if CDN_MODE == 'domain_default':
         vless_ws_addr = CF_DOMAIN
-        vless_upgrade_addr = CF_DOMAIN
         trojan_ws_addr = CF_DOMAIN
         use_cdn = bool(CF_DOMAIN and CF_DOMAIN.strip())
     elif CDN_MODE == 'domain_optimized':
         optimized_domain = get_cdn_optimized_domain()
         vless_ws_addr = optimized_domain or CF_DOMAIN
-        vless_upgrade_addr = optimized_domain or CF_DOMAIN
         trojan_ws_addr = optimized_domain or CF_DOMAIN
         use_cdn = bool(optimized_domain or (CF_DOMAIN and CF_DOMAIN.strip()))
     else:
         vless_ws_addr = get_cdn_ip_for_protocol('vless_ws_cdn_ip')
-        vless_upgrade_addr = get_cdn_ip_for_protocol('vless_upgrade_cdn_ip')
         trojan_ws_addr = get_cdn_ip_for_protocol('trojan_ws_cdn_ip')
         use_cdn = (vless_ws_addr is not None and vless_ws_addr != SERVER_IP)
         if not vless_ws_addr or vless_ws_addr == SERVER_IP:
             vless_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
-        if not vless_upgrade_addr or vless_upgrade_addr == SERVER_IP:
-            vless_upgrade_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
         if not trojan_ws_addr or trojan_ws_addr == SERVER_IP:
             trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
-    cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+    cdn_sni = get_sub_domain()
+    # v4.13.3: CDN 节点改走 sub-* 直连源站，绕过 CF DDoS L7 ML 拦截
+    # CF 免费计划 DDoS L7 对 WebSocket 升级流量全部 403 拦截（9条链路全拦证实）
+    # CDN 优选 IP 功能保留但默认不使用（CF 代理路径已不可用）
+    vless_ws_addr = cdn_sni
+    trojan_ws_addr = cdn_sni
 
     proxies = []
     
@@ -1931,33 +1888,7 @@ def generate_clash_config(capability='full'):
         "skip-cert-verify": True
     })
     
-    # 3. VLESS-HTTPUpgrade (CDN) - Clash Meta通过ws-opts.v2ray-http-upgrade启用
-    # standard 模式（旧 Clash 内核）不支持，仅 full 返回
-    if capability == 'full':
-        proxies.append({
-            "name": node_name("VLESS-HTTPUpgrade", cdn=True),
-            "type": "vless",
-            "server": vless_upgrade_addr,
-            "port": VLESS_UPGRADE_PORT,
-            "uuid": VLESS_WS_UUID,
-            "tls": True,
-            "udp": True,
-            "network": "ws",
-            "multiplex": {
-                "enabled": False
-            },
-            "servername": cdn_sni,
-            "ws-opts": {
-                "path": "/vless-upgrade",
-                "headers": {"Host": cdn_sni},
-                "v2ray-http-upgrade": True
-            },
-            "client-fingerprint": "chrome",
-            "alpn": ["h2", "http/1.1"],
-            "skip-cert-verify": True
-        })
-    
-    # 6. Trojan-WS (CDN) - Clash Meta支持
+    # 5. Trojan-WS (CDN) - Clash Meta支持
     proxies.append({
         "name": node_name("Trojan-WS", cdn=True),
         "type": "trojan",
@@ -1979,40 +1910,36 @@ def generate_clash_config(capability='full'):
         "skip-cert-verify": True,
         "alpn": ["h2", "http/1.1"]
     })
-    
-    # 7. TUIC v5 (直连) - Clash Meta支持
-    # standard 模式（旧 Clash 内核）不支持，仅 full 返回
-    if ENABLE_TUIC and capability == 'full':
-        proxies.append({
-            "name": node_name("TUIC-v5"),
-            "type": "tuic",
-            "server": SERVER_IP,
-            "port": TUIC_PORT_ENV,
-            "uuid": TUIC_UUID,
-            "password": TUIC_PASSWORD,
-            "tls": True,
-            "udp": True,
-            "sni": cdn_sni,
-            "alpn": ["h3"],
-            "skip-cert-verify": True,
-            "congestion-control": "bbr",
-            "reduce-rtt": True,
-            "udp-relay-mode": "native"
-        })
-    
+
+    # 6. anyTLS (直连) - v4.14.0 新增
+    # Clash Meta (mihomo) 1.18+ 原生支持 anytls 协议类型
+    # 缓解 TLS-in-TLS 指纹检测，配置极简（无 path/Host/serviceName）
+    # 直连源站不走 CDN，SNI 用主域名（与证书匹配）
+    anytls_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+    proxies.append({
+        "name": node_name("anyTLS"),
+        "type": "anytls",
+        "server": SERVER_IP,
+        "server-port": ANYTLS_PORT,
+        "password": ANYTLS_PASSWORD_ENV,
+        "tls": True,
+        "sni": anytls_sni,
+        "skip-cert-verify": True,
+        "client-fingerprint": "chrome",
+        "alpn": ["h2", "http/1.1"]
+    })
+
     proxy_names = [p["name"] for p in proxies]
-    # auto_proxy_names 根据当前 proxies 动态生成，剔除 standard 模式下不存在的节点
+    # v4.14.0: 6 节点固定列表（full/standard 等同）
+    # HTTPUpgrade 和 TUIC 已下线，无动态剔除需求
     auto_proxy_names = [
         node_name("VLESS-Reality"),
         node_name("VLESS-gRPC"),
         node_name("Trojan-TCP"),
         node_name("VLESS-WS", cdn=True),
+        node_name("Trojan-WS", cdn=True),
+        node_name("anyTLS"),
     ]
-    if capability == 'full':
-        auto_proxy_names.append(node_name("VLESS-HTTPUpgrade", cdn=True))
-    auto_proxy_names.append(node_name("Trojan-WS", cdn=True))
-    if ENABLE_TUIC and capability == 'full':
-        auto_proxy_names.append(node_name("TUIC-v5"))
     
     config = {
         "mixed-port": 7890,
@@ -2137,13 +2064,13 @@ def create_app():
                 <p><strong>📦 sing-box JSON配置（含自动路由）</strong></p>
                 <p class="sub-link">https://{server}:{port}/singbox/{country}</p>
                 <p class="info">（导入后AI流量自动走SOCKS5，无需手动选择）</p>
-                <p class="info">- 老旧客户端兼容：<code>/singbox/{country}?client=standard</code>（5节点）</p>
+                <p class="info">- 老旧客户端兼容：<code>/singbox/{country}?client=standard</code>（v4.14.0 起等同 full，6 节点）</p>
             </div>
             <div class="sub-box">
                 <p><strong>⚔️ Clash Meta 配置（含 url-test 自动测速）</strong></p>
                 <p class="sub-link">https://{server}:{port}/clash/{country}</p>
                 <p class="info">（Clash Verge Rev / mihomo-party / Clash Nyanpasu 适用）</p>
-                <p class="info">- 老旧客户端兼容：<code>/clash/{country}?client=standard</code>（5节点，剔除TUIC/HTTPUpgrade）</p>
+                <p class="info">- 老旧客户端兼容：<code>/clash/{country}?client=standard</code>（v4.14.0 起等同 full，6 节点）</p>
             </div>
             <div class="sub-box">
                 <p><strong>📈 流量查询（所有客户端通用）</strong></p>
@@ -2151,8 +2078,9 @@ def create_app():
                 <p class="info">（纯文本输出 v2rayN 也能查看 / JSON 格式：Accept: application/json）</p>
             </div>
             <div class="info">
-                <p>服务器IP: {server}</p>
-                <p>域名: {domain}</p>
+                <p>服务器IP: {server_ip}</p>
+                <p>订阅域名: {server}（直连源站，绕过CF DDoS L7）</p>
+                <p>主域名: {domain}</p>
                 <p>使用HTTPS: 是</p>
             </div>
             <div class="sub-box" id="cdn-test-section">
@@ -2220,7 +2148,8 @@ def create_app():
         </body>
         </html>
         """.format(
-            server=CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
+            server=get_sub_domain(),
+            server_ip=SERVER_IP,
             port=SUB_PORT,
             country=COUNTRY_CODE,
             country_name=get_country_name(),
@@ -2294,7 +2223,7 @@ def create_app():
                                 'Content-Disposition': f"attachment; filename=\"{sub_name_ascii}\"; filename*=UTF-8''{sub_name_encoded}.txt",
                                 'profile-update-interval': '6',
                                 'profile-title': profile_title,
-                                'profile-web-page-url': f'https://{CF_DOMAIN}:{SUB_PORT}/info',
+                                'profile-web-page-url': f'https://{get_sub_domain()}:{SUB_PORT}/info',
                             })
         except Exception as e:
             logger.error(f"sub订阅生成失败: {e}")
@@ -2331,7 +2260,7 @@ def create_app():
                     'Content-Disposition': f'attachment; filename="{sub_name_ascii}"; filename*=UTF-8\'\'{sub_name_encoded}',
                     'profile-update-interval': '6',
                     'profile-title': profile_title,
-                    'profile-web-page-url': f'https://{CF_DOMAIN}:{SUB_PORT}/info',
+                    'profile-web-page-url': f'https://{get_sub_domain()}:{SUB_PORT}/info',
                 }
             )
         except Exception as e:
@@ -2372,7 +2301,7 @@ def create_app():
                     'Content-Disposition': f'attachment; filename="{sub_name_ascii}"; filename*=UTF-8\'\'{sub_name_encoded}',
                     'profile-update-interval': '6',
                     'profile-title': profile_title,
-                    'profile-web-page-url': f'https://{CF_DOMAIN}:{SUB_PORT}/info',
+                    'profile-web-page-url': f'https://{get_sub_domain()}:{SUB_PORT}/info',
                 }
             )
         except Exception as e:
@@ -2703,9 +2632,9 @@ def create_app():
             settings = load_cdn_settings(conn)
 
             # 获取各协议当前CDN IP
+            # v4.14.0: 删除 vless-httpupgrade（HTTPUpgrade 已下线）
             protocols = {
                 'vless-ws': 'vless_ws_cdn_ip',
-                'vless-httpupgrade': 'vless_upgrade_cdn_ip',
                 'trojan-ws': 'trojan_ws_cdn_ip',
             }
             current_ips = {}
@@ -2717,7 +2646,6 @@ def create_app():
                     'setting_key': key,
                     'node_name': node_name({
                         'vless-ws': 'VLESS-WS',
-                        'vless-httpupgrade': 'VLESS-HTTPUpgrade',
                         'trojan-ws': 'Trojan-WS',
                     }[name], cdn=True),
                     'ip': ip,

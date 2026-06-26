@@ -47,7 +47,7 @@
 
 1. **本地代码修改未部署 = 线上不生效**:修改后必须同步部署到所有服务器,仅 SFTP 同步文件不算完成,必须 `cd && python3 scripts/config_generator.py` + `systemctl restart singbox`
 2. **协议代码层新增必须配套配置重生成**:修改 `config_generator.py` 新增/删除入站协议时,必须确保 install.sh 启动流程会重跑 `config_generator.py`,否则服务器 config.json 仍合法存在 → 入站缺失但订阅伪造"已生效"
-3. **订阅层与服务端层必须同时部署**:`subscription_service.py`(订阅层,生成 7 节点 URL)与 `config_generator.py`(服务端层,生成 7 入站配置)必须同时部署,否则"订阅看到节点但服务端没监听"
+3. **协议增删必须订阅层 + 服务端层 + 辅助脚本三处同步**(v4.14.0 扩展):新增/删除协议时,必须同步修改三类文件——① 订阅层 `subscription_service.py`(Base64 URI + sing-box JSON + Clash YAML 三处生成函数 + `CLIENT_CAPABILITIES` + `CDN_PROTOCOL_KEYS` + `cdn_status_api`);② 服务端层 `config_generator.py`(入站块完全删除,不能条件性保留 `if enable_xxx`,否则 `ENABLE_xxx=true` 时服务端有入站但客户端无节点);③ 辅助脚本 `install.sh` + `health_check.sh` + `diagnose.sh` + `cdn_monitor.py` + `cloudflare_proxy_rules.py` + `diagnose_disconnect.py`(端口列表 + 防火墙规则 + iptables 计数器 + CDN IP 分配 + 诊断协议字典)。**v4.13.3 教训**:修改订阅层 CDN 节点的 server/Host 字段时,必须同步修改 config_generator.py 中 CDN 入站的 `headers.Host`/`host` 字段,否则 sing-box Host 校验失败报 "bad host"。**v4.14.0 教训**:废弃协议必须完全删除入站块,不能条件性保留(`if enable_tuic`),否则配置不一致;辅助脚本的残留代码不会立即报错但会污染数据库和诊断输出
 4. **verify_installation 必须覆盖所有入站端口**:包括 .env 随机端口(VLESS_GRPC_PORT/TROJAN_TCP_PORT),不能只验证老端口
 5. **SQLite 迁移假成功**:迁移后必须核验表结构;多进程并发场景必须用 WAL 模式(`PRAGMA journal_mode = WAL`)
 6. **pkill 自杀陷阱**:ExecStartPre 中禁止 `pkill -f "服务名.py"`,改用 `fuser -k 端口/tcp`(fuser 来自 psmisc 包,一键安装必须包含)
@@ -58,12 +58,12 @@
 ### Cloudflare 与 CDN
 
 10. **CF SSL 模式必须为 full**:自签证书场景下 strict/full_strict 会导致 526 回源失败,必须设为 full(允许自签证书,只加密不验证 CA 身份)
-11. **DNS proxied=false 致命**:proxied=false 会导致 CDN 完全失效(TLS 握手失败),绝对不能改。CDN 节点需要 proxied=true 才能通过 Cloudflare 代理回源
+11. **DNS proxied 按用途区分（v4.13.2 修正）**:CDN 节点子域名（如 `jp/sg/hk.290372913.xyz`）必须 `proxied=true`（橙云），否则 CDN 完全失效（TLS 握手失败），绝对不能改；但**订阅端点 sub-* 子域名**（如 `sub-jp/sub-sg/sub-hk.290372913.xyz`）必须 `proxied=false`（灰云直连源站），绕过 CF DDoS L7 ML 系统（详见第16条）。两类子域名用途不同，proxied 设置相反，不能混淆
 12. **CF API Token 长度校验**:`CF_API_TOKEN` 必须是 40 字符 hex(Global API Key)或 `cfat_` 开头 48 字符(scoped token),37 字符是截断的病态值,会导致所有 CF API 调用静默失败。Global API Key 用完立刻在 https://dash.cloudflare.com/profile/api-tokens 页面底部点 "Roll" 吊销旧 key
 13. **CF 全局设置巡检**:每周或每次新部署必须确认 `security_level=essentially_off` + `browser_check=off` + `bot_fight_mode=off`,CF 免费版 Managed Rules 会自动启用并拦截代理流量
 14. **诊断必须分 IPv4/IPv6**:CF 对数据中心 IPv6 段会误判为爬虫,curl 测试必须加 `-4` 强制 IPv4 才不会误判"CDN 全断"
 15. **CDN 520/400/403 是假象**:curl 测试 CDN 端口返回 4xx/520 不等于协议不通,需用正确 WebSocket 头(含 Sec-WebSocket-Key)测试,sing-box 只响应合法 WebSocket 握手。要验证是否真通,必须看 sing-box.log 中有无 inbound 真实连接记录
-16. **免费版 CF 的 DDoS L7 必须用 eoff override 放行**:CF 免费计划不允许在 skip 规则中 skip `ddos_l7` phase(API 返回 "not authorized")。正确方案是:(1) skip 规则覆盖 `http_request_firewall_managed`/`http_request_sbfm`/`http_ratelimit` 三个阶段;(2) 在 ddos_l7 phase entrypoint 创建 `sensitivity_level=eoff` override 放行代理端口流量。`cloudflare_proxy_rules.py ensure_ddos_l7_override()` 负责创建和维护此 override。CDN 全部 403 诊断顺序:① 源站直连确认服务正常 → ② 检查 skip 规则是否正确(不能含 ddos_l7) → ③ 检查 ddos_l7 override 是否为 eoff → ④ 检查 zone settings → ⑤ GraphQL 查 source 字段
+16. **订阅端点必须走 sub-* gray cloud 直连子域名绕过 CF DDoS L7**(v4.13.1 推翻 v4.12.20 的 eoff 方案):CF 免费计划 DDoS L7 是基于 ML 的动态保护系统,**无法通过任何 API 配置完全关闭**。`sensitivity_level=eoff` 只降低灵敏度,ML 仍会动态拦截(`off`/`skip ddos_l7 phase`/`skip ddosL7 product` 全部被 API 拒绝)。v4.12.20 的 eoff 方案是假阳性——3轮72项测试在 CF 规则传播延迟窗口(~1-2小时)内通过,传播完成后 ML 重新激活 403 复发。**正确方案**:订阅端点走 `sub-jp/sub-sg/sub-hk.290372913.xyz` 三个 gray cloud(`proxied=false`)子域名直连源站,完全绕过 CF 代理层。`cert_manager.py` 的 `_build_sub_domain()` + `generate_self_signed_cert()` + `request_cf_ssl_certificate()` 已将 sub-* 子域名加入 SAN。CF API 配置(skip 规则 + eoff override)仍需保留作为代理路径的兜底降级,但不能作为订阅端点的唯一路径。CDN 全部 403 诊断顺序:① 确认订阅走 sub-* 直连(主路径) → ② 源站直连确认服务正常 → ③ GraphQL 查 `firewallEventsAdaptive.source` 字段确认拦截源 → ④ 检查 skip 规则是否正确(不能含 ddos_l7) → ⑤ 检查 ddos_l7 override 是否为 eoff
 
 ### sing-box 与协议
 

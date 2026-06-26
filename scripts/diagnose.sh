@@ -74,7 +74,8 @@ check_port_listening() {
     echo "【2/18】端口监听状态"
     echo "=========================================="
 
-    for port in 443 8443 2053 2083 2087; do
+    # v4.14.0: 2053(HTTPUpgrade) 已下线，新增 2096(anyTLS)
+    for port in 443 8443 2083 2087 2096; do
         if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
             mark_pass "TCP $port: 监听中"
         else
@@ -82,11 +83,17 @@ check_port_listening() {
         fi
     done
 
-    TUIC_CHK_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
-    if ss -ulnp 2>/dev/null | grep -q ":$TUIC_CHK_PORT "; then
-        mark_pass "UDP $TUIC_CHK_PORT: 监听中 (TUIC v5)"
+    # v4.14.0: TUIC 默认关闭，仅 ENABLE_TUIC=true 时检查
+    ENABLE_TUIC_CHK=$(grep "^ENABLE_TUIC=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
+    if [ "$ENABLE_TUIC_CHK" = "true" ]; then
+        TUIC_CHK_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
+        if ss -ulnp 2>/dev/null | grep -q ":$TUIC_CHK_PORT "; then
+            mark_pass "UDP $TUIC_CHK_PORT: 监听中 (TUIC v5)"
+        else
+            mark_fail "UDP $TUIC_CHK_PORT: 未监听" "检查 singbox 配置中 TUIC v5 入站是否启用，然后 systemctl restart singbox"
+        fi
     else
-        mark_fail "UDP $TUIC_CHK_PORT: 未监听" "检查 singbox 配置中 TUIC v5 入站是否启用，然后 systemctl restart singbox"
+        mark_pass "TUIC v5: 已关闭（ENABLE_TUIC=false，符合 v4.14.0 默认配置）"
     fi
 }
 
@@ -162,13 +169,20 @@ check_ssl_cert() {
 }
 
 # ============================================================
-# 4. TUIC v5 防火墙规则
+# 4. TUIC v5 防火墙规则（v4.14.0 起默认关闭，可选检查）
 # ============================================================
 check_port_hopping() {
     echo ""
     echo "=========================================="
     echo "【4/18】TUIC v5 防火墙规则"
     echo "=========================================="
+
+    # v4.14.0: TUIC 默认关闭，仅 ENABLE_TUIC=true 时检查
+    ENABLE_TUIC_FW=$(grep "^ENABLE_TUIC=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
+    if [ "$ENABLE_TUIC_FW" != "true" ]; then
+        mark_pass "TUIC v5: 已关闭（ENABLE_TUIC=false，符合 v4.14.0 默认配置，无需防火墙规则）"
+        return
+    fi
 
     TUIC_FW_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
     if iptables -L INPUT -n | grep -q "$TUIC_FW_PORT"; then
@@ -279,7 +293,8 @@ check_env_variables() {
         return
     fi
 
-    REQUIRED_VARS="SERVER_IP CF_DOMAIN VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD TUIC_UUID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY"
+    # v4.14.0: TUIC_PASSWORD/TUIC_UUID 改为可选（ENABLE_TUIC=false 时不强制），新增 ANYTLS_PASSWORD
+    REQUIRED_VARS="SERVER_IP CF_DOMAIN VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD ANYTLS_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY"
 
     for var in $REQUIRED_VARS; do
         VAL=$(grep "^${var}=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | xargs)
@@ -522,7 +537,8 @@ check_iptables_traffic() {
     echo "=========================================="
 
     MISSING_PORTS=""
-    for port in 443 8443 2053 2083; do
+    # v4.14.0: 2053(HTTPUpgrade) 已下线，新增 2096(anyTLS)
+    for port in 443 8443 2083 2096; do
         COUNT=$(iptables -L INPUT -v -n -x 2>/dev/null | grep -Ec "dpt:$port(\\b| )" || true)
         COUNT=${COUNT:-0}
         if [ "$COUNT" -ge 1 ]; then

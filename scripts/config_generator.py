@@ -42,9 +42,12 @@ elif os.path.exists(env_file):
 vless_uuid = env_vars.get('VLESS_UUID', str(uuid.uuid4()))
 vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
 trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
+# v4.14.0: anyTLS 协议密码（与 Trojan 密码独立，避免一处泄露影响多协议）
+anytls_pass = env_vars.get('ANYTLS_PASSWORD', '') or trojan_pass
+# v4.14.0: TUIC v5 已下线（UDP 易被封 + QUIC 长流量被 QoS），保留变量仅为兼容旧 .env
 tuic_pass = env_vars.get('TUIC_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 tuic_uuid = env_vars.get('TUIC_UUID', str(uuid.uuid4()))
-enable_tuic = env_vars.get('ENABLE_TUIC', 'true').lower() == 'true'
+enable_tuic = env_vars.get('ENABLE_TUIC', 'false').lower() == 'true'  # v4.14.0: 默认 false
 tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 50444
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
 reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
@@ -53,6 +56,21 @@ reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
 REALITY_SHORT_ID_LEGACY = 'abcd1234'
 server_ip = env_vars.get('SERVER_IP', '')
 cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
+
+
+def build_sub_domain(domain):
+    """v4.13.3: 从主域名生成 sub-* 子域名（gray cloud 直连源站，绕过 CF DDoS L7）
+    CDN 入站的 headers.Host / host 必须用 sub-* 子域名，与客户端订阅配置一致，
+    否则 sing-box Host 校验失败报 "bad host" 拒绝连接。
+    """
+    if domain and '.' in domain:
+        parts = domain.split('.', 1)
+        return f"sub-{parts[0]}.{parts[1]}"
+    return domain or server_ip
+
+
+# CDN 入站用的 sub-* 直连子域名（与 subscription_service.py 的 get_sub_domain() 保持一致）
+cdn_sub_domain = build_sub_domain(cf_domain)
 socks5_user = env_vars.get('SOCKS5_USER', '')
 socks5_pass = env_vars.get('SOCKS5_PASSWORD', '')
 
@@ -98,7 +116,27 @@ if warp_unlock and not warp_client_ipv4:
     print("[WARN] WARP_UNLOCK=on但WARP_CLIENT_IPV4为空，WARP解锁已禁用")
     warp_unlock = False
 
-ai_socks5_enabled = bool(socks5_pool and ai_socks5_routing == 'on')
+# 解析 WARP_PEER_ENDPOINT "host:port" 为 endpoint schema 用的 address + port
+# sing-box 1.11+ WireGuard 从 outbound 迁移到 endpoint，peers 字段从 endpoint(string) 改为 address+port
+def parse_warp_peer_address_port(endpoint_str):
+    if not endpoint_str:
+        return None, None
+    s = endpoint_str.rsplit(':', 1)
+    if len(s) != 2:
+        print(f"[WARN] WARP_PEER_ENDPOINT格式错误（应为host:port），已忽略: {endpoint_str}")
+        return None, None
+    try:
+        return s[0].strip(), int(s[1].strip())
+    except ValueError:
+        print(f"[WARN] WARP_PEER_ENDPOINT端口非数字，已忽略: {endpoint_str}")
+        return None, None
+
+warp_peer_address, warp_peer_port = parse_warp_peer_address_port(warp_peer_endpoint)
+if warp_unlock and warp_private_key and not warp_peer_address:
+    print("[WARN] WARP_PEER_ENDPOINT解析失败，WARP解锁已禁用")
+    warp_unlock = False
+
+ai_socks5_enabled = False
 
 AI_DOMAINS = {
     'suffix': [
@@ -159,6 +197,7 @@ def parse_socks5_pool():
     return result
 
 socks5_pool = parse_socks5_pool()
+ai_socks5_enabled = bool(socks5_pool) and ai_socks5_routing == 'on'
 
 # ⚠️ SSL证书路径：优先fullchain.pem（Let's Encrypt/Cloudflare正式证书），降级cert.pem（自签名）
 # cert_manager.py生成cert.pem+key.pem，acme.sh生成fullchain.pem+key.pem
@@ -218,7 +257,21 @@ config = {
                 "type": "udp",
                 "server": "223.5.5.5"
             }
-        ],
+        ] + ([{
+            # WARP DNS: AI/流媒体域名DNS查询走WARP隧道，避免DNS级地理封锁
+            # OpenAI等AI服务使用DNS级地理封锁，如果DNS查询来自被封IP(如香港)，
+            # 会返回错误的IP或拦截页面。通过WARP隧道查1.1.1.1可获取正确解析。
+            "tag": "dns_warp",
+            "type": "udp",
+            "server": "1.1.1.1",
+            "detour": "warp-wg"
+        }] if warp_unlock and warp_private_key else []),
+        "rules": ([{
+            # AI+流媒体域名的DNS查询走WARP DNS服务器
+            "domain_suffix": (AI_DOMAINS['suffix'] + AI_GOOGLE_DOMAINS['suffix'] + STREAM_DOMAINS['suffix']) if not ai_socks5_enabled else STREAM_DOMAINS['suffix'],
+            "domain_keyword": (AI_DOMAINS['keyword'] + AI_GOOGLE_DOMAINS['keyword'] + STREAM_DOMAINS['keyword']) if not ai_socks5_enabled else STREAM_DOMAINS['keyword'],
+            "server": "dns_warp"
+        }] if warp_unlock and warp_private_key else []),
         "strategy": "prefer_ipv4"
     },
     "inbounds": [inbound for inbound in socks5_inbound + [
@@ -252,7 +305,7 @@ config = {
             "transport": {
                 "type": "ws",
                 "path": "/vless-ws",
-                "headers": {"Host": cf_domain or server_ip}
+                "headers": {"Host": cdn_sub_domain}
             },
             "tls": {
                 "enabled": True,
@@ -262,27 +315,7 @@ config = {
                 "alpn": ["h2", "http/1.1"]
             }
         },
-        {
-            "type": "vless",
-            "tag": "vless-upgrade",
-            "listen": "0.0.0.0",
-            "listen_port": 2053,
-            "tcp_fast_open": True,
-            "tcp_multi_path": False,
-            "users": [{"uuid": vless_ws_uuid}],
-            "transport": {
-                "type": "httpupgrade",
-                "path": "/vless-upgrade",
-                "host": cf_domain or server_ip
-            },
-            "tls": {
-                "enabled": True,
-                "server_name": cf_domain or server_ip,
-                "certificate_path": _cert_chain,
-                "key_path": _cert_key,
-                "alpn": ["h2", "http/1.1"]
-            }
-        },
+        # v4.14.0: 删除 vless-upgrade 入站（HTTPUpgrade 协议已下线，故障最多）
         {
             "type": "trojan",
             "tag": "trojan-ws",
@@ -294,7 +327,7 @@ config = {
             "transport": {
                 "type": "ws",
                 "path": "/trojan-ws",
-                "headers": {"Host": cf_domain or server_ip}
+                "headers": {"Host": cdn_sub_domain}
             },
             "tls": {
                 "enabled": True,
@@ -304,21 +337,27 @@ config = {
                 "alpn": ["h2", "http/1.1"]
             }
         },
+        # v4.14.0 新增 anyTLS 入站：直连隐蔽协议，缓解 TLS-in-TLS 指纹检测
+        # sing-box 1.12+ 原生支持，配置极简（无 path/Host/serviceName）
+        # 使用主域名证书（anyTLS 直连源站，不走 CDN，不需要 sub-* 子域名）
         {
-            "type": "tuic",
-            "tag": "tuic-in",
+            "type": "anytls",
+            "tag": "anytls-in",
             "listen": "0.0.0.0",
-            "listen_port": tuic_port,
-            "congestion_control": "bbr",
-            "users": [{"name": "tuic-user", "uuid": tuic_uuid, "password": tuic_pass}],
+            "listen_port": 2096,
+            "tcp_fast_open": True,
+            "tcp_multi_path": False,
+            "users": [{"password": anytls_pass}],
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                "alpn": ["h3"]
+                "alpn": ["h2", "http/1.1"]
             }
-        } if enable_tuic else None,
+        },
+        # v4.14.0: TUIC v5 入站已完全删除（UDP 易被封 + QUIC 长流量被 QoS）
+        # 如需恢复 TUIC，请回退到 v4.13.x 并启用 ENABLE_TUIC=true
         {
             "type": "vless",
             "tag": "vless-grpc",
@@ -356,6 +395,26 @@ config = {
             }
         }
     ] if inbound is not None],
+    # sing-box 1.11+ WireGuard outbound 已废弃并在 1.13.0 移除
+    # 必须使用 endpoints[] 数组，schema 与 outbound 不同：
+    # - 字段 address（不是 local_address）
+    # - peers[] 用 address + port（不是 server+server_port，也不是 endpoint 字符串）
+    "endpoints": ([{
+        "type": "wireguard",
+        "tag": "warp-wg",
+        "address": [warp_client_ipv4] + ([warp_client_ipv6] if warp_client_ipv6 else []),
+        "private_key": warp_private_key,
+        "mtu": 1280,
+        "peers": [
+            {
+                "address": warp_peer_address,
+                "port": warp_peer_port,
+                "public_key": warp_peer_public_key,
+                **({"reserved": warp_reserved} if warp_reserved else {}),
+                "allowed_ips": ["0.0.0.0/0", "::/0"]
+            }
+        ]
+    }] if warp_unlock and warp_private_key else []),
     "outbounds": [
         {"type": "direct", "tag": "direct"},
         {"type": "block", "tag": "block"}
@@ -364,19 +423,6 @@ config = {
         "tag": "unlock-warp",
         "outbounds": ["warp-wg", "direct"],
         "default": "warp-wg"
-    }, {
-        "type": "wireguard",
-        "tag": "warp-wg",
-        "local_address": [warp_client_ipv4] + ([warp_client_ipv6] if warp_client_ipv6 else []),
-        "private_key": warp_private_key,
-        "peers": [
-            {
-                "public_key": warp_peer_public_key,
-                "endpoint": warp_peer_endpoint,
-                **({"reserved": warp_reserved} if warp_reserved else {}),
-                "allowed_ips": ["0.0.0.0/0", "::/0"]
-            }
-        ]
     }] if warp_unlock and warp_private_key else []) + ([{
         # ai-residential selector：AI网站流量自动路由到住宅代理池
         # 【故障转移机制 - Bug #26教训】：
@@ -463,4 +509,4 @@ with open(os.path.join(BASE_DIR, "config.json"), 'w') as f:
 
 print("[OK] Singbox配置已保存")
 print(f"  配置文件: {os.path.join(BASE_DIR, 'config.json')}")
-print(f"  入站协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, VLESS-HTTPUpgrade, Trojan-WS" + (", TUIC v5" if enable_tuic else "") + (", SOCKS5" if socks5_user and socks5_pass else ""))
+print(f"  入站协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, Trojan-WS, anyTLS" + (", SOCKS5" if socks5_user and socks5_pass else ""))

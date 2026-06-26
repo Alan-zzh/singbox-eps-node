@@ -433,7 +433,7 @@ install_singbox() {
             PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
             > "$PASSWORD_BACKUP"
             if [ -f "$BASE_DIR/.env" ]; then
-                for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD \
+                for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD ANYTLS_PASSWORD \
                              REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
                              AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
@@ -533,6 +533,7 @@ generate_uuids_and_passwords() {
                 TROJAN_PASSWORD) TROJAN_PASSWORD="$value" ;;
                 TUIC_PASSWORD) TUIC_PASSWORD="$value" ;;
                 TUIC_UUID) TUIC_UUID="$value" ;;
+                ANYTLS_PASSWORD) ANYTLS_PASSWORD="$value" ;;
                 COUNTRY_CODE) COUNTRY_CODE="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
@@ -543,6 +544,8 @@ generate_uuids_and_passwords() {
     TROJAN_PASSWORD=${TROJAN_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
     TUIC_PASSWORD=${TUIC_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(32))")}
     TUIC_UUID=${TUIC_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
+    # v4.14.0 新增：anyTLS 协议密码（独立于 TROJAN_PASSWORD，向后兼容）
+    ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
     # 随机端口生成（10000-65535 之间，避免常用端口）
     VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
     TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
@@ -554,7 +557,7 @@ generate_uuids_and_passwords() {
     COUNTRY_CODE=${COUNTRY_CODE:-US}
     log_info "服务器IP: ${SERVER_IP}，国家代码: ${COUNTRY_CODE}"
     log_info "UUID和密码已生成"
-    log_info "VLESS-gRPC端口: ${VLESS_GRPC_PORT}，Trojan-TCP端口: ${TROJAN_TCP_PORT}，TUIC端口: ${TUIC_PORT}"
+    log_info "VLESS-gRPC端口: ${VLESS_GRPC_PORT}，Trojan-TCP端口: ${TROJAN_TCP_PORT}，TUIC端口: ${TUIC_PORT}（默认关闭），anyTLS端口: 2096"
 }
 
 generate_reality_keys() {
@@ -693,7 +696,10 @@ VLESS_WS_UUID=${VLESS_WS_UUID}
 TROJAN_PASSWORD=${TROJAN_PASSWORD}
 TUIC_PASSWORD=${TUIC_PASSWORD}
 TUIC_UUID=${TUIC_UUID}
-ENABLE_TUIC=true
+# v4.14.0: TUIC 默认关闭（UDP 易被封，QUIC 长流量被 QoS）
+ENABLE_TUIC=false
+# v4.14.0 新增：anyTLS 协议密码（独立于 TROJAN_PASSWORD）
+ANYTLS_PASSWORD=${ANYTLS_PASSWORD}
 REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
 REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
 
@@ -701,6 +707,8 @@ REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
 VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
 TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
 TUIC_PORT=${TUIC_PORT}
+# v4.14.0 新增：anyTLS 端口（固定 2096，CF CDN 支持端口）
+ANYTLS_PORT=2096
 
 # ============ 可选 ============
 CF_API_TOKEN=${CF_API_TOKEN_INPUT}
@@ -746,11 +754,17 @@ setup_certificate() {
 }
 
 setup_tuic_firewall() {
-    log_step "配置TUIC v5防火墙规则..."
-    # 从 .env 读取 TUIC 端口
+    # v4.14.0: TUIC 默认关闭，仅在 ENABLE_TUIC=true 时配置防火墙规则
+    local enable_tuic_fw="false"
     if [ -f "$BASE_DIR/.env" ]; then
+        enable_tuic_fw=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
         TUIC_PORT_FW=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
     fi
+    if [ "$enable_tuic_fw" != "true" ]; then
+        log_info "TUIC v5 已关闭（ENABLE_TUIC=false），跳过防火墙规则配置"
+        return 0
+    fi
+    log_step "配置TUIC v5防火墙规则..."
     TUIC_PORT_FW=${TUIC_PORT_FW:-50444}
     # 清理旧端口跳跃规则（21000-21200）
     iptables-save 2>/dev/null | grep -v "21000:21200" | iptables-restore 2>/dev/null || true
@@ -926,23 +940,24 @@ setup_iptables_traffic_counter() {
     iptables -A INPUT -p udp --dport 443 -j ACCEPT
     iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
     iptables -A INPUT -p udp --dport 8443 -j ACCEPT
-    iptables -A INPUT -p tcp --dport 2053 -j ACCEPT
-    iptables -A INPUT -p udp --dport 2053 -j ACCEPT
     iptables -A INPUT -p tcp --dport 2083 -j ACCEPT
     iptables -A INPUT -p udp --dport 2083 -j ACCEPT
     iptables -A INPUT -p tcp --dport 2087 -j ACCEPT
     iptables -A INPUT -p udp --dport 2087 -j ACCEPT
+    # v4.14.0 新增：anyTLS 端口（替换已下线的 2053 HTTPUpgrade）
+    iptables -A INPUT -p tcp --dport 2096 -j ACCEPT
+    iptables -A INPUT -p udp --dport 2096 -j ACCEPT
     # 动态端口
     iptables -A INPUT -p tcp --dport $VLESS_GRPC_PORT -j ACCEPT
     iptables -A INPUT -p udp --dport $VLESS_GRPC_PORT -j ACCEPT
     iptables -A INPUT -p tcp --dport $TROJAN_TCP_PORT -j ACCEPT
     iptables -A INPUT -p udp --dport $TROJAN_TCP_PORT -j ACCEPT
-    # TUIC v5 端口
+    # TUIC v5 端口（默认关闭，但保留 iptables 规则兼容旧部署）
     TUIC_PORT_IPT=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "50444")
     iptables -A INPUT -p tcp --dport $TUIC_PORT_IPT -j ACCEPT
     iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
     netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    log_info "iptables流量计数器已配置（端口443/8443/2053/2083/2087/$VLESS_GRPC_PORT/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
+    log_info "iptables流量计数器已配置（端口443/8443/2083/2087/2096/$VLESS_GRPC_PORT/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
 }
 
 start_services() {
@@ -1004,7 +1019,8 @@ verify_installation() {
     done
     echo ""
     echo -e "  端口监听:"
-    for port in 443 8443 2053 2083 2087; do
+    # v4.14.0: 2053(HTTPUpgrade) 已下线，新增 2096(anyTLS)
+    for port in 443 8443 2083 2087 2096; do
         if ss -tlnp | grep -q ":$port "; then
             echo -e "    ${GREEN}✅${NC} 端口 $port: 监听中"
         else
@@ -1025,15 +1041,20 @@ verify_installation() {
             fi
         fi
     done
-    # v4.12.0 新增：验证 TUIC v5 端口（TCP+UDP 双栈）
-    tuic_vport=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
-    if [ -n "$tuic_vport" ]; then
-        if ss -tulnp | grep -q ":$tuic_vport "; then
-            echo -e "    ${GREEN}✅${NC} 端口 $tuic_vport (TUIC_PORT): TCP+UDP 监听中"
-        else
-            echo -e "    ${RED}❌${NC} 端口 $tuic_vport (TUIC_PORT): 未监听"
-            ALL_OK=false
+    # v4.14.0: TUIC 验证改为可选（ENABLE_TUIC=true 才验证，默认 false）
+    enable_tuic_check=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
+    if [ "$enable_tuic_check" = "true" ]; then
+        tuic_vport=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+        if [ -n "$tuic_vport" ]; then
+            if ss -tulnp | grep -q ":$tuic_vport "; then
+                echo -e "    ${GREEN}✅${NC} 端口 $tuic_vport (TUIC_PORT): TCP+UDP 监听中"
+            else
+                echo -e "    ${RED}❌${NC} 端口 $tuic_vport (TUIC_PORT): 未监听"
+                ALL_OK=false
+            fi
         fi
+    else
+        echo -e "    ${YELLOW}⏸️${NC} TUIC v5: 已关闭（ENABLE_TUIC=false）"
     fi
     echo ""
     echo -e "  系统优化:"
@@ -1074,9 +1095,11 @@ print_summary() {
     echo "📋 配置文件: $BASE_DIR/.env"
     echo ""
     if [ -n "$CF_DOMAIN" ]; then
-        echo "🔗 订阅链接:"
-        echo "  Base64:    https://${CF_DOMAIN}:2087/sub/${COUNTRY}"
-        echo "  sing-box:  https://${CF_DOMAIN}:2087/singbox/${COUNTRY}"
+        SUB_DOMAIN="sub-${CF_DOMAIN}"
+        echo "🔗 订阅链接（sub-* 直连源站，绕过 CF DDoS L7）:"
+        echo "  Base64:    https://${SUB_DOMAIN}:2087/sub/${COUNTRY}"
+        echo "  sing-box:  https://${SUB_DOMAIN}:2087/singbox/${COUNTRY}"
+        echo "  Clash:     https://${SUB_DOMAIN}:2087/clash/${COUNTRY}"
     else
         echo "🔗 订阅链接:"
         echo "  Base64:    https://${SERVER_IP}:2087/sub/${COUNTRY}"
@@ -1086,7 +1109,7 @@ print_summary() {
     fi
     echo ""
     echo "📊 流量统计:"
-    echo "  首页查看:  https://${CF_DOMAIN:-$SERVER_IP}:2087/"
+    echo "  首页查看:  https://${CF_DOMAIN:+sub-}${CF_DOMAIN:-$SERVER_IP}:2087/"
     echo "  API接口:   https://${CF_DOMAIN:-$SERVER_IP}:2087/api/traffic"
     echo "  重置规则:  每月14号更新baseline（不清零iptables计数器）"
     echo ""
@@ -1337,7 +1360,7 @@ cmd_warp_unlock() {
             rm -f "$WGCF_BIN"
             exit 1
         fi
-        if ! "$WGCF_BIN" --version >/dev/null 2>&1; then
+        if ! "$WGCF_BIN" --help >/dev/null 2>&1; then
             log_error "下载的wgcf二进制无法执行"
             rm -f "$WGCF_BIN"
             exit 1
@@ -1379,9 +1402,10 @@ cmd_warp_unlock() {
     PRIVATE_KEY=$(grep '^PrivateKey' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
     PEER_PUBLIC_KEY=$(grep '^PublicKey' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
     ENDPOINT=$(grep '^Endpoint' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
-    ADDRESS_LINE=$(grep '^Address' wgcf-profile.conf | awk -F' = ' '{print $2}' | tr -d '[:space:]')
-    ADDRESS=$(echo "$ADDRESS_LINE" | cut -d',' -f1)
-    ADDRESS_V6=$(echo "$ADDRESS_LINE" | cut -d',' -f2 | grep -E '^[0-9a-fA-F:]+$' || echo "")
+    # wgcf-profile.conf 可能是一行逗号分隔或两行分别写IPv4/IPv6
+    # 用grep直接提取，避免tr去掉换行导致地址拼接
+    ADDRESS=$(grep '^Address' wgcf-profile.conf | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -1)
+    ADDRESS_V6=$(grep '^Address' wgcf-profile.conf | grep -oE '[0-9a-fA-F]{1,4}:[0-9a-fA-F:]+/[0-9]+' | head -1)
 
     if [ -z "$PRIVATE_KEY" ] || [ -z "$PEER_PUBLIC_KEY" ] || [ -z "$ENDPOINT" ] || [ -z "$ADDRESS" ]; then
         log_error "解析配置失败"

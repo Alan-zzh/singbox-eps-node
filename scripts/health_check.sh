@@ -124,17 +124,27 @@ check_services() {
 # ============================================================
 check_ports() {
     log_section "3. 端口监听"
-    for port in 443 2087 8443 2053 2083; do
+    # v4.14.0: 2053(HTTPUpgrade) 已下线，新增 2096(anyTLS)
+    for port in 443 2087 8443 2083 2096; do
         if ss -tlnp 2>/dev/null | grep -q ":$port "; then
             log "  ✓  TCP $port 监听中"
         else
             log "  ❌ TCP $port 未监听"
         fi
     done
-    if ss -ulnp 2>/dev/null | grep -q ":443 "; then
-        log "  ✓  UDP 443 监听中"
+    # v4.14.0: TUIC 默认关闭，仅 ENABLE_TUIC=true 时检查
+    if [ -f "$BASE_DIR/.env" ]; then
+        enable_tuic_hc=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
+    fi
+    if [ "$enable_tuic_hc" = "true" ]; then
+        tuic_port_hc=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+        if [ -n "$tuic_port_hc" ] && ss -ulnp 2>/dev/null | grep -q ":$tuic_port_hc "; then
+            log "  ✓  UDP $tuic_port_hc (TUIC) 监听中"
+        else
+            log "  ❌ UDP $tuic_port_hc (TUIC) 未监听"
+        fi
     else
-        log "  ℹ️ UDP 443 未监听（TUIC v5 使用独立端口，不监听 443）"
+        log "  ℹ️ TUIC v5 已关闭（ENABLE_TUIC=false）"
     fi
 }
 
