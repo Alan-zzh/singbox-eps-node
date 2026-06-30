@@ -83,7 +83,7 @@ check_port_listening() {
         fi
     done
 
-    # v4.14.0: TUIC 默认关闭，仅 ENABLE_TUIC=true 时检查
+    # v4.15.0: TUIC v5 加回，ENABLE_TUIC=true 默认开启
     ENABLE_TUIC_CHK=$(grep "^ENABLE_TUIC=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     if [ "$ENABLE_TUIC_CHK" = "true" ]; then
         TUIC_CHK_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
@@ -93,7 +93,7 @@ check_port_listening() {
             mark_fail "UDP $TUIC_CHK_PORT: 未监听" "检查 singbox 配置中 TUIC v5 入站是否启用，然后 systemctl restart singbox"
         fi
     else
-        mark_pass "TUIC v5: 已关闭（ENABLE_TUIC=false，符合 v4.14.0 默认配置）"
+        mark_pass "TUIC v5: 已关闭（ENABLE_TUIC=false）"
     fi
 }
 
@@ -169,7 +169,7 @@ check_ssl_cert() {
 }
 
 # ============================================================
-# 4. TUIC v5 防火墙规则（v4.14.0 起默认关闭，可选检查）
+# 4. TUIC v5 防火墙规则（v4.15.0 加回，默认开启）
 # ============================================================
 check_port_hopping() {
     echo ""
@@ -177,10 +177,10 @@ check_port_hopping() {
     echo "【4/18】TUIC v5 防火墙规则"
     echo "=========================================="
 
-    # v4.14.0: TUIC 默认关闭，仅 ENABLE_TUIC=true 时检查
+    # v4.15.0: TUIC v5 加回，ENABLE_TUIC=true 默认开启
     ENABLE_TUIC_FW=$(grep "^ENABLE_TUIC=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     if [ "$ENABLE_TUIC_FW" != "true" ]; then
-        mark_pass "TUIC v5: 已关闭（ENABLE_TUIC=false，符合 v4.14.0 默认配置，无需防火墙规则）"
+        mark_pass "TUIC v5: 已关闭（ENABLE_TUIC=false，无需防火墙规则）"
         return
     fi
 
@@ -293,8 +293,8 @@ check_env_variables() {
         return
     fi
 
-    # v4.14.0: TUIC_PASSWORD/TUIC_UUID 改为可选（ENABLE_TUIC=false 时不强制），新增 ANYTLS_PASSWORD
-    REQUIRED_VARS="SERVER_IP CF_DOMAIN VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD ANYTLS_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY"
+    # v4.15.0: TUIC_PASSWORD/TUIC_UUID 加回必需，anyTLS_PASSWORD 独立
+    REQUIRED_VARS="SERVER_IP CF_DOMAIN VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD ANYTLS_PASSWORD TUIC_PASSWORD TUIC_UUID REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY"
 
     for var in $REQUIRED_VARS; do
         VAL=$(grep "^${var}=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | xargs)

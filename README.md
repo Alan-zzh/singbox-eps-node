@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.14.0`
+**当前版本**: `v4.15.1`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -43,10 +43,12 @@ bash install.sh optimize     # 只做系统优化（BBRv3 + FQ；首次启用需
 
 ## 当前功能
 
-- **6 协议**(v4.14.0 精简 7→6,按客户端能力自动适配):VLESS-Reality / VLESS-gRPC / Trojan-TCP / VLESS-WS / Trojan-WS / anyTLS
-  - v4.14.0 删除:VLESS-HTTPUpgrade（故障最多+兼容最窄）、TUIC v5（UDP 易被封+QUIC 被 QoS）
+- **6 协议**(v4.15.0 优化,按客户端能力自动适配):VLESS-Reality / Trojan-TCP / VLESS-WS / Trojan-WS / anyTLS / TUIC-v5
+  - v4.15.0 删除:VLESS-gRPC（与 TUIC v5 同为多路复用协议，QUIC 比 gRPC 更高效，无 TCP 层队头阻塞）
+  - v4.15.0 加回:TUIC v5（`ENABLE_TUIC=true` 默认开启，提供 UDP relay + QUIC 多路复用）
+  - v4.14.0 删除:VLESS-HTTPUpgrade（故障最多+兼容最窄）、TUIC v5（v4.15.0 推翻此删除决定）
   - v4.14.0 新增:anyTLS（sing-box 1.12+ 原生，端口 2096，缓解 TLS-in-TLS 指纹检测）
-- **多客户端兼容**:`/sub` 默认返回 6 节点,Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅;`?client=full` 与 `?client=standard` 等同（HTTPUpgrade/TUIC 已下线，无差别），保留 `standard` 参数兼容旧客户端
+- **多客户端兼容**:`/sub` 默认返回 6 节点（CDN 模式）/ 4 节点（直连模式）,Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅;`?client=full` 与 `?client=standard` 等同，保留 `standard` 参数兼容旧客户端
 - **流量查询端点**:`/info` 文本端点(v2rayN 也能看流量)+ `/api/traffic` JSON + `subscription-userinfo` header;Base64 正文只放节点 URI,分享链接节点名已 URL 编码
 - HTTPS 订阅:Base64 + sing-box JSON + Clash Meta
 - CDN 优选 IP 自动维护(IP 池 10-15 个/服务器,用户本地实测/运营商匹配源优先,Top3 之后再做 C 段分散,`/api/cdn-status` 可查看当前IP/评分/更新时间)

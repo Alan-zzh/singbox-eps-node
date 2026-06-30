@@ -1,0 +1,150 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  - https://dns.alidns.com/dns-query
+  fallback:
+  - https://dns.google/dns-query
+  - https://cloudflare-dns.com/dns-query
+  fallback-filter:
+    geoip: true
+    ipcidr:
+    - 240.0.0.0/4
+proxies:
+- name: HK-VLESS-Reality
+  type: vless
+  server: 1.2.3.4
+  port: 443
+  uuid: 12345678-1234-1234-1234-123456789abc
+  tls: true
+  udp: true
+  network: tcp
+  flow: xtls-rprx-vision
+  multiplex:
+    enabled: false
+  reality-opts:
+    public-key: T4EGGt0J2qX5vY9Z8aW3eR7tU1iO0pS2dF4gH6jK8lM
+    short-id: abcd1234
+  client-fingerprint: chrome
+  servername: www.apple.com
+- name: HK-VLESS-gRPC
+  type: vless
+  server: 1.2.3.4
+  port: 44259
+  uuid: 12345678-1234-1234-1234-123456789abc
+  tls: true
+  udp: true
+  network: grpc
+  grpc-opts:
+    grpc-service-name: gun
+  client-fingerprint: chrome
+  servername: sub-test.example.com
+  alpn:
+  - h2
+  skip-cert-verify: true
+- name: HK-Trojan-TCP
+  type: trojan
+  server: 1.2.3.4
+  port: 41831
+  password: test-trojan-pass
+  tls: true
+  udp: true
+  network: tcp
+  client-fingerprint: chrome
+  sni: sub-test.example.com
+  alpn:
+  - h2
+  - http/1.1
+  skip-cert-verify: true
+- name: HK-VLESS-WS-CDN
+  type: vless
+  server: sub-test.example.com
+  port: 8443
+  uuid: 87654321-4321-4321-4321-cba987654321
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  servername: sub-test.example.com
+  ws-opts:
+    path: /vless-ws
+    headers:
+      Host: sub-test.example.com
+  client-fingerprint: chrome
+  alpn:
+  - h2
+  - http/1.1
+  skip-cert-verify: true
+- name: HK-Trojan-WS-CDN
+  type: trojan
+  server: sub-test.example.com
+  port: 2083
+  password: test-trojan-pass
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  sni: sub-test.example.com
+  ws-opts:
+    path: /trojan-ws
+    headers:
+      Host: sub-test.example.com
+  client-fingerprint: chrome
+  skip-cert-verify: true
+  alpn:
+  - h2
+  - http/1.1
+- name: HK-anyTLS
+  type: anytls
+  server: 1.2.3.4
+  port: 2096
+  password: test-anytls-pass
+  udp: true
+  sni: test.example.com
+  skip-cert-verify: true
+  client-fingerprint: chrome
+  alpn:
+  - h2
+  - http/1.1
+proxy-groups:
+- name: HK-节点选择
+  type: select
+  proxies:
+  - HK-自动选择
+  - HK-VLESS-Reality
+  - HK-VLESS-gRPC
+  - HK-Trojan-TCP
+  - HK-VLESS-WS-CDN
+  - HK-Trojan-WS-CDN
+  - HK-anyTLS
+- name: HK-自动选择
+  type: url-test
+  proxies:
+  - HK-VLESS-Reality
+  - HK-VLESS-gRPC
+  - HK-Trojan-TCP
+  - HK-VLESS-WS-CDN
+  - HK-Trojan-WS-CDN
+  - HK-anyTLS
+  url: http://cp.cloudflare.com/generate_204
+  interval: 60
+  tolerance: 150
+  lazy: false
+  timeout: 5000
+rules:
+- GEOIP,CN,DIRECT
+- MATCH,HK-节点选择

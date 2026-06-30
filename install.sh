@@ -1,9 +1,13 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v4.3.5
-# 用途: 新VPS全自动部署（含系统优化+CDN优选+流量统计）
+# 版本: v4.15.0
+# 用途: 新VPS全自动部署（含双部署模式+系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
+#
+# 【部署模式】
+#   - CDN混合模式（推荐）：6节点（4直连+2WS-CDN），抗封锁能力强，需要CF域名
+#   - 纯直连模式：4节点（全直连），极简无CDN依赖，IP被封即不可用
 #
 # 【自动化功能清单】
 # 阶段1-系统准备（全自动，无需用户操作）：
@@ -13,7 +17,7 @@
 #   4. 系统优化：文件描述符+内核参数
 # 阶段2-部署服务（交互式配置）：
 #   5. 卸载旧面板 → 安装singbox → 部署项目
-#   6. 交互式配置：AI代理+域名
+#   6. 交互式配置：部署模式选择+AI代理+域名
 #   7. 生成配置+证书+防火墙
 #   8. 启动服务+验证
 # ============================================================
@@ -434,7 +438,7 @@ install_singbox() {
             > "$PASSWORD_BACKUP"
             if [ -f "$BASE_DIR/.env" ]; then
                 for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD ANYTLS_PASSWORD \
-                             REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE \
+                             REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE DEPLOY_MODE \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
                              AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
                              TG_ADMIN_CHAT_ID WARP_UNLOCK WARP_PRIVATE_KEY WARP_PEER_PUBLIC_KEY \
@@ -535,6 +539,7 @@ generate_uuids_and_passwords() {
                 TUIC_UUID) TUIC_UUID="$value" ;;
                 ANYTLS_PASSWORD) ANYTLS_PASSWORD="$value" ;;
                 COUNTRY_CODE) COUNTRY_CODE="$value" ;;
+                DEPLOY_MODE) DEPLOY_MODE="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
         log_info "密码已从备份恢复"
@@ -557,7 +562,7 @@ generate_uuids_and_passwords() {
     COUNTRY_CODE=${COUNTRY_CODE:-US}
     log_info "服务器IP: ${SERVER_IP}，国家代码: ${COUNTRY_CODE}"
     log_info "UUID和密码已生成"
-    log_info "VLESS-gRPC端口: ${VLESS_GRPC_PORT}，Trojan-TCP端口: ${TROJAN_TCP_PORT}，TUIC端口: ${TUIC_PORT}（默认关闭），anyTLS端口: 2096"
+    log_info "Trojan-TCP端口: ${TROJAN_TCP_PORT}，TUIC端口: ${TUIC_PORT}，anyTLS端口: 2096"
 }
 
 generate_reality_keys() {
@@ -584,9 +589,72 @@ generate_reality_keys() {
     log_info "Reality密钥对已生成"
 }
 
+select_deploy_mode() {
+    # v4.15.2 铁律：HK1 香港阿里云（域名 hk1.* ）必须直连模式，禁止 CDN
+    # HK（hk.*）和 HK1（hk1.*）地理都在香港，COUNTRY_CODE 无法区分，只能靠域名前缀
+    _hk1_domain=""
+    if [ -n "${CF_DOMAIN:-}" ]; then
+        _hk1_domain="$CF_DOMAIN"
+    elif [ -f "$BASE_DIR/.env" ]; then
+        _hk1_domain=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+    fi
+    if [ -n "$_hk1_domain" ] && echo "$_hk1_domain" | grep -qi '^hk1\.'; then
+        log_info "检测到 HK1 香港阿里云域名 ($_hk1_domain)，强制使用纯直连模式（4节点，无CDN依赖）"
+        DEPLOY_MODE="direct"
+        return
+    fi
+
+    # 如果已从备份恢复 DEPLOY_MODE，或已有 .env 中存在 DEPLOY_MODE，直接使用旧值不询问
+    if [ -n "$DEPLOY_MODE" ]; then
+        if [ "$DEPLOY_MODE" = "direct" ]; then
+            log_info "检测到已有部署模式：纯直连模式（4节点精简，无CDN依赖）"
+        else
+            DEPLOY_MODE="cdn"
+            log_info "检测到已有部署模式：CDN混合模式（6节点全量，推荐）"
+        fi
+        return
+    fi
+    if [ -f "$BASE_DIR/.env" ]; then
+        OLD_DEPLOY_MODE=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        if [ -n "$OLD_DEPLOY_MODE" ]; then
+            DEPLOY_MODE="$OLD_DEPLOY_MODE"
+            if [ "$DEPLOY_MODE" = "direct" ]; then
+                log_info "从已有配置读取部署模式：纯直连模式（4节点精简，无CDN依赖）"
+            else
+                DEPLOY_MODE="cdn"
+                log_info "从已有配置读取部署模式：CDN混合模式（6节点全量，推荐）"
+            fi
+            return
+        fi
+    fi
+    if [ "${AUTO_YES:-0}" = "1" ]; then
+        DEPLOY_MODE="cdn"
+        log_info "非交互模式，默认选择：CDN混合模式（6节点全量，推荐）"
+        return
+    fi
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  🚀 选择部署模式${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${GREEN}1) CDN混合模式（推荐）${NC} - 6节点（4直连+2WS-CDN），抗封锁能力强，需要CF域名"
+    echo -e "  ${YELLOW}2) 纯直连模式${NC}        - 4节点（全直连），极简无CDN依赖，IP被封即不可用"
+    echo ""
+    read -p "  请选择部署模式 [1/2]（默认1）: " DEPLOY_MODE_CHOICE
+    DEPLOY_MODE_CHOICE=${DEPLOY_MODE_CHOICE:-1}
+    if [ "$DEPLOY_MODE_CHOICE" = "2" ]; then
+        DEPLOY_MODE="direct"
+        log_info "已选择：纯直连模式（4节点精简，无CDN依赖）"
+    else
+        DEPLOY_MODE="cdn"
+        log_info "已选择：CDN混合模式（6节点全量，推荐）"
+    fi
+}
+
 create_env_file() {
     log_step "创建.env配置文件..."
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
+    # 确保 DEPLOY_MODE 有值（向后兼容：旧版本无此字段时默认cdn）
+    DEPLOY_MODE=${DEPLOY_MODE:-cdn}
     AI_SOCKS5_SERVER=""
     AI_SOCKS5_PORT=""
     AI_SOCKS5_USER=""
@@ -673,11 +741,27 @@ create_env_file() {
     if [ -z "$CF_DOMAIN_INPUT" ] && [ "${AUTO_YES:-0}" != "1" ]; then
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${CYAN}  Cloudflare 域名配置（可选，用于CDN和SSL证书）${NC}"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+        if [ "$DEPLOY_MODE" = "direct" ]; then
+            echo -e "${CYAN}  域名配置（直连模式下可选）${NC}"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "  直连模式下域名可选，无域名则使用自签名证书"
+            read -p "  域名（留空使用IP+自签名证书）: " CF_DOMAIN_INPUT
+        else
+            echo -e "${CYAN}  Cloudflare 域名配置（推荐配置，用于CDN和SSL证书）${NC}"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+        fi
         if [ -n "$CF_DOMAIN_INPUT" ]; then
-            read -p "  Cloudflare API Token（留空跳过）: " CF_API_TOKEN_INPUT
+            read -p "  Cloudflare API Token（留空则使用自签名证书）: " CF_API_TOKEN_INPUT
+        fi
+    fi
+    # v4.15.2 铁律：HK1 香港阿里云（域名 hk1.* ）必须直连模式，二次确认防止用户选错
+    if [ -n "$CF_DOMAIN_INPUT" ] && echo "$CF_DOMAIN_INPUT" | grep -qi '^hk1\.'; then
+        if [ "$DEPLOY_MODE" != "direct" ]; then
+            log_warn "检测到 HK1 香港阿里云域名 ($CF_DOMAIN_INPUT)，强制切换为纯直连模式（HK1 禁用 CDN）"
+            DEPLOY_MODE="direct"
+        else
+            log_info "已确认 HK1 香港阿里云域名 ($CF_DOMAIN_INPUT) 使用纯直连模式"
         fi
     fi
     log_info "CF_DOMAIN: ${CF_DOMAIN_INPUT}"
@@ -685,6 +769,10 @@ create_env_file() {
     cat > "$BASE_DIR/.env" << EOF
 # Singbox EPS Node 环境变量配置
 # 由安装脚本自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
+
+# ============ 部署模式 ============
+# cdn: CDN混合模式（6节点，推荐）；direct: 纯直连模式（4节点，无CDN依赖）
+DEPLOY_MODE=${DEPLOY_MODE}
 
 # ============ 必填 ============
 SERVER_IP=${SERVER_IP}
@@ -696,8 +784,8 @@ VLESS_WS_UUID=${VLESS_WS_UUID}
 TROJAN_PASSWORD=${TROJAN_PASSWORD}
 TUIC_PASSWORD=${TUIC_PASSWORD}
 TUIC_UUID=${TUIC_UUID}
-# v4.14.0: TUIC 默认关闭（UDP 易被封，QUIC 长流量被 QoS）
-ENABLE_TUIC=false
+# v4.15.0: TUIC v5 加回（用户要求 TCP+UDP 双协议支持），默认开启
+ENABLE_TUIC=true
 # v4.14.0 新增：anyTLS 协议密码（独立于 TROJAN_PASSWORD）
 ANYTLS_PASSWORD=${ANYTLS_PASSWORD}
 REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
@@ -926,10 +1014,12 @@ clean_crontab_conflicts() {
 
 setup_iptables_traffic_counter() {
     log_step "配置iptables流量计数器（sing-box各入站端口）..."
-    # 从 .env 读取端口配置
+    # 从 .env 读取端口配置和部署模式
+    DEPLOY_MODE_IPT="cdn"
     if [ -f "$BASE_DIR/.env" ]; then
         VLESS_GRPC_PORT=$(grep "^VLESS_GRPC_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
         TROJAN_TCP_PORT=$(grep "^TROJAN_TCP_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
+        DEPLOY_MODE_IPT=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
     fi
     # 默认值
     VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-50051}
@@ -938,10 +1028,12 @@ setup_iptables_traffic_counter() {
     iptables -F INPUT 2>/dev/null || true
     iptables -A INPUT -p tcp --dport 443 -j ACCEPT
     iptables -A INPUT -p udp --dport 443 -j ACCEPT
-    iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
-    iptables -A INPUT -p udp --dport 8443 -j ACCEPT
-    iptables -A INPUT -p tcp --dport 2083 -j ACCEPT
-    iptables -A INPUT -p udp --dport 2083 -j ACCEPT
+    if [ "$DEPLOY_MODE_IPT" != "direct" ]; then
+        iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
+        iptables -A INPUT -p udp --dport 8443 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 2083 -j ACCEPT
+        iptables -A INPUT -p udp --dport 2083 -j ACCEPT
+    fi
     iptables -A INPUT -p tcp --dport 2087 -j ACCEPT
     iptables -A INPUT -p udp --dport 2087 -j ACCEPT
     # v4.14.0 新增：anyTLS 端口（替换已下线的 2053 HTTPUpgrade）
@@ -957,11 +1049,19 @@ setup_iptables_traffic_counter() {
     iptables -A INPUT -p tcp --dport $TUIC_PORT_IPT -j ACCEPT
     iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
     netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    log_info "iptables流量计数器已配置（端口443/8443/2083/2087/2096/$VLESS_GRPC_PORT/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
+    if [ "$DEPLOY_MODE_IPT" = "direct" ]; then
+        log_info "iptables流量计数器已配置（纯直连模式：端口443/2087/2096/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
+    else
+        log_info "iptables流量计数器已配置（CDN混合模式：端口443/8443/2083/2087/2096/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
+    fi
 }
 
 start_services() {
     log_step "启动所有服务..."
+    DEPLOY_MODE_START="cdn"
+    if [ -f "$BASE_DIR/.env" ]; then
+        DEPLOY_MODE_START=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
+    fi
     if [ ! -f "${BASE_DIR}/config.json" ]; then
         log_error "config.json 不存在！重新生成..."
         cd "$BASE_DIR" && python3 scripts/config_generator.py
@@ -971,7 +1071,7 @@ start_services() {
         cd "$BASE_DIR" && python3 scripts/config_generator.py
     fi
     # v4.11.1 修复：config_generator.py 升级后必须强制重跑 + check，避免新协议入站缺失（Bug #90 教训）
-    # 之前条件是"config.json 缺失或损坏"才重跑，导致 v4.11.0 升级 scripts/config_generator.py 新增 vless-grpc/trojan-tcp 后，
+    # 之前条件是"config.json 缺失或损坏"才重跑，导致 v4.11.0 升级 scripts/config_generator.py 新增 trojan-tcp 后，
     # 服务器 config.json 仍是 5-入站旧版，singbox 实际没监听新端口，但订阅服务已生成 7 节点 → 用户连不上"协议配置错"（实际入站缺失）
     # 现在无条件重跑 config_generator.py（生成在毫秒级，零成本）
     log_info "重跑 config_generator.py 以确保入站配置与代码版本一致..."
@@ -986,7 +1086,9 @@ start_services() {
         log_warn "证书文件缺失，重新生成自签名证书..."
         cd "$BASE_DIR" && python3 scripts/cert_manager.py
     fi
-    systemctl enable singbox singbox-sub singbox-cdn 2>/dev/null || true
+    systemctl stop singbox-cdn 2>/dev/null || true
+    systemctl disable singbox-cdn 2>/dev/null || true
+    systemctl enable singbox singbox-sub 2>/dev/null || true
     systemctl start singbox
     sleep 3
     if ! systemctl is-active --quiet singbox; then
@@ -994,22 +1096,33 @@ start_services() {
         journalctl -u singbox --no-pager -n 20 2>/dev/null || true
         echo ""
         log_warn "尝试检查config.json..."
-        /usr/local/bin/singbox check -c "${BASE_DIR}/config.json" 2>&1 || true
+        /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" 2>&1 || true
         echo ""
         log_warn "singbox启动失败，但订阅服务仍可运行"
         log_warn "请检查上方错误信息，修复后运行: systemctl restart singbox"
     fi
     systemctl start singbox-sub
     sleep 2
-    systemctl start singbox-cdn
-    log_info "所有服务已启动"
+    if [ "$DEPLOY_MODE_START" = "direct" ]; then
+        log_info "纯直连模式：singbox 和 singbox-sub 已启动（singbox-cdn 已禁用）"
+    else
+        systemctl enable singbox-cdn 2>/dev/null || true
+        systemctl start singbox-cdn
+        log_info "CDN混合模式：所有服务（singbox/singbox-sub/singbox-cdn）已启动"
+    fi
 }
 
 verify_installation() {
     log_step "验证安装..."
+    DEPLOY_MODE_VERIFY="cdn"
+    if [ -f "$BASE_DIR/.env" ]; then
+        DEPLOY_MODE_VERIFY=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
+    fi
+    echo ""
+    echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（4节点）" || echo "CDN混合模式（6节点，推荐）" )"
     echo ""
     ALL_OK=true
-    for svc in singbox singbox-sub singbox-cdn; do
+    for svc in singbox singbox-sub; do
         if systemctl is-active --quiet "$svc"; then
             echo -e "  ${GREEN}✅${NC} $svc: 运行中"
         else
@@ -1017,10 +1130,25 @@ verify_installation() {
             ALL_OK=false
         fi
     done
+    if [ "$DEPLOY_MODE_VERIFY" = "direct" ]; then
+        echo -e "  ${YELLOW}⏸️${NC} singbox-cdn: 已禁用（纯直连模式）"
+    else
+        if systemctl is-active --quiet singbox-cdn; then
+            echo -e "  ${GREEN}✅${NC} singbox-cdn: 运行中"
+        else
+            echo -e "  ${RED}❌${NC} singbox-cdn: 未运行"
+            ALL_OK=false
+        fi
+    fi
     echo ""
     echo -e "  端口监听:"
     # v4.14.0: 2053(HTTPUpgrade) 已下线，新增 2096(anyTLS)
-    for port in 443 8443 2083 2087 2096; do
+    if [ "$DEPLOY_MODE_VERIFY" = "direct" ]; then
+        CHECK_PORTS="443 2087 2096"
+    else
+        CHECK_PORTS="443 8443 2083 2087 2096"
+    fi
+    for port in $CHECK_PORTS; do
         if ss -tlnp | grep -q ":$port "; then
             echo -e "    ${GREEN}✅${NC} 端口 $port: 监听中"
         else
@@ -1030,7 +1158,7 @@ verify_installation() {
     done
     # v4.11.1 新增：验证随机端口协议（vless-grpc / trojan-tcp）实际监听
     # 历史教训：v4.11.0 升级后 config.json 没重跑，这俩端口永远不会监听，验证脚本漏检
-    for port_var in VLESS_GRPC_PORT TROJAN_TCP_PORT; do
+    for port_var in TROJAN_TCP_PORT; do
         vport=$(grep "^${port_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
         if [ -n "$vport" ]; then
             if ss -tlnp | grep -q ":$vport "; then
@@ -1041,7 +1169,7 @@ verify_installation() {
             fi
         fi
     done
-    # v4.14.0: TUIC 验证改为可选（ENABLE_TUIC=true 才验证，默认 false）
+    # v4.15.0: TUIC 验证（ENABLE_TUIC=true 默认开启，加回 TUIC v5 协议）
     enable_tuic_check=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     if [ "$enable_tuic_check" = "true" ]; then
         tuic_vport=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
@@ -1087,37 +1215,64 @@ print_summary() {
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "YOUR_SERVER_IP")
     CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
     COUNTRY=$(grep "^COUNTRY_CODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "US")
+    DEPLOY_MODE_SUMMARY="cdn"
+    if [ -f "$BASE_DIR/.env" ]; then
+        DEPLOY_MODE_SUMMARY=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
+    fi
     echo ""
     echo "=========================================="
     echo -e "${CYAN}  Singbox EPS Node 安装完成！${NC}"
     echo "=========================================="
     echo ""
+    if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
+        echo "  部署模式: 纯直连模式（4节点，无CDN依赖）"
+    else
+        echo "  部署模式: CDN混合模式（6节点，推荐）"
+    fi
     echo "📋 配置文件: $BASE_DIR/.env"
     echo ""
     if [ -n "$CF_DOMAIN" ]; then
-        SUB_DOMAIN="sub-${CF_DOMAIN}"
-        echo "🔗 订阅链接（sub-* 直连源站，绕过 CF DDoS L7）:"
-        echo "  Base64:    https://${SUB_DOMAIN}:2087/sub/${COUNTRY}"
-        echo "  sing-box:  https://${SUB_DOMAIN}:2087/singbox/${COUNTRY}"
-        echo "  Clash:     https://${SUB_DOMAIN}:2087/clash/${COUNTRY}"
+        if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
+            SUB_HOST="$CF_DOMAIN"
+            echo "🔗 订阅链接:"
+        else
+            SUB_HOST="sub-${CF_DOMAIN}"
+            echo "🔗 订阅链接（sub-* 直连源站，绕过 CF DDoS L7）:"
+        fi
+        echo "  Base64:    https://${SUB_HOST}:2087/sub/${COUNTRY}"
+        echo "  sing-box:  https://${SUB_HOST}:2087/singbox/${COUNTRY}"
+        echo "  Clash:     https://${SUB_HOST}:2087/clash/${COUNTRY}"
     else
         echo "🔗 订阅链接:"
         echo "  Base64:    https://${SERVER_IP}:2087/sub/${COUNTRY}"
         echo "  sing-box:  https://${SERVER_IP}:2087/singbox/${COUNTRY}"
-        echo ""
-        echo "⚠️  建议配置CF_DOMAIN以启用CDN和SSL证书匹配"
+        if [ "$DEPLOY_MODE_SUMMARY" != "direct" ]; then
+            echo ""
+            echo "⚠️  建议配置CF_DOMAIN以启用CDN和SSL证书匹配"
+        fi
     fi
     echo ""
     echo "📊 流量统计:"
-    echo "  首页查看:  https://${CF_DOMAIN:+sub-}${CF_DOMAIN:-$SERVER_IP}:2087/"
+    if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
+        STATS_HOST="${CF_DOMAIN:-$SERVER_IP}"
+    else
+        STATS_HOST="${CF_DOMAIN:+sub-}${CF_DOMAIN:-$SERVER_IP}"
+    fi
+    echo "  首页查看:  https://${STATS_HOST}:2087/"
     echo "  API接口:   https://${CF_DOMAIN:-$SERVER_IP}:2087/api/traffic"
     echo "  重置规则:  每月14号更新baseline（不清零iptables计数器）"
     echo ""
-    echo "🌐 CDN优选IP（4级降级保障）:"
-    echo "  主方案:    本地实测IP池（湖南电信最优）"
-    echo "  备选1:     cf.001315.xyz/ct电信API"
-    echo "  备选2:     WeTest.vip电信优选DNS"
-    echo "  备选3:     IPDB API bestcf"
+    if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
+        echo "📡 纯直连模式，无CDN依赖"
+        echo "  节点: 4个（VLESS-Reality + Trojan-TCP + anyTLS + TUIC v5）"
+    else
+        echo "🌐 CDN优选IP（4级降级保障）:"
+        echo "  主方案:    本地实测IP池（湖南电信最优）"
+        echo "  备选1:     cf.001315.xyz/ct电信API"
+        echo "  备选2:     WeTest.vip电信优选DNS"
+        echo "  备选3:     IPDB API bestcf"
+        echo "  节点: 6个（4直连 + 2WS-CDN）"
+    fi
     echo ""
     echo "⚡ 系统优化（已自动完成；BBRv3 内核首次启用需重启）:"
     if uname -r | grep -qi "xanmod"; then
@@ -1140,10 +1295,18 @@ print_summary() {
     echo "📝 下一步:"
     echo "  1. 检查配置: cat /root/singbox-eps-node/.env"
     echo "  2. 如需修改: nano /root/singbox-eps-node/.env"
-    echo "  3. 重启服务: systemctl restart singbox singbox-sub singbox-cdn"
+    if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
+        echo "  3. 重启服务: systemctl restart singbox singbox-sub"
+    else
+        echo "  3. 重启服务: systemctl restart singbox singbox-sub singbox-cdn"
+    fi
     echo ""
     echo "🔧 服务管理:"
-    echo "  查看状态: systemctl status singbox singbox-sub singbox-cdn"
+    if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
+        echo "  查看状态: systemctl status singbox singbox-sub"
+    else
+        echo "  查看状态: systemctl status singbox singbox-sub singbox-cdn"
+    fi
     echo "  查看日志: journalctl -u singbox-sub -f"
     echo ""
 }
@@ -1498,7 +1661,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v2.1.0${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.0${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -1565,7 +1728,7 @@ main() {
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v2.1.0${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.0${NC}"
             echo "=========================================="
             echo ""
             check_root
@@ -1579,6 +1742,7 @@ main() {
             setup_python_env
             generate_uuids_and_passwords
             generate_reality_keys
+            select_deploy_mode
             create_env_file
             generate_config
             setup_certificate

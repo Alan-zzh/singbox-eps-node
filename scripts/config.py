@@ -22,9 +22,12 @@ Date: 2026-06-27
   - v1.0.44改用2087端口（CDN支持），通过域名访问解决证书匹配问题。
 【v4.14.0 协议栈精简】：
   - 删除 VLESS-HTTPUpgrade-CDN（故障最多，兼容最窄）
-  - 删除 TUIC v5（UDP 易被封，QUIC 长流量被 QoS）
   - 新增 anyTLS（sing-box 1.12+ 原生，缓解 TLS-in-TLS 指纹，配置极简）
-  - VLESS_UPGRADE_PORT / TUIC_PORT 保留常量定义以兼容旧 .env，但不再使用
+  - VLESS_UPGRADE_PORT 保留常量定义以兼容旧 .env，但不再使用
+【v4.15.0 协议栈调整】：
+  - 加回 TUIC v5（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
+  - TUIC_PORT 重新启用，默认 50444，ENABLE_TUIC 默认 true
+  - v2rayN 6.x+ / v2rayNG 1.x+ 归 full 能力（内置 sing-box 内核，支持 anytls:// 和 tuic://）
 """
 
 import os
@@ -130,7 +133,7 @@ VLESS_WS_PORT = 8443
 VLESS_UPGRADE_PORT = 2053
 TROJAN_WS_PORT = 2083
 ANYTLS_PORT = 2096  # v4.14.0 新增：anyTLS 直连隐蔽协议（固定端口）
-# v4.14.0: TUIC_PORT 保留以兼容旧 .env，但默认不启用（ENABLE_TUIC=false）
+# v4.15.0: TUIC v5 加回（用户要求 TCP+UDP 双协议支持），默认 50444
 TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
 # VLESS-gRPC / Trojan-TCP 可配置端口（从 .env 读取，不固定，随机更安全）
 VLESS_GRPC_PORT = int(os.getenv('VLESS_GRPC_PORT', '0')) or 50051
@@ -155,6 +158,35 @@ COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 
 # v4.14.0: anyTLS 协议密码（安装时随机生成，与 TROJAN_PASSWORD 独立）
 ANYTLS_PASSWORD = os.getenv('ANYTLS_PASSWORD', '')
+
+# v4.15.2: HK1 香港阿里云节点特殊模式 - 全部直连，无 CDN 节点
+# ⚠️ 铁律（v4.15.2 修正）：判断 HK1 必须基于 CF_DOMAIN 域名前缀（hk1.），禁止用 COUNTRY_CODE。
+#   - HK  与 HK1 地理都在香港，COUNTRY_CODE 都可能是 'HK'，用 COUNTRY_CODE 根本无法区分。
+#   - HK  服务器：hk.290372913.xyz  → CDN  模式（6节点，橙云 proxied=true）
+#   - HK1 服务器：hk1.290372913.xyz → 直连模式（4节点，香港阿里云 200GB 流量）
+#   - 旧逻辑 (COUNTRY_CODE == 'HK' → direct) 会导致：
+#     a) HK1 若 COUNTRY_CODE=HK1 → 不匹配 → 错判为 CDN（用户反馈"老是把 HK1 搞 CDN"）
+#     b) HK  若 COUNTRY_CODE=HK  → 匹配 → 错判为 direct（CDN 节点被砍）
+#   - 正确做法：fallback 只看域名前缀，hk1. 才是直连；DEPLOY_MODE 显式设置优先级最高。
+# v4.15.0: 此标志作为 legacy 向后兼容依据，新部署统一使用 DEPLOY_MODE 控制
+_hk1_domain_fallback = (_load_env_value('CF_DOMAIN', '') or os.getenv('CF_DOMAIN', '') or '').strip().lower().startswith('hk1.')
+HK_DIRECT_MODE = _hk1_domain_fallback
+
+# v4.15.0: 部署模式 dual-stack 支持
+# 'cdn'    = CDN混合模式（6节点：4直连+2WS-CDN，启动singbox-cdn服务）
+# 'direct' = 纯直连模式（4节点：去掉WS-CDN和CDN监控，极简无CF依赖）
+# 向后兼容策略（v4.15.2 修正：基于域名前缀，非 COUNTRY_CODE）：
+#   - 如果 .env 中显式设置了 DEPLOY_MODE → 遵循显式设置（最高优先级）
+#   - 如果未设置 DEPLOY_MODE（旧部署升级）：
+#     * HK1 节点（CF_DOMAIN 以 hk1. 开头，香港阿里云）→ 默认 direct
+#     * 其他节点（HK/JP/SG 等）→ 默认 cdn
+_env_deploy_mode = os.getenv('DEPLOY_MODE', '').lower().strip() or _load_env_value('DEPLOY_MODE', '').lower().strip()
+if _env_deploy_mode in ('cdn', 'direct'):
+    DEPLOY_MODE = _env_deploy_mode
+else:
+    DEPLOY_MODE = 'direct' if HK_DIRECT_MODE else 'cdn'
+CDN_MODE_ENABLED = (DEPLOY_MODE == 'cdn')
+DIRECT_MODE_ENABLED = (DEPLOY_MODE == 'direct')
 
 
 REALITY_SHORT_ID = 'abcd1234'  # v4.10.20 弱预设已弃用，安装时通过 openssl rand -hex 8 写入 .env
@@ -592,12 +624,15 @@ def get_env(key, default=''):
 
 
 def get_sub_domain():
-    """获取订阅服务访问域名（sub-* 直连子域名，绕过 CF DDoS L7）
-    v4.13.2: 从主域名生成 sub-* 子域名（gray cloud 直连源站），
-    避免订阅端点走 CF 代理被 DDoS L7 ML 系统拦截。
+    """获取订阅服务访问域名
+    v4.15.0 dual-stack:
+    - cdn模式（默认）：生成 sub-* 子域名（gray cloud 直连源站），绕过 CF DDoS L7
+    - direct模式：直接用主域名或IP（不使用sub-*子域名）
     ⚠️ HTTPS订阅服务必须用域名访问（SSL证书已包含 sub-* SAN）
     如果没有配置域名，返回IP（此时客户端需跳过证书验证）
     """
+    if DIRECT_MODE_ENABLED:
+        return CF_DOMAIN.strip() if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
     if CF_DOMAIN and CF_DOMAIN.strip():
         domain = CF_DOMAIN.strip()
         if '.' in domain:

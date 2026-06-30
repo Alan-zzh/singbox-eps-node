@@ -1,0 +1,150 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  - https://dns.alidns.com/dns-query
+  fallback:
+  - https://dns.google/dns-query
+  - https://cloudflare-dns.com/dns-query
+  fallback-filter:
+    geoip: true
+    ipcidr:
+    - 240.0.0.0/4
+proxies:
+- name: SG-VLESS-Reality
+  type: vless
+  server: 13.212.37.11
+  port: 443
+  uuid: bca7b307-bc63-4d7f-a400-419a0e697bbc
+  tls: true
+  udp: true
+  network: tcp
+  flow: xtls-rprx-vision
+  multiplex:
+    enabled: false
+  reality-opts:
+    public-key: zTEVohDPeXFy8E61Z2ssTGVcuMwNxpGtWe1b_0AqvGw
+    short-id: abcd1234
+  client-fingerprint: chrome
+  servername: www.apple.com
+- name: SG-VLESS-gRPC
+  type: vless
+  server: 13.212.37.11
+  port: 51263
+  uuid: bca7b307-bc63-4d7f-a400-419a0e697bbc
+  tls: true
+  udp: true
+  network: grpc
+  grpc-opts:
+    grpc-service-name: gun
+  client-fingerprint: chrome
+  servername: sub-sg.290372913.xyz
+  alpn:
+  - h2
+  skip-cert-verify: true
+- name: SG-Trojan-TCP
+  type: trojan
+  server: 13.212.37.11
+  port: 14497
+  password: 1aa53e9368144b07d5f01bde59203072
+  tls: true
+  udp: true
+  network: tcp
+  client-fingerprint: chrome
+  sni: sub-sg.290372913.xyz
+  alpn:
+  - h2
+  - http/1.1
+  skip-cert-verify: true
+- name: SG-VLESS-WS-CDN
+  type: vless
+  server: sub-sg.290372913.xyz
+  port: 8443
+  uuid: e8b08678-f4a5-46c4-a081-c69fcf2e4323
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  servername: sub-sg.290372913.xyz
+  ws-opts:
+    path: /vless-ws
+    headers:
+      Host: sub-sg.290372913.xyz
+  client-fingerprint: chrome
+  alpn:
+  - h2
+  - http/1.1
+  skip-cert-verify: true
+- name: SG-Trojan-WS-CDN
+  type: trojan
+  server: sub-sg.290372913.xyz
+  port: 2083
+  password: 1aa53e9368144b07d5f01bde59203072
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  sni: sub-sg.290372913.xyz
+  ws-opts:
+    path: /trojan-ws
+    headers:
+      Host: sub-sg.290372913.xyz
+  client-fingerprint: chrome
+  skip-cert-verify: true
+  alpn:
+  - h2
+  - http/1.1
+- name: SG-anyTLS
+  type: anytls
+  server: 13.212.37.11
+  port: 2096
+  password: 31ab60c5d093719f891effa7bfd4588d
+  udp: true
+  sni: sg.290372913.xyz
+  skip-cert-verify: true
+  client-fingerprint: chrome
+  alpn:
+  - h2
+  - http/1.1
+proxy-groups:
+- name: SG-节点选择
+  type: select
+  proxies:
+  - SG-自动选择
+  - SG-VLESS-Reality
+  - SG-VLESS-gRPC
+  - SG-Trojan-TCP
+  - SG-VLESS-WS-CDN
+  - SG-Trojan-WS-CDN
+  - SG-anyTLS
+- name: SG-自动选择
+  type: url-test
+  proxies:
+  - SG-VLESS-Reality
+  - SG-VLESS-gRPC
+  - SG-Trojan-TCP
+  - SG-VLESS-WS-CDN
+  - SG-Trojan-WS-CDN
+  - SG-anyTLS
+  url: http://cp.cloudflare.com/generate_204
+  interval: 60
+  tolerance: 150
+  lazy: false
+  timeout: 5000
+rules:
+- GEOIP,CN,DIRECT
+- MATCH,SG-节点选择

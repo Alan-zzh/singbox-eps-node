@@ -1,0 +1,148 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  - https://dns.alidns.com/dns-query
+  fallback:
+  - https://dns.google/dns-query
+  - https://cloudflare-dns.com/dns-query
+  fallback-filter:
+    geoip: true
+    ipcidr:
+    - 240.0.0.0/4
+proxies:
+- name: JP-VLESS-Reality
+  type: vless
+  server: 43.207.152.47
+  port: 443
+  uuid: ad5bbdc5-9680-4154-a783-76e839e6458e
+  tls: true
+  udp: true
+  network: tcp
+  flow: xtls-rprx-vision
+  multiplex:
+    enabled: false
+  reality-opts:
+    public-key: R73cyQUpzM-ZoGQp0jC80k-w8UwuEGcLcO082Rl5qzo
+    short-id: cf76f0d642c995fc
+  client-fingerprint: chrome
+  servername: www.apple.com
+- name: JP-Trojan-TCP
+  type: trojan
+  server: 43.207.152.47
+  port: 56888
+  password: uG3hixuWQUJTq6_-Qiakow
+  tls: true
+  udp: true
+  network: tcp
+  client-fingerprint: chrome
+  sni: jp.290372913.xyz
+  alpn:
+  - h2
+  - http/1.1
+  skip-cert-verify: true
+- name: JP-VLESS-WS-CDN
+  type: vless
+  server: 108.162.198.43
+  port: 8443
+  uuid: b989bd07-d2e5-4ac1-8598-eae142684a7a
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  servername: jp.290372913.xyz
+  ws-opts:
+    path: /vless-ws
+    headers:
+      Host: jp.290372913.xyz
+  client-fingerprint: chrome
+  alpn:
+  - h2
+  - http/1.1
+  skip-cert-verify: true
+- name: JP-Trojan-WS-CDN
+  type: trojan
+  server: 108.162.198.8
+  port: 2083
+  password: uG3hixuWQUJTq6_-Qiakow
+  tls: true
+  udp: true
+  network: ws
+  multiplex:
+    enabled: false
+  sni: jp.290372913.xyz
+  ws-opts:
+    path: /trojan-ws
+    headers:
+      Host: jp.290372913.xyz
+  client-fingerprint: chrome
+  skip-cert-verify: true
+  alpn:
+  - h2
+  - http/1.1
+- name: JP-anyTLS
+  type: anytls
+  server: 43.207.152.47
+  port: 2096
+  password: 3be49390dd05a76cf418cda6dcbb9df6
+  udp: true
+  sni: jp.290372913.xyz
+  skip-cert-verify: true
+  client-fingerprint: chrome
+  alpn:
+  - h2
+  - http/1.1
+- name: JP-TUIC-v5
+  type: tuic
+  server: 43.207.152.47
+  port: 29725
+  uuid: ab18dcf8-e8ed-463e-ae85-7158596f78bc
+  password: c9602454651cf3f90fad9b0cc23ffca7
+  udp: true
+  congestion-controller: bbr
+  udp-relay-mode: native
+  alpn:
+  - h3
+  sni: jp.290372913.xyz
+  skip-cert-verify: true
+proxy-groups:
+- name: JP-节点选择
+  type: select
+  proxies:
+  - JP-自动选择
+  - JP-VLESS-Reality
+  - JP-Trojan-TCP
+  - JP-VLESS-WS-CDN
+  - JP-Trojan-WS-CDN
+  - JP-anyTLS
+  - JP-TUIC-v5
+- name: JP-自动选择
+  type: url-test
+  proxies:
+  - JP-VLESS-Reality
+  - JP-Trojan-TCP
+  - JP-VLESS-WS-CDN
+  - JP-Trojan-WS-CDN
+  - JP-anyTLS
+  - JP-TUIC-v5
+  url: http://cp.cloudflare.com/generate_204
+  interval: 60
+  tolerance: 150
+  lazy: false
+  timeout: 5000
+rules:
+- GEOIP,CN,DIRECT
+- MATCH,JP-节点选择

@@ -240,17 +240,42 @@ def ensure_proxy_skip_rule(client: CloudflareClient, zone_name: str = ZONE_NAME)
         )
         return {"status": "created_ruleset", "zone_id": zone_id, "ruleset_id": ruleset["id"]}
 
-    for rule in entrypoint.get("rules", []):
-        if rule.get("description") == PROXY_SKIP_RULE_DESCRIPTION:
-            if (
-                rule.get("expression") == desired_rule["expression"]
-                and rule.get("action_parameters") == desired_rule["action_parameters"]
-                and rule.get("enabled") is True
-            ):
-                return {"status": "already_exists", "zone_id": zone_id, "ruleset_id": entrypoint["id"], "rule_id": rule["id"]}
-            client.delete_rule(zone_id, entrypoint["id"], rule["id"])
-            updated = client.add_rule(zone_id, entrypoint["id"], desired_rule)
-            return {"status": "updated_rule", "zone_id": zone_id, "ruleset_id": entrypoint["id"], "rule_id": updated["id"]}
+    matching_rules = [
+        rule for rule in entrypoint.get("rules", [])
+        if rule.get("description") == PROXY_SKIP_RULE_DESCRIPTION
+    ]
+    desired_matches = [
+        rule for rule in matching_rules
+        if (
+            rule.get("expression") == desired_rule["expression"]
+            and rule.get("action_parameters") == desired_rule["action_parameters"]
+            and rule.get("enabled") is True
+        )
+    ]
+    stale_or_duplicate_ids = [
+        str(rule["id"])
+        for rule in matching_rules
+        if not desired_matches or rule.get("id") != desired_matches[0].get("id")
+    ]
+    for rule_id in stale_or_duplicate_ids:
+        client.delete_rule(zone_id, entrypoint["id"], rule_id)
+    if desired_matches:
+        return {
+            "status": "already_exists" if not stale_or_duplicate_ids else "deduplicated",
+            "zone_id": zone_id,
+            "ruleset_id": entrypoint["id"],
+            "rule_id": desired_matches[0]["id"],
+            "removed_rule_ids": stale_or_duplicate_ids,
+        }
+    if matching_rules:
+        updated = client.add_rule(zone_id, entrypoint["id"], desired_rule)
+        return {
+            "status": "updated_rule",
+            "zone_id": zone_id,
+            "ruleset_id": entrypoint["id"],
+            "rule_id": updated["id"],
+            "removed_rule_ids": stale_or_duplicate_ids,
+        }
 
     client.add_rule(zone_id, entrypoint["id"], desired_rule)
     return {"status": "created_rule", "zone_id": zone_id, "ruleset_id": entrypoint["id"]}
@@ -280,13 +305,11 @@ def _find_ddos_l7_managed_ruleset_id(client: CloudflareClient, zone_id: str) -> 
 
 def ensure_ddos_l7_override(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:
     """Ensure DDoS L7 override is set to eoff for proxy ports.
-    
-    v4.12.20教训（修正v4.12.12的错误结论）：
-    免费计划CF不允许在skip规则中skip ddos_l7 phase（API返回
-    "skip action parameter phase 'ddos_l7' is not authorized"）。
-    因此必须在ddos_l7 phase entrypoint创建sensitivity_level=eoff override
-    才能放行代理端口流量。之前"eoff触发被攻击标记"的观察是因为skip规则
-    配置不完整导致其他安全产品仍在拦截，eoff override本身是必要的。
+
+    Deprecated for the normal apply path. 2026-06-30 production evidence showed
+    Cloudflare still emitted source=l7ddos blocks for WS proxy paths while this
+    override was present, and re-adding it from health_check caused repeated
+    drift. Keep this function only for explicit manual experiments.
     """
     zone_id = client.get_zone_id(zone_name)
     managed_id = _find_ddos_l7_managed_ruleset_id(client, zone_id)
@@ -364,6 +387,13 @@ def remove_ddos_l7_override(client: CloudflareClient, zone_name: str = ZONE_NAME
     }
 
 
+def ensure_no_ddos_l7_override(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:
+    """Keep the normal self-healing path from reintroducing stale DDoS L7 eoff."""
+    result = remove_ddos_l7_override(client, zone_name)
+    result["reason"] = "source=l7ddos blocks persisted with eoff; CDN fallback handles edge blocking"
+    return result
+
+
 def cleanup_temporary_ip_rules(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:
     zone_id = client.get_zone_id(zone_name)
     removed: list[str] = []
@@ -403,7 +433,7 @@ def main() -> int:
     if args.action == "apply":
         result = ensure_proxy_skip_rule(client, args.zone)
         result["tls_settings"] = ensure_tls_settings(client, args.zone)
-        result["ddos_l7_override"] = ensure_ddos_l7_override(client, args.zone)
+        result["ddos_l7_override"] = ensure_no_ddos_l7_override(client, args.zone)
     elif args.action == "cleanup-temp":
         result = cleanup_temporary_ip_rules(client, args.zone)
         access_result = remove_temporary_access_rules(client, args.zone)

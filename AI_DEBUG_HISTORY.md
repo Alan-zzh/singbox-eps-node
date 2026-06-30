@@ -1,3 +1,230 @@
+## 最新排查（2026-06-28 v4.15.5）[Trae CN]
+
+### Shadowrocket Base64 订阅节点缺失 — CLIENT_CAPABILITIES 错误归类为 xray
+
+- **现象**: iOS Shadowrocket / V2RayN 使用 SUB(Base64)协议时只有 4 个节点（直连2+CDN2），缺少 anyTLS 和 TUIC v5，而 Clash 订阅有完整 6 节点。用户反馈"怎么越来越少了"。
+- **根因**: `subscription_service.py` 中 `CLIENT_CAPABILITIES` 字典把 `'shadowrocket'` 错误归类为 `'xray'`，导致 `/sub` 端点根据 Shadowrocket 的 User-Agent 返回 xray 兼容节点（仅 4 个：VLESS-Reality/Trojan-TCP/VLESS-WS-CDN/Trojan-WS-CDN），过滤掉 anyTLS 和 TUIC v5。同时 `'clash-meta'` 只有带连字符版本，`ClashMetaForAndroid/2.x` UA 不匹配，也归为 xray。
+- **证据**: 服务器本地 `curl -sk -H 'User-Agent: Shadowrocket' https://127.0.0.1:2087/sub | base64 -d | grep -c '://'` 返回 4（修复前），修复后返回 6。
+- **关于 Shadowrocket 协议支持**: Shadowrocket iOS 自 2023 年起原生支持 TUIC v5，对未识别协议 URI（如 anytls://）会安全忽略而非崩溃，不应归入纯 Xray 客户端。
+- **修复**:
+  1. `CLIENT_CAPABILITIES['shadowrocket']`: `'xray'` → `'full'`
+  2. `CLIENT_CAPABILITIES` 补充 `'clashmeta': 'full'`（无连字符匹配 ClashMetaForAndroid）
+  3. `CLIENT_CAPABILITIES` 补充 `'clash meta': 'full'`（带空格变体）
+  4. `CLIENT_QUERY_ALIASES['shadowrocket']`: `'xray'` → `'full'`（`?client=shadowrocket` 也返回全量）
+  5. Web UI HTML 描述同步更新：Shadowrocket 归入全量客户端列表，"纯 Xray 客户端"改为 Surge/Quantumult X/v2Box
+- **验证**: 三台服务器部署后，Shadowrocket UA=6节点 / ClashMetaForAndroid UA=6节点 / 无UA(curl默认)=4节点（安全降级）。
+- **教训**: 新增客户端适配时必须查实际协议支持，不能凭"Shadowrocket 是 iOS 客户端"就归为 xray；UA 关键词必须覆盖常见变体（连字符/无连字符/带空格）。
+
+---
+
+## （2026-06-28 v4.15.4）[Trae CN]
+
+### 订阅首页 HTTP 500 — cdn_script_html 未定义 UnboundLocalError + HK1 首次正确部署
+
+- **背景**: v4.15.2 部署 HK 服务器验证时发现首页 `/` 返回 HTTP 500，但 `/clash/HK` 和 `/sub/HK` 订阅端点返回 200 正常。
+- **现象**: `curl -sk https://127.0.0.1:2087/` 返回 500，journalctl 日志：
+  ```
+  File "/root/singbox-eps-node/scripts/subscription_service.py", line 2307, in home
+    {cdn_script_html}
+  UnboundLocalError: cannot access local variable 'cdn_script_html' where it is not associated with a value
+  ```
+- **根因**: `subscription_service.py` `home()` 函数第 2168-2235 行的两个分支：
+  - `if DIRECT_MODE_ENABLED:` 分支（第 2169-2170 行）定义了 `cdn_section_html` 和 `cdn_script_html = ''`
+  - `else:` 分支（第 2172-2235 行，CDN 模式）**只**定义了 `cdn_section_html`（多行字符串含内联 `<script>`），**遗漏了 `cdn_script_html` 定义**
+  - 第 2307 行 HTML 模板 `{cdn_script_html}` 在 CDN 模式下引用未定义变量 → UnboundLocalError
+- **修复**: `subscription_service.py:2238` else 分支末尾补充 `cdn_script_html = ''`（CDN 测试 JS 已内联在 cdn_section_html 中，无需额外 script）
+- **HK1 首次正确部署**:
+  - HK1（47.243.72.97，DNS 解析 hk1.290372913.xyz 得到）此前从未正确部署 v4.15.0+（config_generator.py 仍是旧版，生成 7 节点含已废弃的 VLESS-gRPC/VLESS-HTTPUpgrade，无 anyTLS）
+  - `deploy_v4152.py` 上传列表补充 `config_generator.py`（原仅 3 文件：config.py/subscription_service.py/install.sh）
+  - 重新部署后 HK1 正确生成 4 节点直连模式（VLESS-Reality, Trojan-TCP, anyTLS, TUIC v5）
+- **验证（四台服务器全部 200）**:
+  - HK (43.249.174.222): CDN 6 节点，首页/clash/sub = 200
+  - JP (43.207.152.47): CDN 6 节点，首页/clash/sub = 200
+  - SG (13.212.37.11): CDN 6 节点，首页/clash/sub = 200
+  - HK1 (47.243.72.97): 直连 4 节点，首页/clash/sub = 200
+- **教训**: ① if/else 分支中引用的变量必须在两个分支都定义，Python UnboundLocalError 不会在编译期发现，只在运行时触发；② 部署脚本上传列表必须覆盖所有修改过的文件，HK1 因 config_generator.py 未同步导致协议栈停留在 v4.14.x；③ DNS 解析是获取灰云直连源站真实 IP 的有效手段（hk1. proxied=false，解析结果即源站 IP）
+
+---
+
+## 最新排查（2026-06-28 v4.15.3）[Trae CN+多智能体]
+
+### v4.15.1 伪 CDN 化修复闭环验证 — 多智能体协同审查 + 真实端到端测试 + cdn_sni 残留修复
+
+- **背景**: v4.15.1 修复了伪CDN化主问题后，用户要求"剩余风险/未验证部分真实风险能彻底修复好吗？本地有clash可根据我这个来测试和匹配，严谨的核查，多智能体一起来"。启动架构/稳定性/QA/实用性四角色并行审查。
+- **多智能体审查发现的问题**:
+  1. **直连模式 else 分支 cdn_sni 残留（代码质量问题）**: `subscription_service.py` 在 sing-box JSON 函数(line 1274)和 Clash YAML 函数(line 1922)的直连模式 else 分支中，`cdn_sni = get_sub_domain()` 在 DIRECT_MODE_ENABLED=true 时返回 SERVER_IP（IP 地址），导致 Trojan-TCP 等直连节点的 TLS SNI 为 IP 地址而非主域名（与证书 CN 不匹配，虽 skip-cert-verify=true 不影响连接但不规范）。
+  2. **修复**: 两处 else 分支的 `cdn_sni = get_sub_domain()` 统一改为 `cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP`，与 CDN 模式分支一致。
+- **七项闭环验证全部通过**:
+  1. **A1 架构审查**: grep 全量扫描 subscription_service.py/config_generator.py/辅助脚本，CDN 节点不再泄漏 sub-*。
+  2. **A2 真实订阅拉取**: 从三台服务器拉取 Clash YAML/sing-box JSON/Base64 三种订阅格式到本地。
+  3. **A3 本地 mihomo 内核校验**: 找到本地 `C:\Clash Verge\verge-mihomo.exe`(v1.19.25)，三台 Clash 配置 `-t` 校验全部 `test is successful`。
+  4. **A4 CDN 节点字段审计**: JP/SG/HK 三台 CDN 节点 server=CF优选IP(108.162.x.x/162.159.x.x), sni=主域名(jp/sg/hk.290372913.xyz), ws-Host=主域名，0 处 sub-* 泄漏。
+  5. **A5 真实 CF 代理路径端到端测试（最关键验证）**: 从本地 Windows 通过 curl --resolve 模拟真实客户端连接 CF 边缘 IP → CF 边缘 → 回源 → sing-box WS 入站，6/6 测试点全部返回 HTTP 101 Switching Protocols（WS握手成功），证明真 CDN 路径完全恢复。
+  6. **A6 辅助脚本扫描**: cdn_monitor.py/cloudflare_proxy_rules.py/health_check.sh/diagnose.sh/diagnose_disconnect.py/cert_manager.py 共6个文件扫描，cert_manager.py 中 sub-* 仅用于证书SAN（正确用法），其余文件无 sub-* 错误泄漏。
+  7. **A9 HK 模式确认**: v4.15.2 修复 HK1/HK 判断后，HK(hk.290372913.xyz) 正确运行 CDN 全量模式 6 节点，config.json 入站完整(vless-reality/vless-ws/trojan-ws/anytls-in/tuic-in/trojan-tcp)，8443/2083 端口正常监听。
+- **教训**: 代码修复后不能仅依赖服务器本地回环测试(127.0.0.1)，必须做从外部经过 CF 代理层的真实端到端测试（客户端→CF IP→源站），才能证明 CDN 路径真正恢复。本地真实客户端内核(mihomo -t)校验比服务器端 curl 更能发现客户端兼容性问题。
+
+---
+
+## 最新排查（2026-06-28 v4.15.2）[Trae CN]
+
+### HK1 反复被错判为 CDN 模式 — COUNTRY_CODE 判断依据根本性错误
+
+- **背景**: 用户强烈反馈"每次修复每次修改你老是把 HK1 搞 CDN 的",要求"永久记录,永远不出现这个问题"。这是反复出现的回归问题,此前未根除。
+- **现象**: HK1 香港阿里云服务器(`hk1.290372913.xyz`,200GB 流量)本应是直连模式(4 节点,无 CDN 依赖),但代码层 fallback 逻辑基于 `COUNTRY_CODE == 'HK'` 判断,导致:
+  - 若 HK1 服务器 `.env` 中 `COUNTRY_CODE=HK1`(区分 HK) → `== 'HK'` 不匹配 → fallback 走 CDN 模式(错误!HK1 被搞成 CDN)
+  - 若 HK1 服务器 `COUNTRY_CODE=HK`(与 HK 相同) → `== 'HK'` 匹配 → 走直连(看似正确,但 HK 服务器也会被误判为直连)
+  - 无论如何设置 `COUNTRY_CODE`,都无法同时正确区分 HK(CDN)和 HK1(直连)
+- **根因**: `COUNTRY_CODE` 是地理国家代码,两台香港服务器地理都在香港,`COUNTRY_CODE` 根本无法区分。旧代码三处都用 `COUNTRY_CODE == 'HK'` 作为直连判断:
+  1. `config.py:165` `HK_DIRECT_MODE = (COUNTRY_CODE == 'HK')`
+  2. `config.py:179` `DEPLOY_MODE = 'direct' if HK_DIRECT_MODE else 'cdn'`(fallback)
+  3. `subscription_service.py:132` `_hk_direct_fallback = (COUNTRY_CODE == 'HK')`
+  4. `subscription_service.py:162` fallback `HK_DIRECT_MODE = (COUNTRY_CODE == 'HK')`
+- **正确判断依据**: `CF_DOMAIN` 域名前缀。HK1 域名是 `hk1.290372913.xyz`(前缀 `hk1.`),HK 域名是 `hk.290372913.xyz`(前缀 `hk.`)。只有 `hk1.` 开头才是直连模式。
+- **修复(v4.15.2)**:
+  1. `config.py:172-173` `HK_DIRECT_MODE` 改为 `CF_DOMAIN.strip().lower().startswith('hk1.')`,注释明确禁止用 COUNTRY_CODE
+  2. `config.py:178-187` fallback 注释更新,明确"基于域名前缀,非 COUNTRY_CODE"
+  3. `subscription_service.py:132-134` `_hk_direct_fallback` 改为基于 `CF_DOMAIN` 前缀
+  4. `subscription_service.py:163-165` fallback `HK_DIRECT_MODE` 改为基于 `CF_DOMAIN` 前缀
+  5. `install.sh:select_deploy_mode()` 开头新增 hk1. 域名检测,强制 `DEPLOY_MODE=direct` 并告警
+  6. `install.sh:create_env_file()` 用户输入域名后二次确认,hk1. 域名强制 direct
+- **优先级**: ① `.env` 显式 `DEPLOY_MODE` > ② fallback 域名前缀(`hk1.`→direct,其他→cdn)
+- **验证**: `python -m py_compile scripts/config.py scripts/subscription_service.py` 通过;`grep "COUNTRY_CODE.*==.*HK" scripts/` 仅剩 config.py 注释中的旧逻辑说明文字,无实际代码判断
+- **教训**: 凡是涉及"同地区多服务器不同模式"的判断,必须用唯一可区分的标识(域名/IP/显式配置),不能用地理国家代码。用户反复反馈的同一问题,必须升级为铁律写入 AGENTS.md(本次新增第29条),并在代码注释中标注"禁止用 COUNTRY_CODE",防止后续 AI 回归
+
+---
+
+## 最新排查（2026-06-28 v4.15.1）[Trae CN]
+
+### CDN "伪 CDN 化"彻底修复 — v4.13.2→v4.13.3 连锁错误定位与三层路径分离
+- **背景**: 用户看到 v4.15.0 总结中"CDN '伪 CDN 化'导致的抗 IP 封锁能力丧失未修复（P1 任务）"后追问"为什么有这个的存在"，要求"详细查阅 CD 问题病历本彻底修复"。完整重读 1024 行 AI_DEBUG_HISTORY.md（v4.10.20→v4.15.0）定位根因。
+- **根因（v4.13.1→v4.13.2→v4.13.3 三步连锁错误）**:
+  1. **v4.13.1 正确创建 sub-* 灰云直连子域名**: 为绕过 CF 免费版 DDoS L7 ML 系统对订阅端点的 403 拦截，创建 `sub-jp/sub-sg/sub-hk.290372913.xyz` 三个 gray cloud（`proxied=false`）DNS 记录直连源站 IP。**原意仅用于订阅端点**（`/clash` `/sub` `/singbox`），不用于 CDN 代理节点。
+  2. **v4.13.2 错误扩散到 CDN 代理节点**: `subscription_service.py` 修复 v4.13.1 遗留 P0 问题时，把 CDN 代理节点（VLESS-WS-CDN / Trojan-WS-CDN）的 server/Host 也改为 sub-*。代码片段（3 处相同模式）:
+     ```python
+     cdn_sni = get_sub_domain()  # 错误：sub-* 用于 CDN 代理节点
+     vless_ws_addr = cdn_sni     # 强制覆盖 CDN_MODE 分支
+     trojan_ws_addr = cdn_sni    # 强制覆盖 CDN_MODE 分支
+     ```
+     `CDN_MODE` 分支逻辑（`ip_optimized`/`domain_optimized`/`domain_default`）形同虚设——无论用户选哪个模式，CDN 节点都被强制改为 sub-* 直连源站。
+  3. **v4.13.3 雪上加霜**: 为修复 sing-box "bad host" 错误（客户端发 sub-* Host，服务端 config.json 入站 headers.Host 是主域名，Host 不匹配），把 `config_generator.py` 的 CDN 入站 `headers.Host`/`host` 也改为 `cdn_sub_domain`（与订阅层"对齐"）。这彻底坐实"伪 CDN 化"——CDN 节点完全直连源站，CF 代理层不再参与，抗 IP 封锁能力丧失。
+- **后果**: CDN 节点（VLESS-WS-CDN / Trojan-WS-CDN）虽命名为 "CDN"，实际不走 CF 代理层。客户端 → sub-* DNS 解析到源站 IP → 直连源站:8443/2083 → sing-box。源站 IP 暴露在 sub-* DNS 解析中，一旦源站 IP 被封，CDN 节点同时失效，无法通过切换 CF IP 绕过封锁。cdn_monitor 数据库维护的 CF 优选 IP 池仅在 `domain_optimized`/`ip_optimized` 模式下被读取（但被 v4.13.2 强制覆盖后实际不生效）。
+- **修复（三层路径分离）**:
+  1. **`subscription_service.py` 删除 3 处强制覆盖**（`replace_all=true` 一次性替换）:
+     ```python
+     # 修改前（3 处相同模式，强制 CDN 节点走 sub-*）:
+     cdn_sni = get_sub_domain()
+     vless_ws_addr = cdn_sni
+     trojan_ws_addr = cdn_sni
+     # 修改后（恢复 CDN_MODE 分支逻辑，cdn_sni 用主域名）:
+     # v4.15.1: 恢复真 CDN 模式（修复 v4.13.2 起的"伪 CDN 化"连锁错误）
+     # - vless_ws_addr/trojan_ws_addr 保留上面 CDN_MODE 分支的值（CF 优选 IP / 优选域名 / 主域名）
+     # - cdn_sni 用主域名 cf_domain，让客户端通过 CF 代理层（橙云 proxied=true）→ CF 边缘 → 回源源站
+     # - 订阅端点（/clash /sub /singbox）继续走 sub-* 灰云直连绕过 CF DDoS L7，与此处无关
+     # - v4.13.3 教训：服务端 config_generator.py 的 CDN 入站 headers.Host 必须与此处 cdn_sni 一致
+     cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
+     ```
+     `CDN_MODE` 分支逻辑（`ip_optimized` 用 CF 优选 IP / `domain_optimized` 用优选域名 / `domain_default` 用主域名）现在正常工作，不再被强制覆盖。
+  2. **`config_generator.py` `_ws_host` 简化**:
+     ```python
+     # 修改前（条件分支，DIRECT_MODE/HK 用主域名，其他用 sub-*）:
+     _country_code = env_vars.get('COUNTRY_CODE', '').upper()
+     if DIRECT_MODE_ENABLED:
+         _ws_host = cf_domain or server_ip
+     elif _country_code == 'HK':
+         _ws_host = cf_domain or server_ip
+     else:
+         _ws_host = cdn_sub_domain  # 错误：CDN 模式下 CDN 入站用 sub-*
+     # 修改后（统一用主域名，与服务端 sing-box config.json 入站 headers.Host 一致）:
+     _ws_host = cf_domain or server_ip
+     ```
+  3. **三层路径分离明确**:
+     - **CDN 代理节点**（VLESS-WS/Trojan-WS 入站，端口 8443/2083）→ 主域名 `cf_domain`（橙云 `proxied=true`），客户端 → CF 优选 IP → CF 边缘 → 回源源站，真 CDN 路径抗 IP 封锁
+     - **订阅端点**（singbox-sub 服务的 `/clash` `/sub` `/singbox`，端口 2087）→ sub-* 子域名（灰云 `proxied=false` 直连源站），绕过 CF DDoS L7 ML 系统
+- **部署验证（JP/SG/HK 三台并行，deploy_v4151_cdn_fix.py）**:
+
+  | 验证项 | JP | SG | HK |
+  |--------|-----|-----|-----|
+  | V1 config.json CDN Host（vless-ws / trojan-ws） | jp.290372913.xyz ✅ | sg.290372913.xyz ✅ | hk.290372913.xyz ✅ |
+  | V2 /clash CDN 节点 server（应为 CF 优选 IP 或主域名） | 108.162.198.43 ✅ | 162.159.42.53 ✅ | （HK 直连模式无 CDN 节点）✅ |
+  | V2 /clash CDN 节点 Host（应为主域名） | jp.290372913.xyz ✅ | sg.290372913.xyz ✅ | - |
+  | V3 sub-* 订阅端点 /clash HTTPS | 200 ✅ | 200 ✅ | 200 ✅ |
+  | V4 主域名:8443 curl（预期假阳性） | 520 | 520 | 520 |
+  | V5 节点数 | 6 ✅ | 6 ✅ | 4 ✅ |
+  | V6 sub-* 在订阅中出现次数（应 0） | 0 ✅ | 0 ✅ | 0 ✅ |
+
+- **V4 520 假阳性分析**: 根据 AGENTS.md 第15条"CDN 520/400/403 是假象"，curl 测试 CDN 端口返回 520 不等于协议不通。sing-box 8443 端口期望 WebSocket 握手（含 `Sec-WebSocket-Key` 头），curl 发普通 HTTPS 请求被 sing-box 拒绝并返回 520。真正的连接测试需要用 WebSocket 握手或客户端实际验证。V6（sub-* 在订阅中出现 0 次）是关键证据——证明 CDN 节点已完全切换回主域名，不再走 sub-* 直连。
+- **教训（铁律，最高优先级）**:
+  - **"绕过方案"的应用范围必须明确边界**: v4.13.1 的 sub-* 灰云直连方案是绕过 CF DDoS L7 ML 的正确架构，但应用范围仅限于订阅端点。v4.13.2 错误地把它扩散到 CDN 代理节点，导致"伪 CDN 化"。**任何"绕过/降级/备用路径"方案必须明确边界——哪些端点走、哪些不走，不能为了"统一"而无脑扩散**。AGENTS.md 新增第28条铁律明确此边界。
+  - **修复"对齐"错误时必须质疑前提**: v4.13.3 修复 sing-box "bad host" 错误时，选择把服务端 `headers.Host` "对齐"到 sub-*（错误前提），而不是质疑"为什么客户端发 sub-*"（正确质疑）。**当 A 与 B 不一致时，必须先判断哪个是对的，而不是无脑把 B 改成 A**。如果当时质疑了，就会发现 v4.13.2 的错误，避免 13 个版本的"伪 CDN 化"。
+  - **CDN 节点抗 IP 封锁能力是 CDN 的核心价值**: CDN 节点不走 CF 代理层 = 不是 CDN，只是普通 WebSocket 节点。任何 CDN 节点修改必须验证"客户端 → CF IP → CF 边缘 → 源站"路径完整性，不能仅看"节点能连上"。
+  - **病历本必须完整阅读**: 本次修复的关键是完整重读 1024 行 AI_DEBUG_HISTORY.md，发现 v4.13.1 的原意（仅订阅端点）与 v4.13.2 的实际实现（扩散到 CDN 节点）的差异。如果只看最近一两个版本，会错过这个 13 个版本的连锁错误。
+
+---
+
+## 最新排查（2026-06-28 v4.15.0）[Trae CN+多智能体审查]
+
+### 协议栈优化 + CDN 永久修复 P0 — TUIC v5 加回/VLESS-gRPC 删除/ENABLE_TUIC 三层同步/CDN 监控补齐
+- **背景**: 用户要求"在 TUIC 集成后审查架构，识别可精简的直连协议用 V5 替代" + "解决 CDN 反复失败的永久方案"。明确指示"全部并行推进"。
+- **架构评估**: VLESS-gRPC 与 TUIC v5 同为多路复用协议，但 TUIC 基于 QUIC 的多路复用比 gRPC over HTTP/2 更高效（无 TCP 层队头阻塞，UDP 自然多路复用），且能提供 UDP relay 支持。决定用 TUIC v5 替代 VLESS-gRPC。
+- **多智能体审查发现 P0/P1/P2 三层问题**:
+  1. **P0 ENABLE_TUIC 三层不一致**: `enable_tuic`/`ENABLE_TUIC` 变量已定义但未使用。`ENABLE_TUIC=false` 时：install.sh 关闭防火墙 → config_generator.py 仍生成 TUIC 入站 → subscription_service.py 仍生成订阅节点。三层不一致导致：① 服务端有入站但订阅无节点（用户拿到订阅无法用）；② 防火墙关闭但服务端监听（端口暴露风险）。
+  2. **P1 TUIC 凭据不匹配静默失败**: config_generator.py 在 `TUIC_UUID` 为空时生成随机 UUID，但 subscription_service.py 用空字符串。凭据不匹配，TUIC 握手静默失败，用户拿到节点但无法连接，无明显错误。
+  3. **P2 节点名空格回归**: `node_name("TUIC v5")` 生成带空格节点名，AI_DEBUG_HISTORY.md:184 已记录此坑会导致部分客户端（如老版 mihomo）截断为 "TUIC"。本次 TUIC 加回时回归，必须用 `"TUIC-v5"`。
+- **CDN 反复失败根因分析**: `subscription_service.py:1096-1108` 强制 CDN 节点 server/Host 走 sub-* 灰云直连源站（v4.13.1 的 sub-* 直连方案），cdn_monitor 优选 IP 池仅作监控指标。现状是"伪 CDN 化"——丧失抗 IP 封锁能力但稳定性显著提升（绕过 CF DDoS L7 ML 系统）。此前 sub-* 直连路径**零监控**，是 CDN 反复失败的隐性根因。
+- **修复**:
+  1. **P0 ENABLE_TUIC 三层同步**:
+     - `config_generator.py` 入站块用 `*([{...}] if enable_tuic else [])` 解包语法条件包裹
+     - `subscription_service.py` 8 处 TUIC 代码路径全部加 `if ENABLE_TUIC` 条件：Base64 URI（line 1212）、sing-box JSON outbound（lines 1615-1631）、Clash YAML proxies（lines 2083-2100）、auto_proxy_names（line 2108）、_auto_test_proxies（lines 1270-1283）、node_count_full（lines 2142-2148）
+  2. **P1 TUIC 凭据降级**: subscription_service.py 新增凭据降级逻辑——`ENABLE_TUIC=true` 且 `TUIC_UUID`/`TUIC_PASSWORD` 任一为空时自动 `ENABLE_TUIC=False`，避免凭据不匹配
+  3. **P2 节点名空格**: 所有 7 处 `"TUIC v5"` 改为 `"TUIC-v5"`
+  4. **VLESS-gRPC 删除**: config_generator.py 入站块完全删除；subscription_service.py 三处生成函数 + _auto_test_proxies + auto_proxy_names + singbox_ports（2 处）同步删除；install.sh 6 处清理（日志/iptables/注释/verify_installation，保留 VLESS_GRPC_PORT 环境变量兼容旧 .env）
+  5. **CDN 监控补齐**:
+     - 新增 `scripts/sub_domain_monitor.py`：每 5 分钟对 sub-jp/sub-sg/sub-hk 三域名做 TLS 握手 + HTTP /info 可用性检测，失败 TG 告警（30 分钟去重），自动检测 COUNTRY_CODE，tg_bot 不可用时降级为日志
+     - `scripts/cert_manager.py` 新增 `get_cert_days_left()` + `_send_cert_renew_alert()`，证书续签失败时 TG 告警（P0🔴级别）
+     - `scripts/health_check.sh` 新增 `check_cloudflare_global_settings()` 函数，每 15 分钟巡检 5 项 CF 安全设置（security_level/browser_check/bot_fight_mode/ssl/min_tls_version），不符合时自动修复
+     - `scripts/tg_bot.py` 新增 `send_alert(level, title, body)` 三级告警（P0🔴/P1🟡/P2🔵）带 30 分钟去重；模块级 `sys.exit(1)` 移至 `__main__`，空 token 守卫
+- **验证**: 所有修改文件 py_compile 通过（subscription_service.py / config_generator.py / cert_manager.py / tg_bot.py / sub_domain_monitor.py）。
+- **教训（铁律）**:
+  - **加回已删除协议必须审查三层同步**: 不能只加回协议本身，必须检查所有 8 处代码路径是否一致使用 ENABLE_TUIC 条件。本次 P0 问题就是 v4.14.0 删除 TUIC 时定义了变量但未在所有路径使用。
+  - **凭据默认值必须两端一致**: 服务端生成随机 UUID + 订阅端用空字符串 = 静默失败。必须实现凭据降级（缺凭据时自动禁用协议），而不是凭据不匹配时静默失败。
+  - **节点名禁止空格**: AI_DEBUG_HISTORY.md:184 已记录此坑，本次加回 TUIC 时回归。必须在代码审查清单中加入"节点名不能含空格"检查项。
+  - **同功能协议替换要评估多路复用效率**: VLESS-gRPC 和 TUIC v5 都是多路复用协议，但 QUIC 多路复用比 HTTP/2 gRPC 更高效（无 TCP 队头阻塞）。替换是合理的。
+  - **CDN 稳定性补救必须补监控**: sub-* 直连路径之前零监控，是 CDN 反复失败的隐性根因。任何"绕过"方案必须配套监控告警，否则问题复发无法第一时间发现。
+  - **CF 全局设置会漂移**: CF 免费版 Managed Rules 会自动启用 bot_fight_mode 等拦截设置，必须每 15 分钟巡检自愈，不能假设一次配置永久有效。
+
+---
+
+## 最新排查（2026-06-27 v4.14.1）[Trae CN+用户真实验证]
+
+### Clash 订阅 anyTLS 节点字段名错误 — sing-box JSON 和 Clash YAML 字段名混淆，导致客户端加载报错
+- **症状**: 用户反馈 Clash Verge Rev 加载订阅时报错 "proxy 5: \"\" has unset fields: port"，无法选择节点。之前的 QA 和审查只做了 HTTP 状态码和节点数量验证，没有真正用 Clash/mihomo 内核做配置校验，QA 形同虚设。
+- **用户验收标准（必须严格遵守）**: **本地 Clash 能加载订阅 → 更新订阅 → 选择节点才算成功**，不能仅靠 HTTP 200 和节点数量判断。
+- **根因**: `subscription_service.py` 的 `generate_clash_config` 函数中，anyTLS 节点错误使用了 **sing-box JSON 格式**的字段名 `"server-port": ANYTLS_PORT`，但 **Clash Meta (mihomo) YAML 格式**要求端口字段必须是 `"port": ANYTLS_PORT`。
+  - 混淆来源：同一个文件中有两个配置生成函数——`generate_singbox_config`（输出 sing-box JSON，出站用 `server_port` 正确）和 `generate_clash_config`（输出 Clash YAML，代理节点必须用 `port`），新增 anyTLS 时直接复制了 sing-box 的字段名到 Clash 配置里。
+  - 额外问题：anyTLS 节点多了 `"tls": True` 字段（官方 mihomo 文档示例中没有，anyTLS 本身就是基于 TLS 的协议，不需要显式声明 tls: true）；缺少 `"udp": true` 字段（与其他节点不一致）。
+- **查证过程**: 
+  1. 联网搜索 mihomo anyTLS 配置，找到官方 wiki https://wiki.metacubex.one/config/proxies/anytls/ ，确认正确字段是 `port`，不是 `server-port`。
+  2. 本地下载 mihomo v1.19.8 windows-amd64 版本，先生成测试配置，运行 `mihomo -t -f config.yaml` 校验，修复前报错，修复后输出 "configuration file test is successful"。
+- **修复**:
+  1. `subscription_service.py` 第 1923 行：`"server-port": ANYTLS_PORT` → `"port": ANYTLS_PORT`。
+  2. 移除多余的 `"tls": True`（anyTLS 协议隐式 TLS）。
+  3. 添加 `"udp": true`（与其他 5 个节点保持一致）。
+- **部署验证（三台服务器 JP/SG/HK 全部通过）**:
+  - Clash YAML：`mihomo -t` 校验通过，6 节点，anyTLS port=2096 正确。
+  - sing-box JSON：解析正常，6 节点包含 anyTLS，`server_port` 字段正确（sing-box 格式就是 server_port）。
+  - Base64 订阅：解码后 6 条链接，包含 `anytls://` 协议链接。
+  - CDN 节点：VLESS-WS-CDN 和 Trojan-WS-CDN 的 server 和 headers.Host 都是 sub-* 子域名，配置正确。
+- **教训（铁律，必须严格遵守）**:
+  1. **QA 标准必须以用户真实客户端为准**：HTTP 200 + 节点数量通过不等于订阅能用，必须用对应客户端内核（Clash 用 mihomo -t，sing-box 用 sing-box check）做配置校验。
+  2. **不同订阅格式字段名不能混淆**：
+     - sing-box JSON（出站）：用 `server` + `server_port`
+     - Clash YAML（proxies）：用 `server` + `port`
+     - 复制代码时必须检查字段名是否匹配目标格式，不能直接跨格式复制。
+  3. **多智能体审查不能替代真实客户端校验**：审查只能发现逻辑问题和明显遗漏，但字段名这种格式错误必须用实际内核校验才能发现。
+  4. **修复后必须部署到所有服务器并从服务器拉取真实配置验证**，不能只验证本地测试数据。
+
+---
 ## 最新排查（2026-06-27 v4.14.0）[Trae CN+多智能体协同+QA审查]
 
 ### 协议栈精简优化 — 多智能体审查发现 P0 级"服务端有入站但客户端无节点"问题

@@ -36,6 +36,17 @@ except ImportError:
 
 logger = get_logger('cert_manager')
 
+# TG bot 告警（import 失败时降级为只写日志，不崩溃）
+# 注意：tg_bot.py 模块级在未配置 TG_BOT_TOKEN 时会 sys.exit(1)，需捕获 SystemExit
+_tg_send_message = None
+_tg_admin_chat_id = ''
+try:
+    from tg_bot import send_message as _tg_send, ADMIN_CHAT_ID as _tg_chat_id
+    _tg_send_message = _tg_send
+    _tg_admin_chat_id = _tg_chat_id
+except (ImportError, SystemExit):
+    pass
+
 CERT_FILE = os.path.join(CERT_DIR, 'cert.pem')
 KEY_FILE = os.path.join(CERT_DIR, 'key.pem')
 
@@ -235,6 +246,42 @@ def check_cert_expiry():
     logger.warning("[WARN] 未找到任何证书文件，需要申请")
     return True
 
+
+def get_cert_days_left():
+    """获取证书剩余天数（供告警使用），找不到证书返回 None"""
+    for cert_name in ['fullchain.pem', 'cert.pem']:
+        cert_path = os.path.join(CERT_DIR, cert_name)
+        if os.path.exists(cert_path):
+            try:
+                result = subprocess.run(
+                    ['openssl', 'x509', '-in', cert_path, '-noout', '-enddate'],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    end_date_str = result.stdout.split('=')[1].strip()
+                    end_date = datetime.strptime(end_date_str, '%b %d %H:%M:%S %Y %Z')
+                    return (end_date - datetime.now()).days
+            except Exception as e:
+                logger.warning(f"[WARN] 获取证书剩余天数失败({cert_name}): {e}")
+    return None
+
+
+def _send_cert_renew_alert(domain, days_left):
+    """证书续签失败时推送 TG 告警，tg_bot 不可用则只写日志"""
+    if not _tg_send_message or not _tg_admin_chat_id:
+        logger.warning("TG bot 未配置，证书续签失败告警仅写日志")
+        return
+    days_str = str(days_left) if days_left is not None else "未知"
+    msg = (
+        f"⚠️ 证书续签失败: {domain}，剩余 {days_str} 天，请手动处理\n"
+        f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    try:
+        _tg_send_message(_tg_admin_chat_id, msg)
+        logger.info("证书续签失败 TG 告警已推送")
+    except Exception as e:
+        logger.error("证书续签失败 TG 告警推送异常: %s", e)
+
 def restart_singbox():
     """重启Singbox和订阅服务"""
     for svc in ['singbox', 'singbox-sub', 'singbox-cdn']:
@@ -245,15 +292,24 @@ def restart_singbox():
     logger.info("[OK] Singbox 与订阅服务已重启")
 
 def renew_cert():
-    """续签证书"""
+    """续签证书（失败时推送 TG 告警）"""
     logger.info(f"证书续签检查 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    if check_cert_expiry():
-        logger.info("[INFO] 证书需要续签")
+    if not check_cert_expiry():
+        logger.info("[OK] 证书还在有效期内，无需续签")
+        return
+    logger.info("[INFO] 证书需要续签")
+    try:
         if obtain_certificate():
             restart_singbox()
             logger.info("[OK] 证书续签完成")
-    else:
-        logger.info("[OK] 证书还在有效期内，无需续签")
+        else:
+            days_left = get_cert_days_left()
+            logger.error("[ERROR] 证书续签失败：obtain_certificate 返回 False")
+            _send_cert_renew_alert(CF_DOMAIN, days_left)
+    except Exception as e:
+        days_left = get_cert_days_left()
+        logger.error(f"[ERROR] 证书续签异常: {e}")
+        _send_cert_renew_alert(CF_DOMAIN, days_left)
 
 def setup_iptables_persistent():
     """设置 iptables 持久化"""

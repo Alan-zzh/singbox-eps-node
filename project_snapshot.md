@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.14.0 | **更新**: 2026-06-27
+**版本**: v4.15.2 | **更新**: 2026-06-28
 
 ---
 
@@ -9,15 +9,17 @@
 ### 服务状态
 | 服务 | 状态 | 说明 |
 |------|------|------|
-| singbox | 运行中 | 代理内核，6个入站协议（v4.14.0 精简） |
+| singbox | 运行中 | 代理内核，6个入站协议（v4.15.0 优化：删 VLESS-gRPC + 加 TUIC v5） |
 | singbox-sub | 运行中 | HTTPS订阅服务，端口2087，按 UA 自动识别客户端能力 |
-| singbox-cdn | 运行中 | CDN优选IP学习系统 |
+| singbox-cdn | 运行中 | CDN优选IP学习系统（v4.15.1 起 `ip_optimized` 模式下订阅层读取 CF 优选 IP 作为 CDN 节点 server，恢复实际作用） |
 
 ### 核心功能
-- **6个代理协议**（v4.14.0 精简 7→6）：VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, Trojan-WS, anyTLS
-  - 删除：VLESS-HTTPUpgrade（故障最多+兼容最窄）、TUIC v5（UDP易被封+QUIC被QoS）
-  - 新增：anyTLS（sing-box 1.12+ 原生，端口 2096，缓解 TLS-in-TLS 指纹）
-- **多客户端兼容**（v4.14.0 更新）：`/sub` 默认返回 6 节点，Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅；`?client=full` 与 `?client=standard` 等同（HTTPUpgrade/TUIC 已下线，无差别），保留 `standard` 参数兼容旧客户端
+- **6个代理协议**（v4.15.0 优化）：VLESS-Reality, Trojan-TCP, VLESS-WS, Trojan-WS, anyTLS, TUIC-v5
+  - v4.15.0 删除：VLESS-gRPC（与 TUIC v5 同为多路复用协议，QUIC 比 gRPC 更高效）
+  - v4.15.0 加回：TUIC v5（`ENABLE_TUIC=true` 默认开启，提供 UDP relay + QUIC 多路复用）
+  - v4.14.0 删除：VLESS-HTTPUpgrade（故障最多+兼容最窄）、TUIC v5（v4.15.0 推翻此删除决定）
+  - v4.14.0 新增：anyTLS（sing-box 1.12+ 原生，端口 2096，缓解 TLS-in-TLS 指纹）
+- **多客户端兼容**（v4.15.0 更新）：`/sub` 默认返回 6 节点（CDN 模式）/ 4 节点（直连模式），Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket 都拿完整订阅；`?client=full` 与 `?client=standard` 等同，保留 `standard` 参数兼容旧客户端
 - **CDN节点命名统一**（v4.12.2）：Base64 / Clash / sing-box 三类订阅中 CDN 节点统一显示 `-CDN` 后缀
 - **流量查询**（v4.12.10 更新）：`/info` 端点（v2rayN 也能看）+ `/api/traffic` JSON + `subscription-userinfo` header；Base64 正文只放节点 URI，分享链接节点名已 URL 编码
 - **流量统计修复**（v4.12.2）：iptables INPUT 按 `dpt` + OUTPUT 按 `spt` 双向计数，UDP 端口（TUIC）独立统计；每月14号更新数据库 baseline，不清零内核计数器
@@ -67,12 +69,46 @@
 2. 用户投喂IP池（CDN_PREFERRED_IPS）- 填补空缺首选
 3. 外部API候选 - 按评分排序
 
+### CDN 架构现状（v4.15.1 真 CDN 路径恢复）
+
+> ✅ v4.15.1 已彻底修复"伪 CDN 化"问题，CDN 节点恢复真 CDN 路径，抗 IP 封锁能力恢复。
+> ⚠️ v4.15.0 的"伪 CDN 化说明"已被 v4.15.1 推翻，下文保留作为历史记录。
+
+**v4.15.1 现状结论（三层路径分离）：**
+
+1. **CDN 代理节点（VLESS-WS-CDN / Trojan-WS-CDN）走真 CDN 路径**
+   - 订阅层（subscription_service.py）的 `CDN_MODE` 分支逻辑正常工作：`ip_optimized` 用 CF 优选 IP（来自 cdn_monitor 数据库）/ `domain_optimized` 用优选域名 / `domain_default` 用主域名
+   - `cdn_sni` 用主域名 `cf_domain`（橙云 `proxied=true`），客户端通过 CF 代理层 → CF 边缘 → 回源源站
+   - 客户端实际连接路径：客户端 → CF 优选 IP（CF 边缘）→ 回源源站 IP:8443/2083 → sing-box，**经过 Cloudflare CDN 代理层，源站 IP 被 CF 隐藏**
+   - 抗 IP 封锁能力恢复：封一个 CF IP 自动切换到另一个，源站 IP 不暴露
+
+2. **服务端 config_generator.py CDN 入站 Host 与订阅层一致**
+   - `_ws_host = cf_domain or server_ip`（统一用主域名，不再按 DEPLOY_MODE/COUNTRY_CODE 条件分支）
+   - vless-ws（8443）和 trojan-ws（2083）入站的 `headers.Host` 均为主域名 `cf_domain`
+   - v4.13.3 教训：订阅层 cdn_sni 与服务端 _ws_host 必须一致，否则 sing-box Host 校验失败报 "bad host"
+
+3. **订阅端点（/clash /sub /singbox）继续走 sub-* 灰云直连**
+   - sub-jp/sub-sg/sub-hk.290372913.xyz（gray cloud `proxied=false` 直连源站）
+   - 绕过 CF 免费版 DDoS L7 ML 系统（该系统只在 CF 代理路径生效，gray cloud 直连不经过 CF 边缘）
+   - 与 CDN 代理节点路径完全分离，互不影响
+
+4. **cdn_monitor.py 优选 IP 池恢复实际作用**
+   - `ip_optimized` 模式下，subscription_service.py 从 cdn_monitor 数据库读取 CF 优选 IP 作为 CDN 节点 server
+   - 优选 IP 池不再仅作监控指标，实际影响客户端连接
+
+---
+
+**历史记录（v4.15.0 伪 CDN 化，已被 v4.15.1 推翻）：**
+
+v4.13.2→v4.13.3 连锁错误导致 CDN 节点曾一度走 sub-* 灰云直连源站（"伪 CDN 化"），丧失抗 IP 封锁能力。v4.15.1 通过删除 subscription_service.py 3 处强制覆盖代码 + 简化 config_generator.py `_ws_host` 为统一 `cf_domain or server_ip` 彻底修复。详见 AI_DEBUG_HISTORY.md v4.15.1 条目。
+
 ### 定时任务
 | 任务 | 频率 | 说明 |
 |------|------|------|
-| health_check.sh | 每15分钟 | 内存/服务/端口/config自愈/磁盘/日志/estab连接告警/iptables/Cloudflare代理入口规则自愈 |
-| cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签 |
+| health_check.sh | 每15分钟 | 内存/服务/端口/config自愈/磁盘/日志/estab连接告警/iptables/Cloudflare代理入口规则自愈/CF全局安全设置巡检 |
+| cert_manager.py --renew | 每月1号凌晨3点 | SSL证书自动续签（失败时 TG 告警） |
 | subscription_service baseline | 每月14号 00:03 | 更新月度流量基准，不清零 iptables 内核计数器 |
+| sub_domain_monitor.py | 每5分钟 | sub-* 直连路径 TLS 握手 + HTTP /info 可用性监控（失败 TG 告警） |
 
 ### 路由规则顺序（服务端）
 1. 私有地址拒绝（127/8/10/8/172.16/12/192.168/16/fd00::/8/::1/128 → block）
@@ -157,12 +193,20 @@ snapshot 仅补充部署相关要点:
 - anytls 端口: 2096
 - sing-box：1.13.14
 
-### 香港服务器 (43.249.174.222)
+### 香港服务器 HK (43.249.174.222) — CDN 模式
 - 域名: hk.290372913.xyz
+- 部署模式: **CDN（6节点，橙云 proxied=true）** — v4.15.2 明确
 - 系统: Debian 12
-- 协议（v4.14.0）: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, Trojan-WS-CDN, anyTLS
-- 部署时间: 2026-06-04（v4.14.0 更新：2026-06-27）
-- vless-grpc 端口: 51794
+- 协议（v4.15.0）: VLESS-Reality, Trojan-TCP, VLESS-WS-CDN, Trojan-WS-CDN, anyTLS, TUIC-v5
+- 部署时间: 2026-06-04（v4.15.0 更新：2026-06-28）
 - trojan-tcp 端口: 65004
 - anytls 端口: 2096
 - sing-box：1.13.13
+
+### 香港服务器 HK1 (香港阿里云) — 直连模式
+- 域名: hk1.290372913.xyz
+- IP: 47.243.72.97（DNS 解析得到，灰云直连源站真实 IP）
+- 部署模式: **直连（4节点，无 CDN 依赖）** — v4.15.2 明确，v4.15.4 首次正确部署
+- 流量: 200GB/月
+- 协议（v4.15.0）: VLESS-Reality, Trojan-TCP, anyTLS, TUIC-v5（无 WS-CDN 节点）
+- ⚠️ v4.15.2 铁律（AGENTS.md 第29条）: HK1 必须直连模式，判断依据是 `CF_DOMAIN` 域名前缀（`hk1.`），**禁止用 COUNTRY_CODE 判断**（HK 与 HK1 地理都在香港，COUNTRY_CODE 无法区分）

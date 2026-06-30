@@ -19,12 +19,16 @@ import secrets
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import BASE_DIR, CERT_DIR, DATA_DIR, load_env_file
+    from config import BASE_DIR, CERT_DIR, DATA_DIR, load_env_file, DEPLOY_MODE, CDN_MODE_ENABLED, DIRECT_MODE_ENABLED
 except ImportError:
     BASE_DIR = os.getenv('BASE_DIR', '/root/singbox-eps-node')
     CERT_DIR = os.path.join(BASE_DIR, 'cert')
     DATA_DIR = os.path.join(BASE_DIR, 'data')
     load_env_file = None
+    _dm = os.getenv('DEPLOY_MODE', 'cdn').lower().strip()
+    DEPLOY_MODE = _dm if _dm in ('cdn', 'direct') else 'cdn'
+    CDN_MODE_ENABLED = (DEPLOY_MODE == 'cdn')
+    DIRECT_MODE_ENABLED = (DEPLOY_MODE == 'direct')
 
 # 读取环境变量
 env_vars = {}
@@ -44,10 +48,11 @@ vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
 trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 # v4.14.0: anyTLS 协议密码（与 Trojan 密码独立，避免一处泄露影响多协议）
 anytls_pass = env_vars.get('ANYTLS_PASSWORD', '') or trojan_pass
-# v4.14.0: TUIC v5 已下线（UDP 易被封 + QUIC 长流量被 QoS），保留变量仅为兼容旧 .env
+# v4.15.0: TUIC v5 加回（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
+# 认证方式：uuid + password 双因素，与 VLESS UUID 独立避免一处泄露影响多协议
 tuic_pass = env_vars.get('TUIC_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 tuic_uuid = env_vars.get('TUIC_UUID', str(uuid.uuid4()))
-enable_tuic = env_vars.get('ENABLE_TUIC', 'false').lower() == 'true'  # v4.14.0: 默认 false
+enable_tuic = env_vars.get('ENABLE_TUIC', 'true').lower() == 'true'  # v4.15.0: 默认 true（加回 TUIC）
 tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 50444
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
 reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
@@ -59,18 +64,22 @@ cf_domain = env_vars.get('CF_DOMAIN', server_ip) or server_ip
 
 
 def build_sub_domain(domain):
-    """v4.13.3: 从主域名生成 sub-* 子域名（gray cloud 直连源站，绕过 CF DDoS L7）
-    CDN 入站的 headers.Host / host 必须用 sub-* 子域名，与客户端订阅配置一致，
-    否则 sing-box Host 校验失败报 "bad host" 拒绝连接。
-    """
+    """从主域名生成 sub-* 子域名（仅供订阅端点/应急直连路径使用）。"""
     if domain and '.' in domain:
         parts = domain.split('.', 1)
         return f"sub-{parts[0]}.{parts[1]}"
     return domain or server_ip
 
 
-# CDN 入站用的 sub-* 直连子域名（与 subscription_service.py 的 get_sub_domain() 保持一致）
+# sub-* 直连子域名仅供订阅端点和 CDN 边缘阻断应急降级使用
 cdn_sub_domain = build_sub_domain(cf_domain)
+
+# v4.15.1: CDN 入站 Host 恢复为主域名（修复 v4.13.3 起的"伪 CDN 化"连锁错误）
+# - CDN 代理节点（VLESS-WS/Trojan-WS）必须用主域名 cf_domain 作为 Host
+# - 客户端连接 CF 优选 IP + Host=主域名 → CF 边缘 → 回源源站（真 CDN 路径）
+# - sub-* 灰云直连子域名仅用于订阅端点（singbox-sub 服务），不用于 CDN 代理入站
+# - v4.13.3 教训：此处的 _ws_host 必须与 subscription_service.py 的 cdn_sni 一致
+_ws_host = cf_domain or server_ip
 socks5_user = env_vars.get('SOCKS5_USER', '')
 socks5_pass = env_vars.get('SOCKS5_PASSWORD', '')
 
@@ -293,7 +302,10 @@ config = {
                     "short_id": list(dict.fromkeys([reality_short_id, REALITY_SHORT_ID_LEGACY]))
                 }
             }
-        },
+        }
+    ] + ([
+        # v4.15.0: VLESS-WS 和 Trojan-WS 仅在 CDN 模式（DEPLOY_MODE=cdn）下生成
+        # 纯直连模式（direct）精简掉WS入站，减少端口暴露面
         {
             "type": "vless",
             "tag": "vless-ws",
@@ -305,7 +317,7 @@ config = {
             "transport": {
                 "type": "ws",
                 "path": "/vless-ws",
-                "headers": {"Host": cdn_sub_domain}
+                "headers": {"Host": _ws_host}
             },
             "tls": {
                 "enabled": True,
@@ -315,7 +327,6 @@ config = {
                 "alpn": ["h2", "http/1.1"]
             }
         },
-        # v4.14.0: 删除 vless-upgrade 入站（HTTPUpgrade 协议已下线，故障最多）
         {
             "type": "trojan",
             "tag": "trojan-ws",
@@ -327,7 +338,7 @@ config = {
             "transport": {
                 "type": "ws",
                 "path": "/trojan-ws",
-                "headers": {"Host": cdn_sub_domain}
+                "headers": {"Host": _ws_host}
             },
             "tls": {
                 "enabled": True,
@@ -336,10 +347,11 @@ config = {
                 "key_path": _cert_key,
                 "alpn": ["h2", "http/1.1"]
             }
-        },
+        }
+    ] if CDN_MODE_ENABLED else []) + [
         # v4.14.0 新增 anyTLS 入站：直连隐蔽协议，缓解 TLS-in-TLS 指纹检测
         # sing-box 1.12+ 原生支持，配置极简（无 path/Host/serviceName）
-        # 使用主域名证书（anyTLS 直连源站，不走 CDN，不需要 sub-* 子域名）
+        # 两套模式都保留（直连模式核心协议之一）
         {
             "type": "anytls",
             "tag": "anytls-in",
@@ -356,28 +368,32 @@ config = {
                 "alpn": ["h2", "http/1.1"]
             }
         },
-        # v4.14.0: TUIC v5 入站已完全删除（UDP 易被封 + QUIC 长流量被 QoS）
-        # 如需恢复 TUIC，请回退到 v4.13.x 并启用 ENABLE_TUIC=true
-        {
-            "type": "vless",
-            "tag": "vless-grpc",
+        # v4.15.0 加回 TUIC v5 入站：用户要求 TCP+UDP 双协议支持
+        # sing-box 1.11+ 原生支持 tuic inbound，认证方式 uuid+password
+        # congestion_control=bbr 提升吞吐，udp_relay_mode 在 inbound 不设置（由客户端决定）
+        # TLS ALPN 必须为 h3（QUIC 原生 HTTP/3）
+        # 两套模式都保留（直连模式核心协议之一，提供 UDP relay）
+        # P0 修复（v4.15.0 审查）：enable_tuic=false 时必须移除入站，与 install.sh 防火墙+订阅层三处同步
+        *([{
+            "type": "tuic",
+            "tag": "tuic-in",
             "listen": "0.0.0.0",
-            "listen_port": vless_grpc_port,
-            "tcp_fast_open": True,
-            "tcp_multi_path": False,
-            "users": [{"uuid": vless_uuid}],
-            "transport": {
-                "type": "grpc",
-                "service_name": "gun"
-            },
+            "listen_port": tuic_port,
+            "users": [{"uuid": tuic_uuid, "password": tuic_pass}],
+            "congestion_control": "bbr",
+            "auth_timeout": "3s",
+            "zero_rtt_handshake": False,
+            "heartbeat": "10s",
             "tls": {
                 "enabled": True,
                 "server_name": cf_domain or server_ip,
                 "certificate_path": _cert_chain,
                 "key_path": _cert_key,
-                "alpn": ["h2", "http/1.1"]
+                "alpn": ["h3"]
             }
-        },
+        }] if enable_tuic else []),
+        # v4.15.0: VLESS-gRPC 已删除（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
+        # VLESS_GRPC_PORT 变量保留以兼容旧 .env，但不再生成入站
         {
             "type": "trojan",
             "tag": "trojan-tcp",
@@ -509,4 +525,9 @@ with open(os.path.join(BASE_DIR, "config.json"), 'w') as f:
 
 print("[OK] Singbox配置已保存")
 print(f"  配置文件: {os.path.join(BASE_DIR, 'config.json')}")
-print(f"  入站协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS, Trojan-WS, anyTLS" + (", SOCKS5" if socks5_user and socks5_pass else ""))
+if DIRECT_MODE_ENABLED:
+    print(f"  部署模式: 纯直连(direct) - 4协议精简（v4.15.0: VLESS-gRPC 已用 TUIC v5 替代）")
+    print(f"  入站协议: VLESS-Reality, Trojan-TCP, anyTLS, TUIC v5" + (", SOCKS5" if socks5_user and socks5_pass else ""))
+else:
+    print(f"  部署模式: CDN混合(cdn) - 6协议全量（v4.15.0: VLESS-gRPC 已用 TUIC v5 替代）")
+    print(f"  入站协议: VLESS-Reality, Trojan-TCP, VLESS-WS, Trojan-WS, anyTLS, TUIC v5" + (", SOCKS5" if socks5_user and socks5_pass else ""))

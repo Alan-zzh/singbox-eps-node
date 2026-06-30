@@ -91,3 +91,56 @@ def test_cloudflare_apply_enforces_tls12_for_windows_clients():
     assert module.MIN_TLS_VERSION == "1.2"
     assert "ensure_tls_settings" in source
     assert "min_tls_version" in source
+
+
+def test_proxy_skip_rule_deduplicates_stale_same_description_rules():
+    module = load_module()
+
+    class FakeClient:
+        def __init__(self):
+            self.deleted = []
+            self.added = []
+
+        def get_zone_id(self, zone_name):
+            return "zone"
+
+        def get_phase_entrypoint(self, zone_id, phase):
+            return {
+                "id": "ruleset",
+                "rules": [
+                    {
+                        "id": "desired",
+                        "description": module.PROXY_SKIP_RULE_DESCRIPTION,
+                        "expression": module.build_proxy_skip_expression(),
+                        "action_parameters": module.build_proxy_skip_rule()["action_parameters"],
+                        "enabled": True,
+                    },
+                    {
+                        "id": "stale",
+                        "description": module.PROXY_SKIP_RULE_DESCRIPTION,
+                        "expression": '(http.host in {"jp.290372913.xyz"})',
+                        "action_parameters": module.build_proxy_skip_rule()["action_parameters"],
+                        "enabled": True,
+                    },
+                ],
+            }
+
+        def delete_rule(self, zone_id, ruleset_id, rule_id):
+            self.deleted.append(rule_id)
+
+        def add_rule(self, zone_id, ruleset_id, rule):
+            self.added.append(rule)
+            return {"id": "new"}
+
+    client = FakeClient()
+    result = module.ensure_proxy_skip_rule(client)
+
+    assert result["status"] == "deduplicated"
+    assert client.deleted == ["stale"]
+    assert client.added == []
+
+
+def test_apply_path_removes_ddos_l7_override_instead_of_readding_eoff():
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert 'result["ddos_l7_override"] = ensure_no_ddos_l7_override' in source

@@ -77,6 +77,25 @@
 21. **长驻进程必须有数据变更感知机制**:信号文件是最轻量的跨进程通知方式
 22. **"推特私信发不出"先判平台限流**:不要只凭单一应用体感就改服务器
 
+### 协议加回与凭据安全（v4.15.0 扩展）
+
+23. **加回已删除协议必须审查所有 ENABLE_xxx 条件路径**(v4.15.0 教训):v4.14.0 删除 TUIC 时定义了 `enable_tuic`/`ENABLE_TUIC` 变量但未在所有路径使用,v4.15.0 加回时审查发现 8 处代码路径(config_generator.py 入站块 + subscription_service.py Base64 URI/sing-box JSON/Clash YAML/auto_proxy_names/_auto_test_proxies/node_count_full)全部缺失条件包裹,导致 `ENABLE_TUIC=false` 时三层不一致(install.sh 关防火墙 + config_generator.py 仍生成入站 + subscription_service.py 仍生成订阅节点)。**加回协议时必须用 `grep -rn "ENABLE_xxx\|enable_xxx"` 扫描所有变量引用点,确认每处都有条件包裹**;条件包裹推荐用 `*([{...}] if enable_xxx else [])` 解包语法,避免 if/else 块破坏列表结构
+24. **凭据默认值服务端/订阅端必须一致或实现降级**(v4.15.0 教训):config_generator.py 在 `TUIC_UUID` 为空时生成随机 UUID,但 subscription_service.py 用空字符串 → 凭据不匹配静默失败,用户拿到节点但无法连接。**正确做法**:订阅端实现凭据降级——`ENABLE_xxx=true` 且凭据为空时自动 `ENABLE_xxx=False`,而不是凭据不匹配时静默失败;服务端生成随机凭据时必须同时写入 .env 并被订阅端读取
+25. **节点名禁止空格**(v4.15.0 回归教训):`node_name("TUIC v5")` 生成带空格节点名,部分客户端(老版 mihomo)会截断为 "TUIC"。必须用 `"TUIC-v5"`(连字符)。**代码审查清单必查项**:所有 `node_name("...")` 调用的参数不能含空格,已有记录在 AI_DEBUG_HISTORY.md:184,本次加回 TUIC 时回归,说明审查清单未生效,必须在每次协议增删时强制 grep 检查
+
+### CDN 稳定性补救（v4.15.0 扩展）
+
+26. **"绕过"方案必须配套监控告警**(v4.15.0 教训):v4.13.1 的 sub-* 灰云直连绕过 CF DDoS L7 方案稳定运行,但 sub-* 直连路径之前**零监控**,是 CDN 反复失败的隐性根因——sub-* 域名解析失败/证书过期/源站不可达时无告警,用户先于运维发现。**任何绕过方案(直连/降级/备用路径)必须配套监控告警**:sub_domain_monitor.py 每 5 分钟 TLS 握手 + HTTP 可用性检测 + cert_manager.py 续签失败 TG 告警 + health_check.sh CF 全局设置巡检
+27. **CF 全局设置会漂移,必须定期巡检自愈**(v4.15.0 教训):CF 免费版 Managed Rules 会自动启用 `bot_fight_mode` 等拦截设置,`security_level` 会被 CF 自动调整,不能假设一次配置永久有效。health_check.sh 每 15 分钟巡检 5 项 CF 安全设置(security_level/browser_check/bot_fight_mode/ssl/min_tls_version),不符合时自动修复
+
+### CDN 路径分离（v4.15.1 扩展）
+
+28. **sub-* 灰云直连子域名仅用于订阅端点,CDN 代理节点必须用主域名**(v4.15.1 教训):v4.13.1 创建 sub-* 灰云直连子域名,原意仅用于订阅端点(`/clash` `/sub` `/singbox`)绕过 CF DDoS L7 ML 系统。但 v4.13.2 错误扩散到 CDN 代理节点——`subscription_service.py` 把 VLESS-WS-CDN/Trojan-WS-CDN 的 server/Host 也改为 sub-*,v4.13.3 又把 `config_generator.py` 的 CDN 入站 `headers.Host` 同步改为 sub-*(为修复 "bad host" 错误),彻底坐实"伪 CDN 化"——CDN 节点完全直连源站,丧失抗 IP 封锁能力。**正确架构**:① CDN 代理节点(VLESS-WS/Trojan-WS 入站)必须用主域名 `cf_domain`(`proxied=true` 橙云),客户端 → CF 优选 IP → CF 边缘 → 回源源站,真 CDN 路径抗封锁;② 订阅端点(singbox-sub 服务的 /clash /sub /singbox)用 sub-* 子域名(`proxied=false` 灰云直连源站),绕过 CF DDoS L7 ML。**两类用途严格分离,不能混淆**。修改 `subscription_service.py` 的 CDN 节点 server/Host 时,必须同步检查 `config_generator.py` 的 CDN 入站 `headers.Host`(v4.13.3 教训),且两者都必须用主域名 `cf_domain`,不能用 `get_sub_domain()` 或 `cdn_sub_domain`
+
+### 服务器识别与部署模式（v4.15.2 扩展）
+
+29. **HK1 与 HK 必须按域名前缀区分,禁止用 COUNTRY_CODE 判断部署模式**(v4.15.2 教训):用户反复反馈"每次修复老是把 HK1 搞 CDN 的",根因是代码用 `COUNTRY_CODE == 'HK'` 判断是否直连模式(`HK_DIRECT_MODE`),但 HK 与 HK1 地理都在香港,`COUNTRY_CODE` 都可能是 `HK`,根本无法区分。**两台香港服务器用途截然不同**:① HK 服务器(`hk.290372913.xyz`)是 CDN 模式(6 节点,橙云 `proxied=true`);② HK1 服务器(`hk1.290372913.xyz`,香港阿里云 200GB 流量)是直连模式(4 节点,无 CDN 依赖)。**判断铁律**:① 优先级最高——`.env` 显式设置 `DEPLOY_MODE=direct|cdn`;② fallback ——基于 `CF_DOMAIN` 域名前缀,`hk1.` 开头才是直连,其他(含 `hk.`)都是 CDN;③ **绝对禁止**用 `COUNTRY_CODE == 'HK'` 作为判断依据。**代码审查清单必查项**:修改 `config.py` 的 `HK_DIRECT_MODE`、`subscription_service.py` 的 `_hk_direct_fallback`、`install.sh` 的 `select_deploy_mode` 时,必须确认判断逻辑是 `CF_DOMAIN.startswith('hk1.')` 而非 `COUNTRY_CODE == 'HK'`。`install.sh` 的 `select_deploy_mode()` 和 `create_env_file()` 必须在检测到 `hk1.` 域名时强制 `DEPLOY_MODE=direct` 并告警,防止用户手动选错
+
 ## 记录规范
 
 | 事件 | 更新文件 | 不动 |

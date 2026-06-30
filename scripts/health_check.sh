@@ -132,7 +132,7 @@ check_ports() {
             log "  ❌ TCP $port 未监听"
         fi
     done
-    # v4.14.0: TUIC 默认关闭，仅 ENABLE_TUIC=true 时检查
+    # v4.15.0: TUIC v5 加回，ENABLE_TUIC=true 默认开启
     if [ -f "$BASE_DIR/.env" ]; then
         enable_tuic_hc=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     fi
@@ -281,6 +281,101 @@ check_cloudflare_proxy_rules() {
 }
 
 # ============================================================
+# 10. Cloudflare 全局安全设置巡检（v4.15.0 新增 P0）
+# 确认 5 项关键设置，不符合时自动修复
+# ============================================================
+check_cloudflare_global_settings() {
+    log_section "10. Cloudflare 全局安全设置"
+    if [ ! -f "$BASE_DIR/scripts/cloudflare_proxy_rules.py" ]; then
+        log "  ⚠️  cloudflare_proxy_rules.py 不存在，跳过"
+        return
+    fi
+    if ! grep -q '^CF_API_TOKEN=' "$BASE_DIR/.env" 2>/dev/null; then
+        log "  ⚠️  CF_API_TOKEN 未配置，跳过全局设置巡检"
+        return
+    fi
+    # 通过 python3 -c 调用 cloudflare_proxy_rules.py 的 CloudflareClient
+    # 检查 5 项设置：security_level / browser_check / bot_fight_mode / ssl / min_tls_version
+    # 任一项不符合时自动修复（调用 set_zone_setting）
+    cd "$BASE_DIR" && python3 -c "
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'scripts'))
+from cloudflare_proxy_rules import CloudflareClient, load_env, ZONE_NAME
+
+env = load_env()
+if not env.get('CF_API_TOKEN'):
+    print('  ⚠️  CF_API_TOKEN 未配置，跳过')
+    sys.exit(0)
+
+try:
+    client = CloudflareClient(env)
+    zone_id = client.get_zone_id(ZONE_NAME)
+except Exception as e:
+    print(f'  ❌ Cloudflare API 连接失败: {e}')
+    sys.exit(1)
+
+# 4 项标准设置（走 /zones/{zone_id}/settings/{setting} 端点）
+# 格式: (setting_name, expected_value, fix_value)
+standard_checks = [
+    ('security_level', 'essentially_off', 'essentially_off'),
+    ('browser_check', 'off', 'off'),
+    ('ssl', 'full', 'full'),
+    ('min_tls_version', '1.2', '1.2'),
+]
+
+issues = []
+for setting, expected, fix_value in standard_checks:
+    try:
+        current = client.get_zone_setting(zone_id, setting)
+        current_norm = str(current).strip().lower()
+        expected_norm = str(expected).strip().lower()
+        if current_norm != expected_norm:
+            print(f'  ⚠️  {setting}: 当前={current} 目标={expected}，自动修复中...')
+            try:
+                client.set_zone_setting(zone_id, setting, fix_value)
+                print(f'  ✓  {setting} 已修复为 {expected}')
+            except Exception as e:
+                issues.append(setting)
+                print(f'  ❌ {setting} 修复失败: {e}')
+        else:
+            print(f'  ✓  {setting}: {current}')
+    except Exception as e:
+        issues.append(setting)
+        print(f'  ❌ {setting} 检查失败: {e}')
+
+# bot_fight_mode 走不同 API 端点（/bot_management/bot_fight_mode）
+try:
+    result = client.request('GET', f'/zones/{zone_id}/bot_management/bot_fight_mode')
+    enabled = result.get('result', {}).get('enabled', False)
+    if enabled:
+        print(f'  ⚠️  bot_fight_mode: 当前=enabled 目标=disabled，自动修复中...')
+        try:
+            client.request('PUT', f'/zones/{zone_id}/bot_management/bot_fight_mode', {'enabled': False})
+            print(f'  ✓  bot_fight_mode 已禁用')
+        except Exception as e:
+            issues.append('bot_fight_mode')
+            print(f'  ❌ bot_fight_mode 修复失败: {e}')
+    else:
+        print(f'  ✓  bot_fight_mode: disabled')
+except Exception as e:
+    # 免费计划可能不支持 bot_management 端点，降级为提示
+    print(f'  ℹ️  bot_fight_mode 检查跳过（API 不可用或计划不支持）: {e}')
+
+if issues:
+    print(f'  ❌ {len(issues)} 项设置修复失败: {issues}')
+    sys.exit(1)
+else:
+    print(f'  ✓  CF 全局安全设置巡检完成（5 项全部正常）')
+" >> "$LOG_FILE" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "  ✓  CF 全局安全设置巡检通过"
+    else
+        log "  ❌ CF 全局安全设置巡检有异常，详见上方日志"
+    fi
+}
+
+# ============================================================
 # 主流程
 # ============================================================
 log "===== 健康检查开始 ====="
@@ -295,6 +390,7 @@ check_disk
 check_database
 check_cert
 check_cloudflare_proxy_rules
+check_cloudflare_global_settings
 
 log "===== 健康检查完成 ====="
 log ""

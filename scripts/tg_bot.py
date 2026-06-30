@@ -18,6 +18,7 @@ import os
 import sys
 import json
 import time
+import hashlib
 import logging
 import subprocess
 import urllib.request
@@ -70,12 +71,16 @@ fh.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s %(message)s'))
 logger.addHandler(fh)
 
 if not BOT_TOKEN:
-    logger.error("未配置 TG_BOT_TOKEN，请在 .env 中添加")
-    sys.exit(1)
+    logger.warning("未配置 TG_BOT_TOKEN，告警功能不可用（send_alert 将静默返回）")
+    # 仅在直接运行 tg_bot.py 时退出；被其他脚本 import 时不退出，让 send_alert 静默降级
+    if __name__ == '__main__':
+        sys.exit(1)
 
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ''
 
 def send_message(chat_id, text):
+    if not BOT_TOKEN or not API_URL:
+        return None
     url = f"{API_URL}/sendMessage"
     data = json.dumps({'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}).encode()
     req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
@@ -85,6 +90,69 @@ def send_message(chat_id, text):
     except Exception as e:
         logger.error("发送消息失败: %s", e)
         return None
+
+
+# 告警级别 emoji 映射
+ALERT_LEVEL_EMOJI = {
+    'P0': '🔴',
+    'P1': '🟡',
+    'P2': '🔵',
+}
+# 告警去重：同一告警 30 分钟内只推送一次
+ALERT_DEDUP_MINUTES = 30
+ALERT_DEDUP_DIR = '/tmp'
+
+
+def send_alert(level, title, body=''):
+    """统一告警推送函数，供其他脚本调用。
+
+    参数:
+        level: 'P0' / 'P1' / 'P2'，不同级别用不同 emoji
+        title: 告警标题（简短）
+        body: 告警正文（可选，可含多行）
+
+    行为:
+        - TG_BOT_TOKEN 未配置时静默返回不报错
+        - ADMIN_CHAT_ID 未配置时静默返回
+        - 同一告警（level+title+body 的 hash）30 分钟内只推送一次
+    """
+    if not BOT_TOKEN or not API_URL:
+        return None
+    if not ADMIN_CHAT_ID:
+        logger.warning("ADMIN_CHAT_ID 未配置，告警跳过: [%s] %s", level, title)
+        return None
+
+    level = (level or 'P2').upper()
+    emoji = ALERT_LEVEL_EMOJI.get(level, '🔵')
+
+    # 去重检查：同一告警 30 分钟内只推送一次
+    dedup_key = hashlib.md5(f"{level}:{title}:{body}".encode('utf-8')).hexdigest()[:16]
+    dedup_file = os.path.join(ALERT_DEDUP_DIR, f"tg_alert_dedup_{dedup_key}")
+    if os.path.exists(dedup_file):
+        try:
+            mtime = os.path.getmtime(dedup_file)
+            if time.time() - mtime < ALERT_DEDUP_MINUTES * 60:
+                logger.info("告警去重窗口内，跳过推送: [%s] %s", level, title)
+                return None
+        except Exception:
+            pass
+
+    # 构造告警消息
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    msg = f"{emoji} <b>[{level}] {title}</b>\n⏰ {ts}\n"
+    if body:
+        msg += f"{body}\n"
+
+    result = send_message(ADMIN_CHAT_ID, msg)
+    if result:
+        logger.info("告警已推送: [%s] %s", level, title)
+        # 更新去重文件 mtime
+        try:
+            with open(dedup_file, 'w') as f:
+                f.write(ts)
+        except Exception:
+            pass
+    return result
 
 def get_server_status():
     status = []
