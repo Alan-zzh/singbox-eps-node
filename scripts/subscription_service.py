@@ -26,14 +26,14 @@ Date: 2026-06-27
 节点命名规则: {国家代码}-{协议}（v4.15.0 起 CDN 模式 6 节点 / 直连模式 4 节点）
 - {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
 - {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
-- {COUNTRY_CODE}-anyTLS (直连节点，v4.14.0 新增，缓解 TLS-in-TLS 指纹)
+- {COUNTRY_CODE}-anyTLS (直连节点，TLS-in-TLS 加密)
 - {COUNTRY_CODE}-TUIC-v5 (直连节点，v4.15.0 加回，QUIC 多路复用 + UDP relay)
 - {COUNTRY_CODE}-VLESS-WS-CDN (CDN节点，主域名/CF优选IP；CF L7 阻断时自动降级 sub-* 直连)
 - {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，主域名/CF优选IP；CF L7 阻断时自动降级 sub-* 直连)
 
 【v4.15.0 协议栈调整】:
   - 加回 TUIC v5（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
-  - 删除 VLESS-gRPC（与 TUIC v5 同为多路复用协议，QUIC 多路复用比 gRPC 更高效）
+  - 删除 VLESS-gRPC（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
   - v2rayN 6.x+ / v2rayNG 1.x+ 归 full 能力（内置 sing-box 内核，支持 anytls:// 和 tuic://）
   - 节点数：CDN 模式 6 节点 / 直连模式 4 节点（ENABLE_TUIC=false 时各 -1）
 
@@ -164,26 +164,25 @@ CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
 if 'HK_DIRECT_MODE' not in dir():
     HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith('hk1.')
 
-# v4.15.0 客户端能力矩阵（修复 v2rayN 订阅 anyTLS/TUIC 节点缺失问题）
-# 决定 /sub 端点返回哪些节点
-#   full     = 完整节点（含 anyTLS + TUIC v5），返回 anytls:// 和 tuic:// URI
+# 标准 6 节点 SOP：Reality / Trojan-TCP / anyTLS / TUIC + WS-CDN / Trojan-WS-CDN
+#   full     = 完整 6 节点（含 anyTLS anytls:// + TUIC v5 tuic:// URI）
 #              - Clash Meta (mihomo) 系、sing-box 系、NekoBox/NekoRay
-#              - v2rayN 6.x+ / v2rayNG 1.x+（内置 sing-box 内核，支持 anytls:// 和 tuic://）
-#              - Shadowrocket（小火箭）iOS 版：原生支持 TUIC v5，anytls:// 未识别自动忽略
+#              - v2rayN 6.x+ / v2rayNG 1.x+（内置 sing-box 内核，支持 anytls:// + tuic://）
+#              - Shadowrocket（小火箭）iOS 版：原生支持 TUIC v5，anytls:// 安全忽略
 #   xray     = Xray 兼容节点（不含 anyTLS/TUIC），只返回标准 vless:// 和 trojan:// 链接
 #              - Quantumult/Surge/Loon/Pharos/Potatso 等纯 Xray 内核客户端
 #   standard = 同 xray（兼容旧参数）
 #   unknown  = 按 xray 处理（安全默认，避免非标准 URI 导致解析失败）
 #
 # 【v4.15.0 修正】：v2rayN 6.x+ / v2rayNG 1.x+ 默认内置 sing-box 内核，
-# 原生支持 anytls:// 和 tuic:// URI scheme，不应再排除。用户明确反馈"我都是 sing-box 的"。
+# 原生支持 tuic:// URI scheme，不应再排除。
 # 老版本 v2rayN 用户可通过 ?client=xray 强制降级到 Xray 兼容模式。
 #
 # 【v4.15.3 修正】：Shadowrocket（小火箭）iOS 版实际支持 TUIC v5（2023年起），
 # anytls:// URI 在 Shadowrocket 中不会被解析也不会导致崩溃，安全归类为 full。
 # 补充 Clash Meta 系列 UA 关键词（修复 ClashMetaForAndroid 等无连字符 UA 匹配失败）。
 CLIENT_CAPABILITIES = {
-    # Clash 系（mihomo 内核支持 Reality/gRPC/anyTLS/TUIC，能正确解析 anytls:// 和 tuic://）
+    # Clash 系（mihomo 内核支持 Reality/gRPC/TUIC，能正确解析 tuic://）
     'clash-meta': 'full',
     'clash meta': 'full',
     'clashmeta': 'full',
@@ -1227,9 +1226,7 @@ def generate_all_links(capability='full'):
     param_str = '&'.join([f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v])
     links.append(f"vless://{VLESS_UUID}@{SERVER_IP}:443?{param_str}#{share_fragment('VLESS-Reality')}")
 
-    # v4.15.0: VLESS-gRPC 已删除（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
-
-    # 3. Trojan-TCP (直连)
+    # 2. Trojan-TCP (直连)
     params = {
         'security': 'tls',
         'sni': CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP,
@@ -1242,7 +1239,7 @@ def generate_all_links(capability='full'):
 
     if CDN_MODE_ENABLED:
         vless_ws_addr, trojan_ws_addr = ws_addr
-        # 4. VLESS-WS (CDN)
+        # 3. VLESS-WS (CDN)
         params = {
             'encryption': 'none',
             'type': 'ws',
@@ -1255,7 +1252,7 @@ def generate_all_links(capability='full'):
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
         links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=ws_cdn_flag)}")
 
-        # 5. Trojan-WS (CDN)
+        # 4. Trojan-WS (CDN)
         params = {
             'type': 'ws',
             'security': 'tls',
@@ -1268,7 +1265,7 @@ def generate_all_links(capability='full'):
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
         links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=ws_cdn_flag)}")
 
-    # 6. anyTLS (直连) - 仅 full 能力客户端输出（anytls:// 非标准URI，纯Xray内核客户端不认识）
+    # 5. anyTLS (直连) - 仅 full 能力客户端输出（anytls:// 非标准URI，纯Xray内核客户端不认识）
     if include_advanced:
         anytls_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
         params = {
@@ -1279,7 +1276,7 @@ def generate_all_links(capability='full'):
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
         links.append(f"anytls://{ANYTLS_PASSWORD_ENV}@{SERVER_IP}:{ANYTLS_PORT}/?{param_str}#{share_fragment('anyTLS')}")
 
-    # 7. TUIC v5 (直连, UDP) - v4.15.0 加回：用户要求 TCP+UDP 双协议支持
+    # 6. TUIC v5 (直连, UDP) - v4.15.0 加回：用户要求 TCP+UDP 双协议支持
     # tuic:// 非标准 URI，纯 Xray 内核客户端不认识，仅 full 能力输出
     # TUIC v5 认证：uuid + password 双因素
     # P0 修复（v4.15.0 审查）：ENABLE_TUIC=false 时不输出 TUIC URI，与服务端入站+防火墙三处同步
@@ -1300,9 +1297,9 @@ def generate_all_links(capability='full'):
 def generate_singbox_config(capability='full'):
     """生成完整sing-box JSON配置（含自动路由规则）
 
-    【v4.15.0 dual-stack 双模式支持】:
-    - DIRECT_MODE_ENABLED（直连精简模式）：4 节点出站
-    - CDN_MODE_ENABLED（CDN全量模式）：6 节点出站
+    【标准 SOP 6 节点 / 直连 4 节点】:
+    - DIRECT_MODE_ENABLED（直连精简模式）：4 节点（Reality/Trojan-TCP/anyTLS/TUIC）
+    - CDN_MODE_ENABLED（CDN全量模式）：6 节点（加 WS-CDN/Trojan-WS-CDN）
     - capability='full' / 'standard' 等同（v4.14.0 起两者无差异）
     """
     ws_outbounds = []
@@ -1313,6 +1310,7 @@ def generate_singbox_config(capability='full'):
 
     if CDN_MODE_ENABLED:
         vless_ws_addr, trojan_ws_addr, ws_sni, ws_cdn_flag = resolve_ws_targets()
+        cdn_sni = ws_sni
 
         _auto_test_proxies = _auto_test_proxies_base + [
             node_name("VLESS-WS", cdn=ws_cdn_flag),
@@ -1519,7 +1517,6 @@ def generate_singbox_config(capability='full'):
                     }
                 }
             },
-            # v4.15.0: VLESS-gRPC 已删除（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
             # Trojan-TCP (直连)
             {
                 "type": "trojan",
@@ -1937,6 +1934,7 @@ def generate_clash_config(capability='full'):
     """
     if CDN_MODE_ENABLED:
         vless_ws_addr, trojan_ws_addr, ws_sni, ws_cdn_flag = resolve_ws_targets()
+        cdn_sni = ws_sni
     else:
         vless_ws_addr = SERVER_IP
         trojan_ws_addr = SERVER_IP
@@ -1970,9 +1968,7 @@ def generate_clash_config(capability='full'):
         "servername": REALITY_SNI
     })
 
-    # v4.15.0: VLESS-gRPC 已删除（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
-
-    # 3. Trojan-TCP (直连)
+    # 2. Trojan-TCP (直连)
     proxies.append({
         "name": node_name("Trojan-TCP"),
         "type": "trojan",
@@ -1989,7 +1985,7 @@ def generate_clash_config(capability='full'):
     })
     
     if CDN_MODE_ENABLED:
-        # 4. VLESS-WS (CDN模式) - Clash Meta支持
+        # 3. VLESS-WS (CDN模式) - Clash Meta支持
         proxies.append({
             "name": node_name("VLESS-WS", cdn=ws_cdn_flag),
             "type": "vless",
@@ -2012,7 +2008,7 @@ def generate_clash_config(capability='full'):
             "skip-cert-verify": True
         })
         
-        # 5. Trojan-WS (CDN模式) - Clash Meta支持
+        # 4. Trojan-WS (CDN模式) - Clash Meta支持
         proxies.append({
             "name": node_name("Trojan-WS", cdn=ws_cdn_flag),
             "type": "trojan",
@@ -2035,7 +2031,7 @@ def generate_clash_config(capability='full'):
             "alpn": ["h2", "http/1.1"]
         })
 
-    # 6. anyTLS (直连) - v4.14.0 新增
+    # 5. anyTLS (直连) - v4.14.0 新增
     # Clash Meta (mihomo) 1.18+ 原生支持 anytls 协议类型
     # 缓解 TLS-in-TLS 指纹检测，配置极简（无 path/Host/serviceName）
     # 直连源站不走 CDN，SNI 用主域名（与证书匹配）
@@ -2053,7 +2049,7 @@ def generate_clash_config(capability='full'):
         "alpn": ["h2", "http/1.1"]
     })
 
-    # 7. TUIC v5 (直连, UDP) - v4.15.0 加回
+    # 6. TUIC v5 (直连, UDP) - v4.15.0 加回
     # Clash Meta (mihomo) 1.18+ 原生支持 tuic 协议类型
     # 提供 UDP relay 支持，与 TCP 协议互补
     # congestion-controller=bbr 提升吞吐，udp-relay-mode=native 保留 UDP 语义
@@ -2076,8 +2072,8 @@ def generate_clash_config(capability='full'):
         })
 
     proxy_names = [p["name"] for p in proxies]
-    # v4.15.0 dual-stack + TUIC：CDN 模式 7 节点，直连模式 5 节点
-    # ENABLE_TUIC=false 时减去 TUIC 节点（CDN 模式 6 节点，直连模式 4 节点）
+    # 标准 SOP：CDN 模式 6 节点（含 anyTLS+TUIC），直连模式 4 节点（含 anyTLS+TUIC）
+    # ENABLE_TUIC=false 时各减 1 节点
     auto_proxy_names_base = [
         node_name("VLESS-Reality"),
         node_name("Trojan-TCP"),

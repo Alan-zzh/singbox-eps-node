@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.15.1`
+**当前版本**: `v4.15.6`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -52,9 +52,9 @@ bash install.sh optimize     # 只做系统优化（BBRv3 + FQ；首次启用需
 - **流量查询端点**:`/info` 文本端点(v2rayN 也能看流量)+ `/api/traffic` JSON + `subscription-userinfo` header;Base64 正文只放节点 URI,分享链接节点名已 URL 编码
 - HTTPS 订阅:Base64 + sing-box JSON + Clash Meta
 - CDN 优选 IP 自动维护(IP 池 10-15 个/服务器,用户本地实测/运营商匹配源优先,Top3 之后再做 C 段分散,`/api/cdn-status` 可查看当前IP/评分/更新时间)
-- CDN 阻断自动检测与切换(403/1020 拦截检测 + 冷却机制 + 信号文件联动订阅刷新)
+- CDN 阻断自动检测与切换(403/L7 拦截检测 + 冷却机制 + 信号文件联动订阅刷新；v4.15.6 起订阅层 `CDN_EDGE_FALLBACK=auto` 会在 CF 边缘 WS 入口失败时临时用 sub-* 直连地址保可用，并保留主域名 SNI/Host)
 - CDN 优选迟滞防抖:新 IP 评分必须比当前高 15% 才触发切换,避免频繁切换加剧封禁
-- Cloudflare 代理入口规则自愈(按 `jp/sg/hk.290372913.xyz` + 代理端口/路径放行,不绑定用户公网 IP;最低 TLS 固定为 1.2 兼容 Windows/v2rayN)
+- Cloudflare 代理入口规则自愈(按 `jp/sg/hk.290372913.xyz` + 代理端口/路径放行,不绑定用户公网 IP;最低 TLS 固定为 1.2 兼容 Windows/v2rayN;不再周期性重加 `ddos_l7 eoff` override)
 - 健康检查 + 一键诊断
 - 按月流量统计(iptables 内核级 INPUT `dpt` + OUTPUT `spt` 双向计数,UDP 独立统计,每月14号更新 baseline)
 - BBRv3 + FQ 网络优化（XanMod BBRv3 内核；首次启用需重启）
@@ -65,13 +65,13 @@ bash install.sh optimize     # 只做系统优化（BBRv3 + FQ；首次启用需
 | 节点 | 协议 | 连接方式 | 客户端兼容 |
 |------|------|----------|------------|
 | `{CC}-VLESS-Reality` | VLESS | 直连 `IP:443` | 全平台 |
-| `{CC}-VLESS-gRPC` | VLESS | 直连 `IP:随机端口` | 全平台（Base64 URI 已补兼容参数） |
 | `{CC}-Trojan-TCP` | Trojan | 直连 `IP:随机端口` | 全平台 |
-| `{CC}-VLESS-WS-CDN` | VLESS + WS | CDN 优选 IP `:8443` | 全平台 |
-| `{CC}-Trojan-WS-CDN` | Trojan + WS | CDN 优选 IP `:2083` | 全平台 |
+| `{CC}-VLESS-WS-CDN` | VLESS + WS | CDN 优选 IP `:8443`，CF L7 阻断时自动降级 sub-* 直连 | 全平台 |
+| `{CC}-Trojan-WS-CDN` | Trojan + WS | CDN 优选 IP `:2083`，CF L7 阻断时自动降级 sub-* 直连 | 全平台 |
 | `{CC}-anyTLS` | anyTLS | 直连 `IP:2096` | sing-box 1.12+ / Clash Meta (mihomo) 1.18+ |
+| `{CC}-TUIC-v5` | TUIC v5 | 直连 `UDP:50444`（或环境变量端口） | sing-box / mihomo / Shadowrocket |
 
-> **v4.14.0 协议栈精简**：删除 VLESS-HTTPUpgrade-CDN（故障最多+兼容最窄）和 TUIC v5（UDP 易被封+QUIC 被 QoS），新增 anyTLS（sing-box 1.12+ 原生，缓解 TLS-in-TLS 指纹检测）。
+> **v4.15.0 协议栈**：删除 VLESS-gRPC 与 VLESS-HTTPUpgrade-CDN，保留 VLESS-Reality / Trojan-TCP / VLESS-WS-CDN / Trojan-WS-CDN / anyTLS / TUIC-v5。
 >
 > **客户端能力自动识别**：`/sub` 端点按 User-Agent 自动返回 6 节点。`?client=full` 与 `?client=standard` 等同（HTTPUpgrade/TUIC 已下线，无差别），保留 `standard` 参数兼容旧客户端。
 

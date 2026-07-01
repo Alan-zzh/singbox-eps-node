@@ -1,3 +1,14 @@
+## [4.15.7] - 2026-07-02
+- [opencode] **新增香港 HKCEPIN 服务器部署（18.166.210.81 AWS EC2，CDN 模式）**：域名 `hkcepin.290372913.xyz`（橙云 proxied=true）；一键安装脚本完整部署，含 sing-box 1.13.13 + 6 标准 SOP 协议（VLESS-Reality, Trojan-TCP, anyTLS, TUIC-v5, VLESS-WS-CDN, Trojan-WS-CDN，无 gRPC）+ AI SOCKS5 代理 + BBR+FQ 优化 + 2GB Swap。Cloudflare 规则已配置，sub-hkcepin.290372913.xyz（灰云 proxied=false）订阅直连子域名已创建。
+- [opencode] `cloudflare_proxy_rules.py` PROXY_SUBDOMAINS 新增 `hkcepin`，支持新服务器 Cloudflare 自愈。
+- [opencode] **修复 subscription_service.py 协议栈（用户可感知：订阅恢复标准 6 节点含 anyTLS，无 gRPC）**：之前将本应保留的 anyTLS 错误移除、将本应删除的 gRPC 错误加回。修正后订阅输出 6 节点标准 SOP——VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5 + WS-CDN / Trojan-WS-CDN（CDN 模式）；所有三方格式（Base64/Clash/sing-box）已验证通过。
+
+## [4.15.6] - 2026-06-30
+- [Codex] **修复订阅/CDN 反复失效（用户可感知：JP/SG/HK 订阅入口恢复 200，CDN WS 入口恢复 101）**：外部复现主域名 `:8443/vless-ws` 与 `:2083/trojan-ws` 返回 403；Cloudflare GraphQL 确认 `source=l7ddos`、`ruleId=l7ddos` 命中 `/vless-ws` 和 `/trojan-ws`。根因不是 sing-box 入站挂掉，而是 Cloudflare 免费版 L7 DDoS 动态保护再次拦截代理入口，且旧健康检查会反复执行 `cloudflare_proxy_rules.py apply` 把 `ddos_l7 eoff` override 加回去，造成“人工恢复后又复发”。
+- [Codex] **自愈逻辑修正**：`cloudflare_proxy_rules.py apply` 改为确保删除 `ddos_l7` override，不再重加 `eoff`；`ensure_proxy_skip_rule()` 现在会清理同描述的重复/过期 skip 规则，避免 status 看到“存在”但实际目标态混乱。
+- [Codex] **订阅层自动降级**：`subscription_service.py` 新增 `CDN_EDGE_FALLBACK=auto|direct|off`。默认 `auto` 会用真实 WebSocket 握手探测主域名 CF 边缘路径；当 8443/2083 均不可用时，VLESS-WS/Trojan-WS 节点临时改用 sub-* 直连地址，同时保留主域名 SNI/Host，避免客户端继续拿到已知必挂的 CDN 节点。CF 恢复后自动回到真 CDN/优选 IP。
+- [Codex] **部署闭环修复**：`deploy.py` 同步 `subscription_service.py`、`cloudflare_proxy_rules.py`、`health_check.sh` 到 `/root` 与 `/opt` 双运行目录，修正缺失 `server_verify.py` 时部署失败的问题。已部署 JP/SG/HK 并重启 `singbox-sub`；外部验证：sub-jp/sub-sg/sub-hk 的 `/clash`、`/sub?client=clash`、`/singbox` 均 HTTP 200；主域名 JP/SG/HK 的 VLESS-WS-CDN 和 Trojan-WS-CDN WebSocket 握手均 HTTP 101。
+
 ## [4.15.5] - 2026-06-28
 - [Trae CN] **修复 Shadowrocket/ClashMeta Base64 订阅节点缺失（用户可感知：iOS Shadowrocket 从 4 节点恢复 6 节点，含 anyTLS+TUIC v5）**：`CLIENT_CAPABILITIES` 字典中 `shadowrocket` 被错误归类为 `xray`（4 节点，不含 anyTLS/TUIC），实际上 Shadowrocket iOS 原生支持 TUIC v5（2023 年起），对未知 `anytls://` URI 会安全忽略不崩溃。修复：`shadowrocket` 从 `xray` 改为 `full`；补充 `clashmeta`（无连字符）和 `clash meta` 关键词匹配，修复 `ClashMetaForAndroid/2.x` UA 匹配失败也归 xray 的问题。`CLIENT_QUERY_ALIASES` 同步更新。Web UI 描述信息同步修正。部署后三台服务器验证：Shadowrocket UA 返回 6 节点（直连4+CDN2），ClashMeta UA 返回 6 节点，无UA curl 默认仍返回 4 节点（安全降级）。
 

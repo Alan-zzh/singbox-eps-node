@@ -22,7 +22,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 ENV_FILE = BASE_DIR / ".env"
 
 ZONE_NAME = "290372913.xyz"
-PROXY_SUBDOMAINS = ["jp", "sg", "hk"]
+PROXY_SUBDOMAINS = ["jp", "sg", "hk", "hkcepin"]
 # v4.14.0: 移除 2053 (VLESS-HTTPUpgrade 已下线)；anyTLS (2096) 为直连协议不走 CF 代理
 PROXY_PORTS = [2087, 8443, 2083]
 PROXY_PATHS = [

@@ -1,3 +1,32 @@
+## 最新排查（2026-06-30 v4.15.6）[Codex]
+
+### 订阅/CDN 反复失效 — Cloudflare L7 DDoS 复发 + 健康检查重加旧 override
+
+- **现象**: 用户反馈“订阅又不行、CDN 又失效”。外部测试显示 sub-* 订阅端点多数仍 HTTP 200，但主域名 `jp/sg/hk.290372913.xyz:8443/vless-ws` 与 `:2083/trojan-ws` 返回 Cloudflare 403，客户端感知为 CDN 节点不可用，进而误以为订阅整体坏掉。
+- **证据**:
+  - `curl -4 -k` 加合法 WebSocket 头测试主域名 CDN 入口，JP/SG/HK 的 8443/2083 初始均返回 403。
+  - Cloudflare GraphQL `firewallEventsAdaptive` 返回 `source=l7ddos`、`ruleId=l7ddos`、`action=block`，命中 `/vless-ws` 与 `/trojan-ws`。
+  - `cloudflare_proxy_rules.py status` 显示 `ddos_l7_entrypoint` 存在 `sensitivity_level=eoff`，同时 custom phase 里同描述 skip 规则重复存在新旧两条，说明旧自愈目标态会反复把不可靠的 DDoS L7 override 加回去。
+- **根因**:
+  1. Cloudflare 免费版 L7 DDoS 动态保护仍会拦截代理 WebSocket 入口，`eoff` override 不是稳定免死金牌；本次在 `eoff` 存在时仍然出现 `source=l7ddos` block。
+  2. `cloudflare_proxy_rules.py apply` 被 `health_check.sh` 每 15 分钟调用，旧逻辑会重加 `ddos_l7 eoff`，导致人工删除/恢复后又被自愈脚本带回旧状态。
+  3. skip 规则只按第一条同描述规则判断，不能清理重复/过期规则，状态看起来“存在”，实际 ruleset 目标态混乱。
+- **修复**:
+  1. `cloudflare_proxy_rules.py apply` 改为调用 `ensure_no_ddos_l7_override()`，确保删除 `ddos_l7` override，不再重加 `eoff`；`ensure_proxy_skip_rule()` 会删除同描述重复/过期规则，仅保留目标态一条。
+  2. `subscription_service.py` 新增 `CDN_EDGE_FALLBACK=auto|direct|off`。默认 `auto` 用真实 WebSocket 握手探测 CF 边缘路径；当 VLESS-WS/Trojan-WS 两个 CF 入口都不可用时，订阅临时把 WS 节点地址切到 sub-* 直连源站，同时 SNI/Host 仍用主域名，避免 sing-box Host 校验失败。
+  3. `deploy.py` 改为同步 `subscription_service.py`、`cloudflare_proxy_rules.py`、`health_check.sh` 到 `/root` 与 `/opt` 双运行目录，并修复缺失 `server_verify.py` 时部署失败的问题。
+- **验证**:
+  - 本地 `python -m py_compile deploy.py scripts/subscription_service.py scripts/cloudflare_proxy_rules.py scripts/config_generator.py scripts/config.py` 通过。
+  - 本地 `pytest -q tests/test_cloudflare_proxy_rules.py tests/test_cdn_edge_fallback.py` 通过：`11 passed`。
+  - 已部署 JP/SG/HK，远程 py_compile、`bash -n health_check.sh`、`systemctl restart singbox-sub`、服务 active 均通过。
+  - 外部验证：sub-jp/sub-sg/sub-hk 的 `/clash/{CC}`、`/sub/{CC}?client=clash`、`/singbox/{CC}` 均 HTTP 200；主域名 JP/SG/HK 的 8443 `/vless-ws` 与 2083 `/trojan-ws` 合法 WebSocket 握手均 HTTP 101；sub-* 应急直连 WS 路径也均 HTTP 101。
+- **教训**:
+  1. Cloudflare DDoS L7 是独立于 WAF/RateLimit 的层，不要把 skip 规则或 `security_level=essentially_off` 当作能覆盖它的证明；必须看 GraphQL `source`。
+  2. 自愈脚本必须维护“当前已验证目标态”，不能把历史应急措施固化成周期任务，否则就会出现“修好后又被 health_check 改坏”。
+  3. 真 CDN 路径和 sub-* 直连应急路径必须同时存在：正常走真 CDN，L7 阻断时自动降级保可用，且降级必须保留主域名 SNI/Host 防止 `bad host` 回归。
+
+---
+
 ## 最新排查（2026-06-28 v4.15.5）[Trae CN]
 
 ### Shadowrocket Base64 订阅节点缺失 — CLIENT_CAPABILITIES 错误归类为 xray

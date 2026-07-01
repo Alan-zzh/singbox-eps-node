@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.15.2 | **更新**: 2026-06-28
+**版本**: v4.15.6 | **更新**: 2026-06-30
 
 ---
 
@@ -29,7 +29,7 @@
 - CDN优选迟滞防抖（v4.12.13 新增）：`get_cdn_ip_for_protocol()` 新 IP 评分必须比当前高 15% 才触发切换，避免频繁切换加剧封禁
 - CDN用户路径HTTP测速（v4.12.13 新增）：`test_user_path_latency()` 新增通过代理入口端口(2087)的 HTTP `/info` 测速，取 TLS 握手和 HTTP 延迟中较小值
 - CDN故障切换状态查询（v4.12.13 新增）：`/api/cdn-status` 启用 `CdnFailoverController` 状态查询（冷却池、切换计数、上次切换时间）
-- Cloudflare 代理入口规则自愈（v4.12.7 更新）：`cloudflare_proxy_rules.py` 按 `jp/sg/hk.290372913.xyz` + 代理端口/路径维护 Rulesets API skip 规则，不绑定用户公网 IP；`health_check.sh` 每 15 分钟确认目标态
+- Cloudflare 代理入口规则自愈（v4.15.6 更新）：`cloudflare_proxy_rules.py` 按 `jp/sg/hk.290372913.xyz` + 代理端口/路径维护 Rulesets API skip 规则，不绑定用户公网 IP；`health_check.sh` 每 15 分钟确认目标态；`apply` 不再重加 `ddos_l7 eoff` override，并会清理同描述重复/过期 skip 规则
 - Clash 订阅/CDN 入口恢复（v4.12.20 更新，v4.13.1 标注为兜底降级）：Cloudflare skip 规则覆盖 firewall_managed/sbfm/ratelimit 三个阶段（不含ddos_l7），ddos_l7 phase 创建 `sensitivity_level=eoff` override 放行代理端口流量。⚠️ 此配置仅作为 CF 代理路径的兜底降级，**订阅端点主路径已改为 sub-* 直连**（见下条），不能仅依赖 eoff
 - **订阅端点 sub-* 直连绕过 CF DDoS L7（v4.13.1 新增，v4.13.3 代码层补全）**：CF 免费计划 DDoS L7 ML 系统无法通过 API 完全关闭（v4.12.20 的 eoff 方案是假阳性），订阅端点改走 `sub-jp/sub-sg/sub-hk.290372913.xyz` 三个 gray cloud(`proxied=false`)子域名直连源站，完全绕过 CF 代理层。`cert_manager.py` 的 SAN 同时包含主域名+sub-* 子域名。`config.py` 的 `get_sub_domain()` 和 `subscription_service.py` 首页订阅链接+三端点 `profile-web-page-url` header 全部使用 sub-* 子域名。3轮108项+15项验证全部PASS。
 - CDN优选评分修复（v4.12.21 更新）：`assign_and_save_ips()` 修复漏传 `user_path_result` 和 `cross_isp_score` 参数的bug，CDN IP评分从83分恢复到95-96分；HK服务器USER_DDNS_DOMAIN修复为zzpzgroup.com
@@ -69,12 +69,13 @@
 2. 用户投喂IP池（CDN_PREFERRED_IPS）- 填补空缺首选
 3. 外部API候选 - 按评分排序
 
-### CDN 架构现状（v4.15.1 真 CDN 路径恢复）
+### CDN 架构现状（v4.15.6 真 CDN 优先 + L7 阻断自动降级）
 
 > ✅ v4.15.1 已彻底修复"伪 CDN 化"问题，CDN 节点恢复真 CDN 路径，抗 IP 封锁能力恢复。
+> ✅ v4.15.6 新增 Cloudflare L7 阻断自动降级：正常优先真 CDN/CF 优选 IP；CF 边缘 WS 入口被 DDoS L7 拦截时，订阅层临时切到 sub-* 直连地址保可用，同时 SNI/Host 保持主域名。
 > ⚠️ v4.15.0 的"伪 CDN 化说明"已被 v4.15.1 推翻，下文保留作为历史记录。
 
-**v4.15.1 现状结论（三层路径分离）：**
+**v4.15.6 现状结论（三层路径分离 + 自动降级）：**
 
 1. **CDN 代理节点（VLESS-WS-CDN / Trojan-WS-CDN）走真 CDN 路径**
    - 订阅层（subscription_service.py）的 `CDN_MODE` 分支逻辑正常工作：`ip_optimized` 用 CF 优选 IP（来自 cdn_monitor 数据库）/ `domain_optimized` 用优选域名 / `domain_default` 用主域名
@@ -95,6 +96,11 @@
 4. **cdn_monitor.py 优选 IP 池恢复实际作用**
    - `ip_optimized` 模式下，subscription_service.py 从 cdn_monitor 数据库读取 CF 优选 IP 作为 CDN 节点 server
    - 优选 IP 池不再仅作监控指标，实际影响客户端连接
+
+5. **CDN_EDGE_FALLBACK 自动降级**
+   - 默认 `CDN_EDGE_FALLBACK=auto`，订阅服务用合法 WebSocket 握手探测主域名 CF 边缘 8443/2083
+   - 两个 WS 入口都失败时，VLESS-WS/Trojan-WS 节点 server 临时改为 sub-* 直连域名，SNI/Host 仍为主域名 `cf_domain`
+   - CF 恢复后自动回到真 CDN/优选 IP；也可用 `CDN_EDGE_FALLBACK=direct|off` 强制直连降级或关闭降级
 
 ---
 
@@ -202,6 +208,16 @@ snapshot 仅补充部署相关要点:
 - trojan-tcp 端口: 65004
 - anytls 端口: 2096
 - sing-box：1.13.13
+
+### 香港服务器 HKCEPIN (18.166.210.81 AWS) — CDN 模式
+- 域名: hkcepin.290372913.xyz
+- IP: 18.166.210.81
+- 部署模式: **CDN（7节点，橙云 proxied=true）**
+- 系统: Ubuntu 24.04.4 LTS（AWS EC2，414MB 内存 + 2GB Swap）
+- 协议: VLESS-Reality, VLESS-gRPC, Trojan-TCP, VLESS-WS-CDN, Trojan-WS-CDN, anyTLS, TUIC-v5
+- 部署时间: 2026-07-02
+- sing-box: 1.13.13
+- 订阅直连子域名: sub-hkcepin.290372913.xyz（灰云 proxied=false）
 
 ### 香港服务器 HK1 (香港阿里云) — 直连模式
 - 域名: hk1.290372913.xyz

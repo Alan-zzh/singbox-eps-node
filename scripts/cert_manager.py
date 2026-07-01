@@ -163,11 +163,30 @@ def generate_self_signed_cert(domain=None):
 
     v4.12.22: SAN 同时包含主域名和 sub-* 子域名，
     让订阅端点可通过非代理子域名直连（绕过 CF DDoS L7）。
+    v4.15.7: 校验 domain 是否为完整 FQDN，否则警告并重读 .env。
     """
     if domain is None:
         domain = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
-    sub_domain = _build_sub_domain(domain)
+    # 防护：domain 不是合法域名（如空/裸 IP）时直接从 .env 文件重读
+    if not domain or '.' not in domain or domain.count('.') < 2:
+        logger.warning(f"[WARN] domain='{domain}' 不是完整域名，直接从 .env 文件重读...")
+        env_file = os.path.join(BASE_DIR, '.env')
+        if os.path.exists(env_file):
+            with open(env_file) as f:
+                for line in f:
+                    if line.startswith('CF_DOMAIN='):
+                        domain = line.split('=', 1)[1].strip().strip('"\'')
+                        break
+        if not domain or '.' not in domain or domain.count('.') < 2:
+            logger.warning(f"[WARN] 重读后 domain='{domain}' 仍不合法，跳过 sub-* SAN 扩展")
+            sub_domain = None
+        else:
+            logger.info(f"[INFO] 重读后 domain='{domain}'，正常生成 sub-* SAN")
+            sub_domain = _build_sub_domain(domain)
+    else:
+        sub_domain = _build_sub_domain(domain)
+
     if sub_domain:
         san = f"subjectAltName=DNS:{domain},DNS:{sub_domain}"
     else:

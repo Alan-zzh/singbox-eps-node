@@ -96,6 +96,10 @@
 
 29. **HK1 与 HK 必须按域名前缀区分,禁止用 COUNTRY_CODE 判断部署模式**(v4.15.2 教训):用户反复反馈"每次修复老是把 HK1 搞 CDN 的",根因是代码用 `COUNTRY_CODE == 'HK'` 判断是否直连模式(`HK_DIRECT_MODE`),但 HK 与 HK1 地理都在香港,`COUNTRY_CODE` 都可能是 `HK`,根本无法区分。**两台香港服务器用途截然不同**:① HK 服务器(`hk.290372913.xyz`)是 CDN 模式(6 节点,橙云 `proxied=true`);② HK1 服务器(`hk1.290372913.xyz`,香港阿里云 200GB 流量)是直连模式(4 节点,无 CDN 依赖)。**判断铁律**:① 优先级最高——`.env` 显式设置 `DEPLOY_MODE=direct|cdn`;② fallback ——基于 `CF_DOMAIN` 域名前缀,`hk1.` 开头才是直连,其他(含 `hk.`)都是 CDN;③ **绝对禁止**用 `COUNTRY_CODE == 'HK'` 作为判断依据。**代码审查清单必查项**:修改 `config.py` 的 `HK_DIRECT_MODE`、`subscription_service.py` 的 `_hk_direct_fallback`、`install.sh` 的 `select_deploy_mode` 时,必须确认判断逻辑是 `CF_DOMAIN.startswith('hk1.')` 而非 `COUNTRY_CODE == 'HK'`。`install.sh` 的 `select_deploy_mode()` 和 `create_env_file()` 必须在检测到 `hk1.` 域名时强制 `DEPLOY_MODE=direct` 并告警,防止用户手动选错
 
+### Cloudflare L7 复发与自动降级（v4.15.6 扩展）
+
+30. **不要把 `ddos_l7 eoff` 固化为 health_check 自动修复目标**(v4.15.6 教训):Cloudflare GraphQL 已验证在 `ddos_l7 eoff` override 存在时仍会出现 `source=l7ddos`、`ruleId=l7ddos` 拦截 `/vless-ws` 和 `/trojan-ws`;旧逻辑由 `health_check.sh` 周期性执行 `cloudflare_proxy_rules.py apply` 重加 eoff,导致“人工恢复后又复发”。**正确做法**:① `cloudflare_proxy_rules.py apply` 只维护 custom skip 规则和 TLS 1.2,并确保删除 ddos_l7 override;② skip 规则必须清理同描述重复/过期规则,不能只看到同名/同描述就返回;③ 订阅层用 `CDN_EDGE_FALLBACK=auto` 做真实 WebSocket 边缘探测,CF 入口失败时临时用 sub-* 直连地址保可用,但 SNI/Host 必须继续使用主域名 `cf_domain`;④ 交付前必须同时验证 GraphQL `source`、sub-* 订阅 HTTP 200、主域名 CF WS 101、sub-* 应急 WS 101。
+
 ## 记录规范
 
 | 事件 | 更新文件 | 不动 |
