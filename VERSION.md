@@ -1,1 +1,1 @@
-v4.15.7 - [opencode] 新增香港 HKCEPIN 服务器部署(AWS EC2,标准 6 节点含 anyTLS 无 gRPC);subscription_service.py 修复协议栈(恢复 anyTLS,移除 gRPC),订阅 6 节点标准 SOP 验证通过;cert_manager.py 域名验证守卫;cloudflare_proxy_rules.py 新增 hkcepin
+v4.15.8 - [opencode] 修复 Reality 连接失败（HKCEPIN v2rayN 延迟-1）：config.py REALITY_SHORT_ID 从 .env 读取而非硬编码 'abcd1234'；subscription_service.py 移除 VLESS_GRPC_PORT 死代码；config.py 新增 secrets 导入；新增 scripts/fix_hkcepin.sh 一键修复脚本；install.sh 新增 REALITY_SHORT_ID 持久化生成与备份

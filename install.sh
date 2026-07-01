@@ -434,21 +434,26 @@ install_singbox() {
 
         if [ "$SINGBOX_CHOICE" = "1" ]; then
             log_info "卸载当前 Singbox 及所有关联数据（保留密码和密钥）..."
-            PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
+            mkdir -p "${BASE_DIR}/.backup"
+            chmod 700 "${BASE_DIR}/.backup"
+            PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
             > "$PASSWORD_BACKUP"
+            chmod 600 "$PASSWORD_BACKUP"
             if [ -f "$BASE_DIR/.env" ]; then
                 for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD ANYTLS_PASSWORD \
-                             REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY COUNTRY_CODE DEPLOY_MODE \
+                             REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID \
+                             COUNTRY_CODE DEPLOY_MODE \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
                              AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
                              TG_ADMIN_CHAT_ID WARP_UNLOCK WARP_PRIVATE_KEY WARP_PEER_PUBLIC_KEY \
-                             WARP_PEER_ENDPOINT WARP_CLIENT_IPV4 WARP_CLIENT_IPV6 WARP_RESERVED; do
+                             WARP_PEER_ENDPOINT WARP_CLIENT_IPV4 WARP_CLIENT_IPV6 WARP_RESERVED \
+                             ENABLE_TUIC; do
                     VALUE=$(grep "^${FIELD}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
                     if [ -n "$VALUE" ]; then
                         echo "${FIELD}=${VALUE}" >> "$PASSWORD_BACKUP"
                     fi
                 done
-                log_info "密码和密钥已备份"
+                log_info "密码和密钥已备份到 ${PASSWORD_BACKUP}"
             fi
             systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
             systemctl disable singbox singbox-sub singbox-cdn 2>/dev/null || true
@@ -527,7 +532,10 @@ setup_python_env() {
 
 generate_uuids_and_passwords() {
     log_step "生成协议密码和UUID..."
-    PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
+    # v4.15.8: 使用 root 私有目录替代 /tmp，避免凭据泄露
+    PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
+    mkdir -p "${BASE_DIR}/.backup"
+    chmod 700 "${BASE_DIR}/.backup"
     if [ -f "$PASSWORD_BACKUP" ]; then
         log_info "检测到密码备份，恢复旧密码（客户端无需重新配置）..."
         while IFS='=' read -r key value; do
@@ -538,10 +546,12 @@ generate_uuids_and_passwords() {
                 TUIC_PASSWORD) TUIC_PASSWORD="$value" ;;
                 TUIC_UUID) TUIC_UUID="$value" ;;
                 ANYTLS_PASSWORD) ANYTLS_PASSWORD="$value" ;;
+                REALITY_SHORT_ID) REALITY_SHORT_ID="$value" ;;
                 COUNTRY_CODE) COUNTRY_CODE="$value" ;;
                 DEPLOY_MODE) DEPLOY_MODE="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
+        chmod 600 "$PASSWORD_BACKUP"
         log_info "密码已从备份恢复"
     fi
     VLESS_UUID=${VLESS_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
@@ -551,28 +561,45 @@ generate_uuids_and_passwords() {
     TUIC_UUID=${TUIC_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     # v4.14.0 新增：anyTLS 协议密码（独立于 TROJAN_PASSWORD，向后兼容）
     ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
+    # v4.15.8: REALITY_SHORT_ID（若 .env 已有则保留，否则生成随机值）
+    REALITY_SHORT_ID=${REALITY_SHORT_ID:-$(python3 -c "import secrets; print(secrets.token_hex(8))")}
     # 随机端口生成（10000-65535 之间，避免常用端口）
-    VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
-    TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
-    TUIC_PORT=${TUIC_PORT:-$(python3 -c "import random; print(random.randint(10000, 65535))")}
-    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
+    TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-$(python3 -c "import secrets; print(secrets.randbelow(55536) + 10000)")}
+    TUIC_PORT=${TUIC_PORT:-$(python3 -c "import secrets; print(secrets.randbelow(55536) + 10000)")}
+    # v4.15.8: VLESS_GRPC_PORT 已删除（v4.15.0 移除 gRPC 协议），不再生成
+    # 尝试多次获取 SERVER_IP（DNS/网络刚初始化可能失败）
+    SERVER_IP=""
+    for _ in 1 2 3; do
+        SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
+        [ -n "$SERVER_IP" ] && break
+        sleep 2
+    done
+    # EC2 环境兜底（169.254.169.254 是 AWS 实例元数据端点）
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(curl -s --connect-timeout 3 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")
+    fi
     if [ -n "$SERVER_IP" ]; then
         COUNTRY_CODE=$(curl -s --connect-timeout 5 "https://ipinfo.io/${SERVER_IP}/country" 2>/dev/null | tr -d '[:space:]' || echo "")
     fi
     COUNTRY_CODE=${COUNTRY_CODE:-US}
-    log_info "服务器IP: ${SERVER_IP}，国家代码: ${COUNTRY_CODE}"
+    if [ -z "$SERVER_IP" ]; then
+        log_error "无法检测服务器 IP，请确保网络连通后手动设置 .env 中的 SERVER_IP"
+        log_error "订阅链接将生成空地址导致全部节点不可用"
+    fi
+    log_info "服务器IP: ${SERVER_IP:-未检测到}，国家代码: ${COUNTRY_CODE}"
     log_info "UUID和密码已生成"
     log_info "Trojan-TCP端口: ${TROJAN_TCP_PORT}，TUIC端口: ${TUIC_PORT}，anyTLS端口: 2096"
 }
 
 generate_reality_keys() {
     log_step "生成Reality密钥对..."
-    PASSWORD_BACKUP="/tmp/singbox_passwords_backup.env"
+    PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
     if [ -f "$PASSWORD_BACKUP" ]; then
         while IFS='=' read -r key value; do
             case "$key" in
                 REALITY_PRIVATE_KEY) REALITY_PRIVATE_KEY="$value" ;;
                 REALITY_PUBLIC_KEY) REALITY_PUBLIC_KEY="$value" ;;
+                REALITY_SHORT_ID) REALITY_SHORT_ID="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
     fi
@@ -582,11 +609,18 @@ generate_reality_keys() {
         REALITY_PUBLIC_KEY=$(echo "$REALITY_OUTPUT" | grep "PublicKey" | awk '{print $2}')
     fi
     if [ -z "$REALITY_PRIVATE_KEY" ] || [ -z "$REALITY_PUBLIC_KEY" ]; then
-        log_warn "自动生成失败，使用占位符，请手动配置"
-        REALITY_PRIVATE_KEY="PLACEHOLDER_PRIVATE_KEY"
-        REALITY_PUBLIC_KEY="PLACEHOLDER_PUBLIC_KEY"
+        log_error "Reality 密钥对生成失败！安装中止。"
+        log_error "请检查 sing-box 是否正确安装: 'singbox version'"
+        exit 1
+    fi
+    # 校验密钥是否为合法 base64（长度约 44，不能是占位符）
+    _pbk_len=${#REALITY_PUBLIC_KEY}
+    if [ "$_pbk_len" -lt 40 ] || echo "$REALITY_PUBLIC_KEY" | grep -qi "placeholder"; then
+        log_error "Reality 公钥格式异常（长度=$_pbk_len），安装中止"
+        exit 1
     fi
     log_info "Reality密钥对已生成"
+    log_info "Reality Short ID: ${REALITY_SHORT_ID:-（将由 generate_uuids_and_passwords 生成）}"
 }
 
 select_deploy_mode() {
@@ -778,7 +812,7 @@ DEPLOY_MODE=${DEPLOY_MODE}
 SERVER_IP=${SERVER_IP}
 CF_DOMAIN=${CF_DOMAIN_INPUT}
 
-# ============ 协议密码 ============
+# ============ 协议凭据 ============
 VLESS_UUID=${VLESS_UUID}
 VLESS_WS_UUID=${VLESS_WS_UUID}
 TROJAN_PASSWORD=${TROJAN_PASSWORD}
@@ -790,9 +824,12 @@ ENABLE_TUIC=true
 ANYTLS_PASSWORD=${ANYTLS_PASSWORD}
 REALITY_PRIVATE_KEY=${REALITY_PRIVATE_KEY}
 REALITY_PUBLIC_KEY=${REALITY_PUBLIC_KEY}
+# v4.15.8: Reality short_id（持久化写入，确保服务端与订阅端使用同一 short_id）
+# 若缺失会导致 Reality 连接失败（config_generator.py 与 subscription_service.py 各自生成随机值）
+REALITY_SHORT_ID=${REALITY_SHORT_ID}
 
 # ============ 协议端口（直连协议随机生成，避免被封）=========
-VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
+# v4.15.8: VLESS_GRPC_PORT 已删除（v4.15.0 移除 gRPC 协议）
 TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
 TUIC_PORT=${TUIC_PORT}
 # v4.14.0 新增：anyTLS 端口（固定 2096，CF CDN 支持端口）
@@ -826,6 +863,19 @@ WARP_CLIENT_IPV6=
 WARP_RESERVED=
 EOF
     chmod 600 "$BASE_DIR/.env"
+    # v4.15.8: 验证关键变量不为空
+    _CRITICAL_VARS="SERVER_IP VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID ANYTLS_PASSWORD"
+    _VALIDATION_FAILED=false
+    for _var in $_CRITICAL_VARS; do
+        _val=$(grep "^${_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
+        if [ -z "$_val" ]; then
+            log_warn ".env 中 $_var 为空，可能导致协议功能异常"
+            _VALIDATION_FAILED=true
+        fi
+    done
+    if [ "$_VALIDATION_FAILED" = "true" ]; then
+        log_warn ".env 存在空值变量，请检查后手动填充"
+    fi
     log_info ".env 已创建 (服务器IP: ${SERVER_IP:-未检测到，请手动填写})"
 }
 
@@ -841,27 +891,10 @@ setup_certificate() {
     python3 scripts/cert_manager.py --cf-cert || python3 scripts/cert_manager.py
 }
 
+# v4.15.8: setup_tuic_firewall 已合并到 setup_iptables_traffic_counter
+# 保留空函数作为兼容桩（防止旧 cmd_reset 调用报错）
 setup_tuic_firewall() {
-    # v4.14.0: TUIC 默认关闭，仅在 ENABLE_TUIC=true 时配置防火墙规则
-    local enable_tuic_fw="false"
-    if [ -f "$BASE_DIR/.env" ]; then
-        enable_tuic_fw=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
-        TUIC_PORT_FW=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
-    fi
-    if [ "$enable_tuic_fw" != "true" ]; then
-        log_info "TUIC v5 已关闭（ENABLE_TUIC=false），跳过防火墙规则配置"
-        return 0
-    fi
-    log_step "配置TUIC v5防火墙规则..."
-    TUIC_PORT_FW=${TUIC_PORT_FW:-50444}
-    # 清理旧端口跳跃规则（21000-21200）
-    iptables-save 2>/dev/null | grep -v "21000:21200" | iptables-restore 2>/dev/null || true
-    log_info "旧端口跳跃规则已清理"
-    # 添加 TUIC TCP+UDP 规则
-    iptables -A INPUT -p tcp --dport $TUIC_PORT_FW -j ACCEPT 2>/dev/null || true
-    iptables -A INPUT -p udp --dport $TUIC_PORT_FW -j ACCEPT 2>/dev/null || true
-    netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    log_info "TUIC v5 防火墙规则已配置 (端口: $TUIC_PORT_FW, TCP+UDP)"
+    log_info "setup_tuic_firewall 已弃用，规则在 setup_iptables_traffic_counter 中统一管理"
 }
 
 create_systemd_services() {
@@ -1044,10 +1077,18 @@ setup_iptables_traffic_counter() {
     iptables -A INPUT -p udp --dport $VLESS_GRPC_PORT -j ACCEPT
     iptables -A INPUT -p tcp --dport $TROJAN_TCP_PORT -j ACCEPT
     iptables -A INPUT -p udp --dport $TROJAN_TCP_PORT -j ACCEPT
-    # TUIC v5 端口（默认关闭，但保留 iptables 规则兼容旧部署）
+    # TUIC v5 端口（仅 ENABLE_TUIC=true 时添加）
     TUIC_PORT_IPT=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "50444")
-    iptables -A INPUT -p tcp --dport $TUIC_PORT_IPT -j ACCEPT
-    iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
+    _enable_tuic_ipt=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
+    if [ "${_enable_tuic_ipt:-true}" = "true" ]; then
+        iptables -A INPUT -p tcp --dport $TUIC_PORT_IPT -j ACCEPT
+        iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
+        log_info "TUIC v5 防火墙规则已配置 (端口: $TUIC_PORT_IPT, TCP+UDP)"
+    else
+        log_info "TUIC v5 已关闭（ENABLE_TUIC=false），跳过防火墙规则"
+    fi
+    # v4.15.8: 清理旧端口跳跃规则（21000-21200）
+    iptables-save 2>/dev/null | grep -v "21000:21200" | iptables-restore 2>/dev/null || true
     netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
     if [ "$DEPLOY_MODE_IPT" = "direct" ]; then
         log_info "iptables流量计数器已配置（纯直连模式：端口443/2087/2096/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
@@ -1122,6 +1163,23 @@ verify_installation() {
     echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（4节点）" || echo "CDN混合模式（6节点，推荐）" )"
     echo ""
     ALL_OK=true
+
+    # v4.15.8: 验证 .env 关键变量
+    echo -e "  环境变量检查:"
+    _CRITICAL_VARS="SERVER_IP VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID"
+    for _var in $_CRITICAL_VARS; do
+        _val=$(grep "^${_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
+        if [ -z "$_val" ]; then
+            echo -e "    ${RED}❌${NC} $_var: (空)"
+            ALL_OK=false
+        elif echo "$_val" | grep -qi "placeholder"; then
+            echo -e "    ${RED}❌${NC} $_var: 占位符（未正确生成）"
+            ALL_OK=false
+        else
+            echo -e "    ${GREEN}✅${NC} $_var: 已设置"
+        fi
+    done
+
     for svc in singbox singbox-sub; do
         if systemctl is-active --quiet "$svc"; then
             echo -e "  ${GREEN}✅${NC} $svc: 运行中"
@@ -1156,8 +1214,7 @@ verify_installation() {
             ALL_OK=false
         fi
     done
-    # v4.11.1 新增：验证随机端口协议（vless-grpc / trojan-tcp）实际监听
-    # 历史教训：v4.11.0 升级后 config.json 没重跑，这俩端口永远不会监听，验证脚本漏检
+    # v4.15.8: 验证随机端口协议监听
     for port_var in TROJAN_TCP_PORT; do
         vport=$(grep "^${port_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
         if [ -n "$vport" ]; then

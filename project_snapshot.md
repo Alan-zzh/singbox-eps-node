@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.15.6 | **更新**: 2026-06-30
+**版本**: v4.15.8 | **更新**: 2026-07-02
 
 ---
 
@@ -41,9 +41,9 @@
 - 三层自愈机制：systemd ExecStartPre + health_check.sh（v4.10.20 升级为详细日志版） + StartLimitBurst
 - 一键诊断脚本：diagnose.sh 18项检查
 - SQLite WAL 模式：多进程并发读写零阻塞（v4.10.20）
-- Reality 强随机 short_id：openssl rand -hex 8 生成，禁止 abcd1234 弱预设
+- **Reality short_id 持久化（v4.15.8 修复）**：`REALITY_SHORT_ID` 通过 install.sh 写入 `.env`，config.py 从 `.env` 读取，确保服务端 config_generator 与订阅端 subscription_service 使用相同的 short_id，消除握手失败
 - TLS ALPN: ["h2", "http/1.1"] 启用 HTTP/2 多路复用
-- 随机端口配置：VLESS-gRPC/Trojan-TCP 端口首次安装随机生成（10000-65535），避免固定端口被识别
+- 随机端口配置（v4.15.8 增强）：TROJAN_TCP_PORT/TUIC_PORT 首次安装用 `secrets.randbelow` 随机生成，并写入 `.env` 持久化；备份路径从 `/tmp` 改为 `$BASE_DIR/.backup/`
 - sing-box 版本:1.13.13(SG/HK)/1.13.14(JP);服务端为单独 sing-box,不混装 Xray
 
 ### CDN优选IP学习系统

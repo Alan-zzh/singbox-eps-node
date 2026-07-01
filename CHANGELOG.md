@@ -1,7 +1,12 @@
+## [4.15.8] - 2026-07-02
+- [opencode] **修复 Reality 连接彻底失败（用户可感知：HKCEPIN v2rayN 显示 VLESS-Reality/anyTLS 延迟-1，无法连接）**：用户报告新部署的 HKCEPIN 服务器 v2rayN 全部协议显示-1。多智能体审查发现核心根因——REALITY_SHORT_ID 从未写入 `.env`，导致 config_generator.py（服务端配置用随机 ID）与 subscription_service.py（订阅用另一随机 ID）各自生成不同的 Reality short_id，握手失败（延迟-1）。
+- [opencode] **config.py 硬编码修复（不可绕过的架构级修复）**：`REALITY_SHORT_ID` 从硬编码 `'abcd1234'` 改为 `os.getenv('REALITY_SHORT_ID') or secrets.token_hex(8)`——优先从 `.env` 读取持久化值，无 .env 时生成随机值（兼容旧部署）。`REALITY_DEST`/`REALITY_SNI` 同步改为从 `.env` 读取。新增 `import secrets`。
+- [opencode] **subscription_service.py 死代码清理**：移除从 config.py import 的 `VLESS_GRPC_PORT`（v4.15.0 已删除 gRPC 协议）；移除 fallback 块中的 `VLESS_GRPC_PORT` 定义。
+- [opencode] **新增 scripts/fix_hkcepin.sh 一键修复脚本**：用户 SSH 可达 HKCEPIN 后运行，自动补全 REALITY_SHORT_ID/anyTLS密码/SERVER_IP、重新生成 Reality 密钥（占位符检测）、重跑 config_generator、重启服务、验证端口监听与订阅端点、交叉验证 Reality short_id 一致性。
+- [opencode] **install.sh REALITY_SHORT_ID 持久化与备份**：`generate_uuids_and_passwords()` 新增 `REALITY_SHORT_ID=$(openssl rand -hex 8)` 生成，加入备份恢复列表。`.env` 模板新增 `REALITY_SHORT_ID=${REALITY_SHORT_ID}`。`verify_installation()` 新增 `.env` 关键变量检查（SERVER_IP/VLESS_UUID/TROJAN_PASSWORD/REALITY_PRIVATE_KEY/REALITY_PUBLIC_KEY/REALITY_SHORT_ID），空值或占位符标红 FAIL。备份路径从 `/tmp` 改为 `$BASE_DIR/.backup/`，权限 chmod 600。
+- [opencode] **install.sh 多项安全性增强**：`generate_reality_keys()` 删除占位符静默降级逻辑，密钥生成失败直接 exit 1；公钥长度校验（≥40非placeholder）。`generate_uuids_and_passwords()` TROJAN_TCP_PORT/TUIC_PORT 改用 `secrets.randbelow` 提升熵。`.env` 创建后新增关键变量空值检查。TUIC 防火墙逻辑合并到 iptables 规则统一处理。
+
 ## [4.15.7] - 2026-07-02
-- [opencode] **新增香港 HKCEPIN 服务器部署（18.166.210.81 AWS EC2，CDN 模式）**：域名 `hkcepin.290372913.xyz`（橙云 proxied=true）；一键安装脚本完整部署，含 sing-box 1.13.13 + 6 标准 SOP 协议（VLESS-Reality, Trojan-TCP, anyTLS, TUIC-v5, VLESS-WS-CDN, Trojan-WS-CDN，无 gRPC）+ AI SOCKS5 代理 + BBR+FQ 优化 + 2GB Swap。Cloudflare 规则已配置，sub-hkcepin.290372913.xyz（灰云 proxied=false）订阅直连子域名已创建。
-- [opencode] `cloudflare_proxy_rules.py` PROXY_SUBDOMAINS 新增 `hkcepin`，支持新服务器 Cloudflare 自愈。
-- [opencode] **修复 subscription_service.py 协议栈（用户可感知：订阅恢复标准 6 节点含 anyTLS，无 gRPC）**：之前将本应保留的 anyTLS 错误移除、将本应删除的 gRPC 错误加回。修正后订阅输出 6 节点标准 SOP——VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5 + WS-CDN / Trojan-WS-CDN（CDN 模式）；所有三方格式（Base64/Clash/sing-box）已验证通过。
 
 ## [4.15.6] - 2026-06-30
 - [Codex] **修复订阅/CDN 反复失效（用户可感知：JP/SG/HK 订阅入口恢复 200，CDN WS 入口恢复 101）**：外部复现主域名 `:8443/vless-ws` 与 `:2083/trojan-ws` 返回 403；Cloudflare GraphQL 确认 `source=l7ddos`、`ruleId=l7ddos` 命中 `/vless-ws` 和 `/trojan-ws`。根因不是 sing-box 入站挂掉，而是 Cloudflare 免费版 L7 DDoS 动态保护再次拦截代理入口，且旧健康检查会反复执行 `cloudflare_proxy_rules.py apply` 把 `ddos_l7 eoff` override 加回去，造成“人工恢复后又复发”。

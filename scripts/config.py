@@ -33,6 +33,7 @@ Date: 2026-06-27
 import os
 import json
 import hashlib
+import secrets
 import subprocess
 
 try:
@@ -189,9 +190,10 @@ CDN_MODE_ENABLED = (DEPLOY_MODE == 'cdn')
 DIRECT_MODE_ENABLED = (DEPLOY_MODE == 'direct')
 
 
-REALITY_SHORT_ID = 'abcd1234'  # v4.10.20 弱预设已弃用，安装时通过 openssl rand -hex 8 写入 .env
-REALITY_DEST = 'www.apple.com:443'
-REALITY_SNI = 'www.apple.com'
+# v4.15.8: Reality 配置从 .env 读取（持久化，确保服务端与订阅端一致）
+REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID') or secrets.token_hex(8)
+REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
+REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
 
 CDN_DB_URL = 'https://api.uouin.com/cloudflare.html'
 CDN_MONITOR_INTERVAL = 3600
