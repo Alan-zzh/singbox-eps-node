@@ -26,6 +26,8 @@ PROXY_SUBDOMAINS = ["jp", "sg", "hk", "hkcepin"]
 # v4.14.0: 移除 2053 (VLESS-HTTPUpgrade 已下线)；anyTLS (2096) 为直连协议不走 CF 代理
 PROXY_PORTS = [2087, 8443, 2083]
 PROXY_PATHS = [
+    "/api/v1/stream",
+    "/api/v1/data",
     "/vless-ws",
     "/trojan-ws",
     "/sub",

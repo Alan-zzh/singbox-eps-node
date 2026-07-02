@@ -1,1 +1,1 @@
-v4.15.8 - [opencode] 修复 Reality 连接失败（HKCEPIN v2rayN 延迟-1）：config.py REALITY_SHORT_ID 从 .env 读取而非硬编码 'abcd1234'；subscription_service.py 移除 VLESS_GRPC_PORT 死代码；config.py 新增 secrets 导入；新增 scripts/fix_hkcepin.sh 一键修复脚本；install.sh 新增 REALITY_SHORT_ID 持久化生成与备份
+v4.15.11

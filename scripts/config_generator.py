@@ -316,7 +316,7 @@ config = {
             "users": [{"uuid": vless_ws_uuid}],
             "transport": {
                 "type": "ws",
-                "path": "/vless-ws",
+                "path": "/api/v1/stream",
                 "headers": {"Host": _ws_host}
             },
             "tls": {
@@ -337,7 +337,7 @@ config = {
             "users": [{"password": trojan_pass}],
             "transport": {
                 "type": "ws",
-                "path": "/trojan-ws",
+                "path": "/api/v1/data",
                 "headers": {"Host": _ws_host}
             },
             "tls": {

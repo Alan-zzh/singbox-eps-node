@@ -27,6 +27,10 @@ check_*.py
 do_*.py
 fix_*.py
 temp_*.py
+_clash_*.yaml
+_test_*.yaml
+# 30MB 测试二进制
+tests/mihomo-windows-amd64.exe
 # IDE 配置
 .trae/
 .idea/

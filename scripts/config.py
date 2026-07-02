@@ -157,6 +157,18 @@ LOCKED_PORTS = {
 SUB_TOKEN = os.getenv('SUB_TOKEN', '')
 COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 
+# v4.15.9: 流量统计配置（每个服务器独立配置）
+# TRAFFIC_TOTAL_GB = 套餐总流量（GB），默认 900
+# TRAFFIC_RESET_DAY = 每月流量重置日（1-28），默认 14
+TRAFFIC_TOTAL_GB = int(os.getenv('TRAFFIC_TOTAL_GB', '900') or '900')
+TRAFFIC_RESET_DAY = int(os.getenv('TRAFFIC_RESET_DAY', '14') or '14')
+# 确保重置日在合法范围
+if TRAFFIC_RESET_DAY < 1:
+    TRAFFIC_RESET_DAY = 14
+if TRAFFIC_RESET_DAY > 28:
+    TRAFFIC_RESET_DAY = 14
+TRAFFIC_TOTAL_BYTES = TRAFFIC_TOTAL_GB * 1024 * 1024 * 1024
+
 # v4.14.0: anyTLS 协议密码（安装时随机生成，与 TROJAN_PASSWORD 独立）
 ANYTLS_PASSWORD = os.getenv('ANYTLS_PASSWORD', '')
 
@@ -642,6 +654,37 @@ def get_sub_domain():
             return f"sub-{parts[0]}.{parts[1]}"
         return domain
     return SERVER_IP
+
+
+def get_ssh_credentials(prefix=None):
+    """从 .env 读取 SSH 凭据。
+
+    Args:
+        prefix: 服务器前缀（如 'HK', 'HK1', 'HKCEPIN', 'JP', 'SG', 'US'）。
+                不传则返回所有找到的 SSH 凭据列表。
+
+    Returns:
+        传 prefix 时返回 dict {host, user, password}，找不到时 user='root', password=''
+        不传 prefix 时返回 list of dict
+    """
+    env = load_env_file()
+    if prefix:
+        return {
+            'host': env.get(f'{prefix}_SSH_IP', ''),
+            'user': env.get(f'{prefix}_SSH_USER', 'root'),
+            'password': env.get(f'{prefix}_SSH_PASS', ''),
+        }
+    servers = []
+    for k, v in env.items():
+        if k.endswith('_SSH_IP') and v:
+            p = k.replace('_SSH_IP', '')
+            servers.append({
+                'prefix': p,
+                'host': v,
+                'user': env.get(f'{p}_SSH_USER', 'root'),
+                'password': env.get(f'{p}_SSH_PASS', ''),
+            })
+    return servers
 
 
 def load_all_config():

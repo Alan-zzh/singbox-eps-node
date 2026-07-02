@@ -162,11 +162,16 @@ def ssh_run(host, command, user='root', timeout=30):
     """优先通过paramiko执行SSH远程命令，失败再回退到ssh子进程。"""
     if paramiko is not None:
         env = load_env()
-        credential_candidates = [
-            (env.get('JP_SSH_IP'), env.get('JP_SSH_USER', 'root'), env.get('JP_SSH_PASS', '')),
-            (env.get('SG_SSH_IP'), env.get('SG_SSH_USER', 'root'), env.get('SG_SSH_PASS', '')),
-            (env.get('US_SSH_IP'), env.get('US_SSH_USER', 'root'), env.get('US_SSH_PASS', '')),
-        ]
+        # 动态扫描所有 *_SSH_IP 凭据，新增服务器无需改代码
+        credential_candidates = []
+        for k, v in env.items():
+            if k.endswith('_SSH_IP') and v:
+                p = k.replace('_SSH_IP', '')
+                credential_candidates.append((
+                    v,
+                    env.get(f'{p}_SSH_USER', 'root'),
+                    env.get(f'{p}_SSH_PASS', ''),
+                ))
         matched = next((item for item in credential_candidates if item[0] == host and item[2]), None)
         if matched:
             client = paramiko.SSHClient()

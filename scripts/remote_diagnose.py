@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""[Trae CN] 远程服务器诊断脚本 - SSH到JP和SG服务器检查状态"""
+"""远程服务器诊断脚本 - 凭据从 .env 动态读取。"""
 
 import paramiko
+import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts'))
+try:
+    from config import get_ssh_credentials
+    _all_creds = get_ssh_credentials()
+    SERVERS = [
+        {"name": c['prefix'], "host": c['host'], "user": c['user'], "password": c['password']}
+        for c in _all_creds if c['host']
+    ]
+except Exception as e:
+    print(f"⚠️  config.get_ssh_credentials() 失败: {e}")
+    SERVERS = []
 
-SERVERS = [
-    {
-        "name": "JP",
-        "host": "52.195.179.240",
-        "user": "root",
-        "password": "je*pMaN8QNfCMK",
-    },
-    {
-        "name": "SG",
-        "host": "13.212.37.11",
-        "user": "root",
-        "password": "jbfCMP75@jh.dxclouds.com",
-    },
-]
+if not SERVERS:
+    print("❌ .env 中未找到 SSH 凭据")
+    sys.exit(1)
 
 # 使用列表构建复杂命令，避免引号嵌套问题
 CMD_CDN_IPS = (

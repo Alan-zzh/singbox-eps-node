@@ -25,20 +25,23 @@ except ImportError:
     paramiko = None
 
 
-SERVERS = {
-    "jp": {
-        "host": "52.195.179.240",
-        "label": "JP",
-        "username": "root",
-        "password": "je*pMaN8QNfCMK",
-    },
-    "sg": {
-        "host": "13.212.37.11",
-        "label": "SG",
-        "username": "root",
-        "password": "jbfCMP75@jh.dxclouds.com",
-    },
-}
+# 从 .env 动态读取服务器列表
+def _build_servers():
+    """从 .env 读取所有 SSH 凭据构建服务器字典"""
+    env = load_env()
+    servers = {}
+    for k, v in env.items():
+        if k.endswith('_SSH_IP') and v:
+            p = k.replace('_SSH_IP', '').lower()
+            servers[p] = {
+                "host": v,
+                "label": p.upper(),
+                "username": env.get(f'{p.upper()}_SSH_USER', 'root'),
+                "password": env.get(f'{p.upper()}_SSH_PASS', ''),
+            }
+    return servers
+
+SERVERS = _build_servers()
 
 ERROR_PATTERN = "unexpected EOF|EOF|processed invalid connection|timeout|reset|fatal|panic"
 

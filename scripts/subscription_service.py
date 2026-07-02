@@ -1072,13 +1072,6 @@ def get_cdn_optimized_domain():
     return None
 
 
-_CDN_EDGE_PROBE_CACHE = {
-    "checked_at": 0.0,
-    "blocked": False,
-    "detail": "not_checked",
-}
-
-
 def _env_bool(name, default=False):
     value = os.getenv(name)
     if value is None:
@@ -1086,72 +1079,8 @@ def _env_bool(name, default=False):
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _cdn_edge_fallback_mode():
-    """Return off|auto|direct. direct is an emergency operator override."""
-    mode = os.getenv("CDN_EDGE_FALLBACK", "auto").strip().lower()
-    if mode in ("0", "false", "off", "disabled"):
-        return "off"
-    if mode in ("1", "true", "on", "direct", "force"):
-        return "direct"
-    return "auto"
 
 
-def _probe_cdn_ws(host, port, path, timeout=2.5):
-    if not host:
-        return False, "missing_host"
-    request = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}\r\n"
-        "Connection: Upgrade\r\n"
-        "Upgrade: websocket\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-        "User-Agent: singbox-edge-probe/1.0\r\n"
-        "\r\n"
-    ).encode("ascii")
-    try:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        with socket.create_connection((host, int(port)), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            with context.wrap_socket(sock, server_hostname=host) as tls:
-                tls.sendall(request)
-                response = tls.recv(128).decode("ascii", "ignore")
-        return response.startswith("HTTP/1.1 101") or response.startswith("HTTP/1.0 101"), response.splitlines()[0] if response else "empty_response"
-    except Exception as exc:
-        return False, exc.__class__.__name__
-
-
-def is_cdn_edge_blocked():
-    """Detect whether the Cloudflare edge path is currently unusable for WS CDN nodes.
-
-    Cloudflare Free DDoS L7 cannot be fully skipped by rulesets. When both WS
-    probe paths fail from the server side, subscription generation falls back
-    to sub-* direct origin so clients do not receive known-dead CDN nodes.
-    """
-    mode = _cdn_edge_fallback_mode()
-    if mode == "off" or not CDN_MODE_ENABLED or HK_DIRECT_MODE:
-        return False
-    if mode == "direct":
-        return True
-
-    ttl = float(os.getenv("CDN_EDGE_PROBE_CACHE_SECONDS", "300") or "300")
-    now = time.time()
-    if now - float(_CDN_EDGE_PROBE_CACHE["checked_at"]) < ttl:
-        return bool(_CDN_EDGE_PROBE_CACHE["blocked"])
-
-    vless_ok, vless_detail = _probe_cdn_ws(CF_DOMAIN, VLESS_WS_PORT, "/vless-ws")
-    trojan_ok, trojan_detail = _probe_cdn_ws(CF_DOMAIN, TROJAN_WS_PORT, "/trojan-ws")
-    blocked = not (vless_ok or trojan_ok)
-    _CDN_EDGE_PROBE_CACHE.update({
-        "checked_at": now,
-        "blocked": blocked,
-        "detail": f"vless={vless_detail};trojan={trojan_detail}",
-    })
-    if blocked:
-        logger.warning("CDN edge probe failed, using sub-* direct fallback: %s", _CDN_EDGE_PROBE_CACHE["detail"])
-    return blocked
 
 
 def resolve_ws_targets():
@@ -1177,11 +1106,7 @@ def resolve_ws_targets():
             trojan_ws_addr = CF_DOMAIN if CF_DOMAIN else SERVER_IP
 
     if HK_DIRECT_MODE:
-        return SERVER_IP, SERVER_IP, cdn_sni, False
-
-    if is_cdn_edge_blocked():
-        fallback_addr = get_sub_domain()
-        return fallback_addr, fallback_addr, cdn_sni, False
+        return SERVER_IP, SERVER_IP, cdn_sni, True
 
     return vless_ws_addr, trojan_ws_addr, cdn_sni, True
 
@@ -1205,9 +1130,8 @@ def generate_all_links(capability='full'):
 
     ws_addr = None
     ws_sni = None
-    ws_cdn_flag = False
 
-    vless_ws_addr, trojan_ws_addr, ws_sni, ws_cdn_flag = resolve_ws_targets()
+    vless_ws_addr, trojan_ws_addr, ws_sni, _ = resolve_ws_targets()
     ws_addr = (vless_ws_addr, trojan_ws_addr)
 
     # 1. VLESS-Reality (直连)
@@ -1245,12 +1169,12 @@ def generate_all_links(capability='full'):
             'type': 'ws',
             'security': 'tls',
             'sni': ws_sni,
-            'path': '/vless-ws',
+            'path': '/api/v1/stream',
             'host': ws_sni,
             'allowInsecure': '1'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=ws_cdn_flag)}")
+        links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS')}")
 
         # 4. Trojan-WS (CDN)
         params = {
@@ -1259,11 +1183,11 @@ def generate_all_links(capability='full'):
             'sni': ws_sni,
             'insecure': '1',
             'allowInsecure': '1',
-            'path': '/trojan-ws',
+            'path': '/api/v1/data',
             'host': ws_sni,
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=ws_cdn_flag)}")
+        links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS')}")
 
     # 5. anyTLS (直连) - 仅 full 能力客户端输出（anytls:// 非标准URI，纯Xray内核客户端不认识）
     if include_advanced:
@@ -1309,19 +1233,18 @@ def generate_singbox_config(capability='full'):
     ]
 
     if CDN_MODE_ENABLED:
-        vless_ws_addr, trojan_ws_addr, ws_sni, ws_cdn_flag = resolve_ws_targets()
+        vless_ws_addr, trojan_ws_addr, ws_sni, _ = resolve_ws_targets()
         cdn_sni = ws_sni
 
         _auto_test_proxies = _auto_test_proxies_base + [
-            node_name("VLESS-WS", cdn=ws_cdn_flag),
-            node_name("Trojan-WS", cdn=ws_cdn_flag),
+            node_name("VLESS-WS"),
+            node_name("Trojan-WS"),
             node_name("anyTLS"),
         ] + ([node_name("TUIC-v5")] if ENABLE_TUIC else [])
     else:
         vless_ws_addr = SERVER_IP
         trojan_ws_addr = SERVER_IP
         ws_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
-        ws_cdn_flag = False
         # v4.15.1: 直连模式下 cdn_sni 也统一用主域名（而非 get_sub_domain() 返回 IP），
         # 保持 Trojan-TCP 等直连节点的 TLS SNI 与证书 CN 一致
         cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
@@ -1544,7 +1467,7 @@ def generate_singbox_config(capability='full'):
             # VLESS-WS (CDN模式)
             {
                 "type": "vless",
-                "tag": node_name("VLESS-WS", cdn=ws_cdn_flag),
+                "tag": node_name("VLESS-WS"),
                 "server": vless_ws_addr,
                 "server_port": VLESS_WS_PORT,
                 "uuid": VLESS_WS_UUID,
@@ -1566,7 +1489,7 @@ def generate_singbox_config(capability='full'):
                 },
                 "transport": {
                     "type": "ws",
-                    "path": "/vless-ws",
+                    "path": "/api/v1/stream",
                     "headers": {
                         "Host": ws_sni
                     }
@@ -1575,7 +1498,7 @@ def generate_singbox_config(capability='full'):
             # Trojan-WS (CDN模式)
             {
                 "type": "trojan",
-                "tag": node_name("Trojan-WS", cdn=ws_cdn_flag),
+                "tag": node_name("Trojan-WS"),
                 "server": trojan_ws_addr,
                 "server_port": TROJAN_WS_PORT,
                 "password": TROJAN_PASSWORD,
@@ -1596,7 +1519,7 @@ def generate_singbox_config(capability='full'):
                 },
                 "transport": {
                     "type": "ws",
-                    "path": "/trojan-ws",
+                    "path": "/api/v1/data",
                     "headers": {
                         "Host": ws_sni
                     }
@@ -1933,13 +1856,12 @@ def generate_clash_config(capability='full'):
     配置自带url-test节点组，每60秒自动测速，断线3秒内自动切换
     """
     if CDN_MODE_ENABLED:
-        vless_ws_addr, trojan_ws_addr, ws_sni, ws_cdn_flag = resolve_ws_targets()
+        vless_ws_addr, trojan_ws_addr, ws_sni, _ = resolve_ws_targets()
         cdn_sni = ws_sni
     else:
         vless_ws_addr = SERVER_IP
         trojan_ws_addr = SERVER_IP
         ws_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
-        ws_cdn_flag = False
         # v4.15.1: 直连模式下 cdn_sni 也统一用主域名（而非 get_sub_domain() 返回 IP），
         # 保持 Trojan-TCP 等直连节点的 TLS SNI 与证书 CN 一致
         cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
@@ -1987,7 +1909,7 @@ def generate_clash_config(capability='full'):
     if CDN_MODE_ENABLED:
         # 3. VLESS-WS (CDN模式) - Clash Meta支持
         proxies.append({
-            "name": node_name("VLESS-WS", cdn=ws_cdn_flag),
+            "name": node_name("VLESS-WS"),
             "type": "vless",
             "server": vless_ws_addr,
             "port": VLESS_WS_PORT,
@@ -2000,7 +1922,7 @@ def generate_clash_config(capability='full'):
             },
             "servername": ws_sni,
             "ws-opts": {
-                "path": "/vless-ws",
+                "path": "/api/v1/stream",
                 "headers": {"Host": ws_sni}
             },
             "client-fingerprint": "chrome",
@@ -2010,7 +1932,7 @@ def generate_clash_config(capability='full'):
         
         # 4. Trojan-WS (CDN模式) - Clash Meta支持
         proxies.append({
-            "name": node_name("Trojan-WS", cdn=ws_cdn_flag),
+            "name": node_name("Trojan-WS"),
             "type": "trojan",
             "server": trojan_ws_addr,
             "port": TROJAN_WS_PORT,
@@ -2023,7 +1945,7 @@ def generate_clash_config(capability='full'):
             },
             "sni": ws_sni,
             "ws-opts": {
-                "path": "/trojan-ws",
+                "path": "/api/v1/data",
                 "headers": {"Host": ws_sni}
             },
             "client-fingerprint": "chrome",
@@ -2081,8 +2003,8 @@ def generate_clash_config(capability='full'):
     _tuic_proxy_name = [node_name("TUIC-v5")] if ENABLE_TUIC else []
     if CDN_MODE_ENABLED:
         auto_proxy_names = auto_proxy_names_base + [
-            node_name("VLESS-WS", cdn=ws_cdn_flag),
-            node_name("Trojan-WS", cdn=ws_cdn_flag),
+            node_name("VLESS-WS"),
+            node_name("Trojan-WS"),
             node_name("anyTLS"),
         ] + _tuic_proxy_name
     else:

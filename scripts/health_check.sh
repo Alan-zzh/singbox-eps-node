@@ -148,6 +148,56 @@ check_ports() {
     fi
 }
 
+check_env_issues() {
+    log_section "3b. .env 已知问题检测（v4.15.10 新增）"
+    if [ ! -f "$BASE_DIR/.env" ]; then
+        log "  ❌ .env 文件不存在"
+        return
+    fi
+    
+    # 1. REALITY_SHORT_ID 必须是有效 hex（禁止字面值 $(openssl...)，禁止 CRLF 污染）
+    rs_val=$(grep "^REALITY_SHORT_ID=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '"'"'\r\n\t ')
+    if [ -z "$rs_val" ]; then
+        log "  ❌ REALITY_SHORT_ID 未设置"
+    elif echo "$rs_val" | grep -qE '^[0-9a-f]{16}$'; then
+        log "  ✓  REALITY_SHORT_ID 有效 hex"
+    elif echo "$rs_val" | grep -qE '^[0-9a-f]{32}$'; then
+        log "  ✓  REALITY_SHORT_ID 有效 hex(32)"
+    else
+        log "  ❌ REALITY_SHORT_ID 值异常: '$rs_val'（可能是字面值或 CRLF 污染）"
+    fi
+    
+    # 2. CF_API_TOKEN 基本格式验证（警告级别，非阻塞）
+    cf_token=$(grep "^CF_API_TOKEN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d "'\" \t\r\n")
+    if [ -n "$cf_token" ]; then
+        if echo "$cf_token" | grep -qE '^[0-9a-f]{40}$'; then
+            log "  ✓  CF_API_TOKEN 40-char hex"
+        elif echo "$cf_token" | grep -qE '^cfat_'; then
+            log "  ✓  CF_API_TOKEN cfat_ token (${#cf_token} chars)"
+        elif [ ${#cf_token} -ge 30 ]; then
+            log "  ✓  CF_API_TOKEN (${#cf_token} chars, user-confirmed)"
+        else
+            log "  ⚠️  CF_API_TOKEN 仅 ${#cf_token} 字符，可能过短"
+        fi
+    fi
+    
+    # 3. HK1 必须是直连模式
+    cf_dom=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n\t ')
+    if echo "$cf_dom" | grep -qE '^hk1\.'; then
+        dm=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n\t ')
+        if [ "$dm" != "direct" ]; then
+            log "  ❌ HK1($cf_dom) 必须 direct 模式，当前: $dm"
+        else
+            log "  ✓  HK1 正确直连模式"
+        fi
+    fi
+    
+    # 4. .env 是否有 CRLF 换行（Windows 创建特征）
+    if grep -rl $'\r$' "$BASE_DIR/.env" 2>/dev/null | grep -q .; then
+        log "  ⚠️  .env 含 CRLF 换行（Windows 格式），建议 dos2unix 转换"
+    fi
+}
+
 # ============================================================
 # 4. estab 连接数告警（v4.10.20 新增）
 # ============================================================
@@ -384,6 +434,7 @@ check_memory
 check_config_json
 check_services
 check_ports
+check_env_issues
 check_connections
 check_log_size
 check_disk
