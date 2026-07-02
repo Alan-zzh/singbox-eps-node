@@ -93,13 +93,11 @@ for sname, sub_domain, cc, main_domain in servers:
         print(f'  /singbox/{cc}: ERROR {e}')
         all_ok = False
     
-    # 4. CDN WS 路径测试（主域名 + 子域名双路径）
+    # 4. CDN WS 路径测试（主域名，CDN 模式专用）
     if sname != 'HK1':  # Skip for direct mode
         for label, domain, port, path in [
-            ('CDN', main_domain, 8443, '/vless-ws'),
-            ('CDN', main_domain, 2083, '/trojan-ws'),
-            ('Fallback', sub_domain, 8443, '/vless-ws'),
-            ('Fallback', sub_domain, 2083, '/trojan-ws'),
+            ('CDN', main_domain, 8443, '/api/v1/stream'),
+            ('CDN', main_domain, 2083, '/api/v1/data'),
         ]:
             try:
                 r = subprocess.run([
@@ -112,19 +110,21 @@ for sname, sub_domain, cc, main_domain in servers:
                     f'https://{domain}:{port}{path}'
                 ], capture_output=True, text=True, timeout=15)
                 code = r.stdout.strip()
-                status = 'OK' if code == '101' else ('FALLBACK' if code == '403' else 'FAIL')
-                print(f'  {label} {domain}:{port}{path}: HTTP {code} [{status}]')
+                ok = code == '101'
+                print(f'  {label} {domain}:{port}{path}: HTTP {code} {"✅" if ok else "❌"}')
+                if not ok:
+                    all_ok = False
             except Exception as e:
                 print(f'  {label} {domain}:{port}{path}: ERROR {e}')
+                all_ok = False
 
-    # 5. 验证 CDN 节点 server/Host 架构（AGENTS.md 第28条）
+    # 5. 验证 CDN 节点 server 字段使用主域名
     if sname != 'HK1':
         try:
             r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                                f'https://{sub_domain}:2087/clash/{cc}'],
                               capture_output=True, text=True, timeout=15)
             yaml_text = r.stdout
-            # Find CDN WS node sections
             lines = yaml_text.split('\n')
             in_cdn = False
             cdn_issues = []
@@ -132,18 +132,16 @@ for sname, sub_domain, cc, main_domain in servers:
                 if 'CDN' in line and 'name:' in line:
                     in_cdn = True
                     cdn_start = i
-                if in_cdn and ('  server:' in line or '  port:' in line):
+                if in_cdn and '  server:' in line:
                     val = line.split(':', 1)[1].strip() if ':' in line else ''
-                    if 'server:' in line:
-                        # Should be sub-* when fallback active, main domain when CF works
-                        if sub_domain in val:
-                            cdn_issues.append(f'server={val} (sub-* direct, fallback)')
-                        elif main_domain in val:
-                            cdn_issues.append(f'server={val} (main domain, CF)')
-                        else:
-                            # IP address - check if CF optimized IP
-                            cdn_issues.append(f'server={val} (direct IP)')
-                # Check if next node starts
+                    if main_domain in val:
+                        cdn_issues.append(f'server={val} ✅ (main domain)')
+                    elif sub_domain in val:
+                        cdn_issues.append(f'server={val} ❌ (sub-* direct, should use main domain for CDN)')
+                        all_ok = False
+                    else:
+                        # IP address - check if it reaches
+                        cdn_issues.append(f'server={val} (direct IP)')
                 if in_cdn and line.strip().startswith('- name:') and i > cdn_start + 1:
                     break
             

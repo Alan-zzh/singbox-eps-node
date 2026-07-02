@@ -1,5 +1,9 @@
 # 变更日志
 
+## [4.15.12] - 2026-07-03
+- [opencode] **审查修复 5 项遗留问题**：删除废弃 `tests/test_cdn_edge_fallback.py`（断言已移除代码）；`tests/full_audit.py` WS 路径更新为 `/api/v1/stream` `/api/v1/data` 并移除 fallback 地址测试；`cdn_status_api()` 去掉不一致的 `-CDN` 后缀使与订阅输出统一；`deploy.py --fix` 新增孤儿 `CDN_EDGE_FALLBACK` 变量清理。
+- [opencode] **远程服务器 .env 清理**：JP/HK/HKCEPIN 三台 CDN 服务器 `.env` 中 `CDN_EDGE_FALLBACK=auto` 孤儿变量已清除。
+
 ## [4.15.11] - 2026-07-02
 - [opencode] **架构重构：移除服务器端 CDN 健康探针和假降级**。`_probe_cdn_ws()` / `is_cdn_edge_blocked()` / `_cdn_edge_fallback_mode()` / `CDN_EDGE_FALLBACK` 全部移除。服务器从 AWS/阿里云 IP 测 CF WS 永远假阴性（CF L7 DDoS 只拦中国 ISP，不拦服务器 IP）→ 探针从未触发降级 → 用户拿到死节点。砍掉 80 行死代码。
 - [opencode] **CDN WS 路径改名**：`/vless-ws` → `/api/v1/stream`，`/trojan-ws` → `/api/v1/data`。降低 CF L7 DDoS ML 模型将路径识别为代理特征的概率，减少周期性封锁触发频次。

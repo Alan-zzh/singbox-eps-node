@@ -2742,7 +2742,7 @@ def create_app():
                     'node_name': node_name({
                         'vless-ws': 'VLESS-WS',
                         'trojan-ws': 'Trojan-WS',
-                    }[name], cdn=True),
+                    }[name]),
                     'ip': ip,
                     'preferred_static': ip in CDN_PREFERRED_IPS if ip else False,
                     'blacklisted': ip in CDN_IP_BLACKLIST if ip else False,
