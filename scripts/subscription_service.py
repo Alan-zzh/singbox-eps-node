@@ -28,8 +28,8 @@ Date: 2026-06-27
 - {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
 - {COUNTRY_CODE}-anyTLS (直连节点，TLS-in-TLS 加密)
 - {COUNTRY_CODE}-TUIC-v5 (直连节点，v4.15.0 加回，QUIC 多路复用 + UDP relay)
-- {COUNTRY_CODE}-VLESS-WS-CDN (CDN节点，主域名/CF优选IP；CF L7 阻断时自动降级 sub-* 直连)
-- {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，主域名/CF优选IP；CF L7 阻断时自动降级 sub-* 直连)
+- {COUNTRY_CODE}-VLESS-WS-CDN (CDN节点，主域名/CF优选IP；CDN_EDGE_FALLBACK 已在 v4.15.6 移除)
+- {COUNTRY_CODE}-Trojan-WS-CDN (CDN节点，主域名/CF优选IP；CDN_EDGE_FALLBACK 已在 v4.15.6 移除)
 
 【v4.15.0 协议栈调整】:
   - 加回 TUIC v5（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
@@ -172,7 +172,7 @@ if 'HK_DIRECT_MODE' not in dir():
 #   xray     = Xray 兼容节点（不含 anyTLS/TUIC），只返回标准 vless:// 和 trojan:// 链接
 #              - Quantumult/Surge/Loon/Pharos/Potatso 等纯 Xray 内核客户端
 #   standard = 同 xray（兼容旧参数）
-#   unknown  = 按 xray 处理（安全默认，避免非标准 URI 导致解析失败）
+#   unknown  = 按 full 处理；只有明确识别为纯 Xray 客户端或 ?client=xray 才降级
 #
 # 【v4.15.0 修正】：v2rayN 6.x+ / v2rayNG 1.x+ 默认内置 sing-box 内核，
 # 原生支持 tuic:// URI scheme，不应再排除。
@@ -217,13 +217,13 @@ CLIENT_CAPABILITIES = {
     'loon': 'xray',
     'pharos': 'xray',
     'potatso': 'xray',
-    # 浏览器/curl/wget 默认 xray（安全保守，不输出非标准 URI）
-    'mozilla': 'xray',
-    'chrome': 'xray',
-    'safari': 'xray',
-    'curl': 'xray',
-    'wget': 'xray',
-    'python-requests': 'xray',
+    # 通用拉取器默认给 full，避免 sing-box/GUI 客户端使用非标准 UA 时被误降级。
+    'mozilla': 'full',
+    'chrome': 'full',
+    'safari': 'full',
+    'curl': 'full',
+    'wget': 'full',
+    'python-requests': 'full',
 }
 
 CLIENT_QUERY_ALIASES = {
@@ -265,7 +265,8 @@ def share_fragment(protocol, cdn=False):
 def detect_client_capability(user_agent=''):
     """根据 User-Agent 判断客户端能力
     返回 'full' / 'xray' / 'unknown'
-    原则：识别不出按 xray（安全默认），避免非标准 anytls:// URI 导致客户端解析失败
+    原则：识别不出按 full，避免 sing-box/GUI 客户端使用通用 UA 时被误降级。
+    纯 Xray 客户端通过明确 UA 或 ?client=xray 降级。
     """
     if not user_agent:
         return 'unknown'
@@ -278,13 +279,13 @@ def detect_client_capability(user_agent=''):
 
 def resolve_subscription_capability(forced='', user_agent=''):
     """[Codex] 解析 ?client= 强制参数，未知时回退到 UA 自动识别。
-    v4.15.0: unknown 默认返回 'xray'（安全保守，不输出非标准 URI）
+    v4.15.14: unknown 默认返回 'full'，避免 sing-box 拉取器被误判成 Xray 兼容模式。
     """
     forced_key = (forced or '').lower().strip()
     if forced_key in CLIENT_QUERY_ALIASES:
         return CLIENT_QUERY_ALIASES[forced_key]
     detected = detect_client_capability(user_agent)
-    return detected if detected != 'unknown' else 'xray'
+    return detected if detected != 'unknown' else 'full'
 
 
 def is_valid_ipv4(ip):
@@ -1174,7 +1175,7 @@ def generate_all_links(capability='full'):
             'allowInsecure': '1'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS')}")
+        links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=True)}")
 
         # 4. Trojan-WS (CDN)
         params = {
@@ -1187,7 +1188,7 @@ def generate_all_links(capability='full'):
             'host': ws_sni,
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS')}")
+        links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=True)}")
 
     # 5. anyTLS (直连) - 仅 full 能力客户端输出（anytls:// 非标准URI，纯Xray内核客户端不认识）
     if include_advanced:
@@ -1237,8 +1238,8 @@ def generate_singbox_config(capability='full'):
         cdn_sni = ws_sni
 
         _auto_test_proxies = _auto_test_proxies_base + [
-            node_name("VLESS-WS"),
-            node_name("Trojan-WS"),
+            node_name("VLESS-WS", cdn=True),
+            node_name("Trojan-WS", cdn=True),
             node_name("anyTLS"),
         ] + ([node_name("TUIC-v5")] if ENABLE_TUIC else [])
     else:
@@ -1467,7 +1468,7 @@ def generate_singbox_config(capability='full'):
             # VLESS-WS (CDN模式)
             {
                 "type": "vless",
-                "tag": node_name("VLESS-WS"),
+                "tag": node_name("VLESS-WS", cdn=True),
                 "server": vless_ws_addr,
                 "server_port": VLESS_WS_PORT,
                 "uuid": VLESS_WS_UUID,
@@ -1498,7 +1499,7 @@ def generate_singbox_config(capability='full'):
             # Trojan-WS (CDN模式)
             {
                 "type": "trojan",
-                "tag": node_name("Trojan-WS"),
+                "tag": node_name("Trojan-WS", cdn=True),
                 "server": trojan_ws_addr,
                 "server_port": TROJAN_WS_PORT,
                 "password": TROJAN_PASSWORD,
@@ -1909,7 +1910,7 @@ def generate_clash_config(capability='full'):
     if CDN_MODE_ENABLED:
         # 3. VLESS-WS (CDN模式) - Clash Meta支持
         proxies.append({
-            "name": node_name("VLESS-WS"),
+            "name": node_name("VLESS-WS", cdn=True),
             "type": "vless",
             "server": vless_ws_addr,
             "port": VLESS_WS_PORT,
@@ -1932,7 +1933,7 @@ def generate_clash_config(capability='full'):
         
         # 4. Trojan-WS (CDN模式) - Clash Meta支持
         proxies.append({
-            "name": node_name("Trojan-WS"),
+            "name": node_name("Trojan-WS", cdn=True),
             "type": "trojan",
             "server": trojan_ws_addr,
             "port": TROJAN_WS_PORT,
@@ -2003,8 +2004,8 @@ def generate_clash_config(capability='full'):
     _tuic_proxy_name = [node_name("TUIC-v5")] if ENABLE_TUIC else []
     if CDN_MODE_ENABLED:
         auto_proxy_names = auto_proxy_names_base + [
-            node_name("VLESS-WS"),
-            node_name("Trojan-WS"),
+            node_name("VLESS-WS", cdn=True),
+            node_name("Trojan-WS", cdn=True),
             node_name("anyTLS"),
         ] + _tuic_proxy_name
     else:
@@ -2178,7 +2179,7 @@ def create_app():
 
         sub_info_cdn = ''
         if not DIRECT_MODE_ENABLED:
-            sub_info_cdn = '<p class="info">- VLESS-WS-CDN / Trojan-WS-CDN：优先走 Cloudflare CDN；CF L7 阻断时自动降级 sub-* 直连保可用</p>'
+            sub_info_cdn = '<p class="info">- VLESS-WS-CDN / Trojan-WS-CDN：走 Cloudflare CDN 主域名橙云代理；如 CF L7 拦截请运行 cloudflare_proxy_rules.py apply 修复，不再自动降级 sub-* 直连（CDN_EDGE_FALLBACK v4.15.6 已移除）</p>'
 
         html = f"""
         <html>
@@ -2265,7 +2266,7 @@ def create_app():
         - 根据 User-Agent 自动判断客户端能力
         - Clash Meta/mihomo/sing-box/NekoBox/NekoRay/v2rayN/v2rayNG/Shadowrocket（full）→ 6 节点（含 anyTLS + TUIC v5）
         - Surge/Quantumult X/Loon/v2Box（xray）→ 标准URI，4 节点（不含 anyTLS/TUIC）
-        - 默认未知客户端按 xray 处理（安全保守，避免非标准 anytls:// URI 导致解析失败）
+        - 默认未知客户端按 full 处理，避免 sing-box/GUI 拉取器被误降级
         - ?client=clash / ?client=full 强制返回全量节点（含 anyTLS）
         - ?client=v2rayn / ?client=xray / ?client=standard 强制返回 Xray 兼容节点（不含 anyTLS）
         """
@@ -2460,6 +2461,12 @@ def create_app():
             f"- 流量来源：iptables 内核级计数器（重启不丢失）\n"
         )
         return Response(text, mimetype='text/plain; charset=utf-8')
+
+    if COUNTRY_CODE.upper() == 'HK1':
+        app.add_url_rule('/sub/hk', 'get_subscription_hk_legacy_alias', get_subscription)
+        app.add_url_rule('/clash/hk', 'get_clash_config_hk_legacy_alias', get_clash_config)
+        app.add_url_rule('/singbox/hk', 'get_singbox_config_hk_legacy_alias', get_singbox_config)
+        app.add_url_rule('/info/hk', 'info_endpoint_hk_legacy_alias', info_endpoint)
 
     @app.route('/api/cdn', methods=['GET', 'POST'])
     def cdn_api():
@@ -2742,7 +2749,7 @@ def create_app():
                     'node_name': node_name({
                         'vless-ws': 'VLESS-WS',
                         'trojan-ws': 'Trojan-WS',
-                    }[name]),
+                    }[name], cdn=True),
                     'ip': ip,
                     'preferred_static': ip in CDN_PREFERRED_IPS if ip else False,
                     'blacklisted': ip in CDN_IP_BLACKLIST if ip else False,
@@ -2874,7 +2881,7 @@ if __name__ == '__main__':
     app = create_app()
     logger.info(f"v4.15.0 Starting HTTPS subscription service on 0.0.0.0:{SUB_PORT}")
     logger.info(f"DEPLOY_MODE: {DEPLOY_MODE} | CDN_MODE_ENABLED: {CDN_MODE_ENABLED} | DIRECT_MODE_ENABLED: {DIRECT_MODE_ENABLED}")
-    node_count = 5 if DIRECT_MODE_ENABLED else 7
+    node_count = 4 if DIRECT_MODE_ENABLED else 6
     logger.info(f"节点配置: {node_count} 个节点（{'直连精简' if DIRECT_MODE_ENABLED else 'CDN全量'}模式）")
     logger.info(f"Base64订阅: https://{sub_domain}:{SUB_PORT}/sub/{COUNTRY_CODE}")
     logger.info(f"sing-box JSON: https://{sub_domain}:{SUB_PORT}/singbox/{COUNTRY_CODE}")

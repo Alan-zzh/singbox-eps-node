@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.15.12 | **更新**: 2026-07-03（审查修复后）
+**版本**: v4.15.15 | **更新**: 2026-07-05（HK1 兼容 /hk 旧订阅路径）
 
 ## 服务器清单
 
@@ -22,19 +22,19 @@
 | VLESS-WS-CDN | ✅ CF 优选 IP `:8443` 路径 `/api/v1/stream` | ❌ |
 | Trojan-WS-CDN | ✅ CF 优选 IP `:2083` 路径 `/api/v1/data` | ❌ |
 | anyTLS | ✅ `:2096` | ✅ `:2096` |
-| TUIC-v5 | ✅ UDP `:29725` | ✅ UDP `:29725` |
+| TUIC-v5 | ✅ UDP `:50444`（默认，install.sh 随机生成） | ✅ UDP `:50444`（默认，install.sh 随机生成） |
 
 ## 订阅端点
 
 | 端点 | 路径 | 说明 |
 |------|------|------|
-| `/sub/{CC}` | sub-*.290372913.xyz:2087 | Base64 订阅（自动识别客户端） |
-| `/clash/{CC}` | sub-*.290372913.xyz:2087 | Clash Meta YAML |
-| `/singbox/{CC}` | sub-*.290372913.xyz:2087 | sing-box JSON |
-| `/info/{CC}` / `/api/traffic` | sub-*.290372913.xyz:2087 | 流量查询 |
-| `/api/cdn-status` | sub-*.290372913.xyz:2087 | CDN 优选 IP 状态 |
+| `/sub/{CC}` | CDN: sub-*.290372913.xyz:2087；HK1: hk1.290372913.xyz:2087 | Base64 订阅（自动识别客户端） |
+| `/clash/{CC}` | CDN: sub-*.290372913.xyz:2087；HK1: hk1.290372913.xyz:2087 | Clash Meta YAML |
+| `/singbox/{CC}` | CDN: sub-*.290372913.xyz:2087；HK1: hk1.290372913.xyz:2087 | sing-box JSON |
+| `/info/{CC}` / `/api/traffic` | CDN: sub-*.290372913.xyz:2087；HK1: hk1.290372913.xyz:2087 | 流量查询 |
+| `/api/cdn-status` | CDN: sub-*.290372913.xyz:2087 | CDN 优选 IP 状态 |
 
-> CC = COUNTRY_CODE（JP/HK/HKCEPIN），订阅端点走 sub-* 灰云直连绕过 CF DDoS L7
+> CC = COUNTRY_CODE（JP/HK/HKCEPIN/HK1）。sub-* 只用于 CDN 服务器订阅入口，不是 CDN 节点降级地址；HK1 direct 模式订阅走主域名。
 
 ## 定时任务
 
@@ -55,12 +55,16 @@
 - 域名：hk.290372913.xyz | 部署：2026-06-04
 - CDN 模式（6 协议），trojan-tcp 端口: 65004，anytls 端口: 2096
 
-### 香港服务器 HKCEPIN（38.47.212.168 AWS）
+### 香港服务器 HKCEPIN（18.166.210.81 AWS）
 - 域名：hkcepin.290372913.xyz | 部署：2026-07-02
 - CDN 模式（6 协议），414MB 内存 + 2GB Swap
 - 订阅直连子域名：sub-hkcepin.290372913.xyz
+- v4.15.12 修复：COUNTRY_CODE=HK→HKCEPIN（原错配导致 /clash/HKCEPIN 404），已装 crontab（health_check + cert_manager + sub_domain_monitor）
+- v4.15.13 修复：订阅输出恢复 `HKCEPIN-VLESS-WS-CDN` / `HKCEPIN-Trojan-WS-CDN` 后缀，Cloudflare 自愈规则固定为新 WS 路径且无 DDoS L7 override
 
 ### 香港服务器 HK1（47.243.72.97 阿里云）
 - 域名：hk1.290372913.xyz | 部署：2026-06-28 | 200GB/月
 - **直连模式**（4 协议：VLESS-Reality, Trojan-TCP, anyTLS, TUIC-v5）
 - ⚠️ 判断依据 `CF_DOMAIN.startswith('hk1.')`，**禁止用 COUNTRY_CODE**
+- 订阅入口走 `hk1.290372913.xyz:2087`；不创建/依赖 `sub-hk1`，不输出 CDN 节点
+- v4.15.15 修复：HK1 域名下兼容 `/sub/hk`、`/clash/hk`、`/singbox/hk`、`/info/hk` 旧路径，映射到 HK1 直连订阅

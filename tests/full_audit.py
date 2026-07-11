@@ -8,8 +8,8 @@ import subprocess, json, base64, sys
 servers = [
     ('JP', 'sub-jp.290372913.xyz', 'JP', 'jp.290372913.xyz'),
     ('HK', 'sub-hk.290372913.xyz', 'HK', 'hk.290372913.xyz'),
-    ('HKCEPIN', 'sub-hkcepin.290372913.xyz', 'HK', 'hkcepin.290372913.xyz'),
-    ('HK1', 'hk1.290372913.xyz', 'HK', 'hk1.290372913.xyz'),
+    ('HKCEPIN', 'sub-hkcepin.290372913.xyz', 'HKCEPIN', 'hkcepin.290372913.xyz'),
+    ('HK1', 'hk1.290372913.xyz', 'HK1', 'hk1.290372913.xyz'),
 ]
 
 all_ok = True
@@ -24,25 +24,28 @@ for sname, sub_domain, cc, main_domain in servers:
         r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                            '-o', 'NUL', '-w', '%{http_code}',
                            f'https://{sub_domain}:2087/clash/{cc}'],
-                          capture_output=True, text=True, timeout=15)
+                          capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
         code = r.stdout.strip()
         ok = code == '200'
         print(f'  /clash/{cc}: HTTP {code} {"OK" if ok else "FAIL"}')
         if ok:
             r2 = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                                 f'https://{sub_domain}:2087/clash/{cc}'],
-                               capture_output=True, text=True, timeout=15)
-            n_count = r2.stdout.count('- name:')
-            print(f'    节点数: {n_count}')
-            # Check CDN node format
-            cdn_nodes = [l for l in r2.stdout.split('\n') if 'CDN' in l and 'name:' in l]
+                               capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
+            # CDN 节点按协议名识别，避免 proxy-groups 或历史命名差异影响架构检查。
+            GROUP_KEYWORDS = ('自动选择', '节点选择', '手动选择', '故障切换', 'auto', 'select', 'fallback')
+            name_lines = [l for l in r2.stdout.split('\n') if '- name:' in l]
+            # 真实节点 = 含 - name: 且不是 proxy-group
+            node_lines = [l for l in name_lines if not any(kw in l for kw in GROUP_KEYWORDS)]
+            cdn_nodes = [l for l in node_lines if '-VLESS-WS' in l or '-Trojan-WS' in l]
+            print(f'    节点数: {len(node_lines)} (含 {len(name_lines) - len(node_lines)} 个 proxy-group)')
             print(f'    CDN 节点: {len(cdn_nodes)}')
             # Check server fields in CDN nodes
             if cdn_nodes:
                 # Find server lines after CDN nodes
                 lines = r2.stdout.split('\n')
                 for i, line in enumerate(lines):
-                    if 'CDN' in line and 'name:' in line:
+                    if ('-VLESS-WS' in line or '-Trojan-WS' in line) and '- name:' in line and not any(kw in line for kw in GROUP_KEYWORDS):
                         # Show next few lines for context
                         ctx = lines[i:i+5]
                         for cl in ctx:
@@ -58,7 +61,7 @@ for sname, sub_domain, cc, main_domain in servers:
     try:
         r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                            f'https://{sub_domain}:2087/sub/{cc}'],
-                          capture_output=True, text=True, timeout=15)
+                          capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
         raw = r.stdout.strip()
         # Try base64 decode
         try:
@@ -69,8 +72,10 @@ for sname, sub_domain, cc, main_domain in servers:
                 # Extract protocol and basic info
                 proto = link.split('://')[0] if '://' in link else '?'
                 print(f'    {proto}://...')
+            # v4.15.14: 默认/未知 UA 按 full 输出，避免 sing-box 拉取器被误降级成 Xray 兼容节点。
             if len(links) < 4:
-                print(f'    WARN: 仅 {len(links)} 个协议 (<4)')
+                print(f'    WARN: 默认 UA 仅 {len(links)} 个协议 (<4，预期 full)')
+                all_ok = False
         except:
             print(f'  /sub/{cc}: RAW ({len(raw)} bytes, not valid base64?)')
             print(f'    First 100: {raw[:100]}')
@@ -83,7 +88,7 @@ for sname, sub_domain, cc, main_domain in servers:
         r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                            '-o', 'NUL', '-w', '%{http_code}',
                            f'https://{sub_domain}:2087/singbox/{cc}'],
-                          capture_output=True, text=True, timeout=15)
+                          capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
         code = r.stdout.strip()
         ok = code == '200'
         print(f'  /singbox/{cc}: HTTP {code} {"OK" if ok else "FAIL"}')
@@ -108,7 +113,7 @@ for sname, sub_domain, cc, main_domain in servers:
                     '-H', 'Sec-WebSocket-Version: 13',
                     '-H', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
                     f'https://{domain}:{port}{path}'
-                ], capture_output=True, text=True, timeout=15)
+                ], capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
                 code = r.stdout.strip()
                 ok = code == '101'
                 print(f'  {label} {domain}:{port}{path}: HTTP {code} {"✅" if ok else "❌"}')
@@ -123,13 +128,14 @@ for sname, sub_domain, cc, main_domain in servers:
         try:
             r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                                f'https://{sub_domain}:2087/clash/{cc}'],
-                              capture_output=True, text=True, timeout=15)
+                              capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
             yaml_text = r.stdout
             lines = yaml_text.split('\n')
             in_cdn = False
             cdn_issues = []
+            # CDN 节点按协议名识别。
             for i, line in enumerate(lines):
-                if 'CDN' in line and 'name:' in line:
+                if '- name:' in line and ('-VLESS-WS' in line or '-Trojan-WS' in line):
                     in_cdn = True
                     cdn_start = i
                 if in_cdn and '  server:' in line:
@@ -156,7 +162,7 @@ for sname, sub_domain, cc, main_domain in servers:
         r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
                            '-A', 'v2rayN/6.0',
                            f'https://{sub_domain}:2087/sub/{cc}'],
-                          capture_output=True, text=True, timeout=15)
+                          capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
         raw = r.stdout.strip()
         try:
             decoded = base64.b64decode(raw + '==').decode('utf-8', errors='replace')

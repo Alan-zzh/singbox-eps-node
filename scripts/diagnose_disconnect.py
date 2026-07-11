@@ -30,26 +30,54 @@ except ImportError:
 # ============================================================
 
 # 服务器列表（IP -> 元信息）
-SERVERS = {
-    '52.195.179.240': {
-        'name': 'JP',
-        'label': '🇯🇵 日本',
-        'domain': 'jp.290372913.xyz',
-    },
-    '13.212.37.11': {
-        'name': 'SG',
-        'label': '🇸🇬 新加坡',
-        'domain': 'sg.290372913.xyz',
-    },
-}
+# v4.15.12: 改为从 .env 动态加载（避免服务器迁移后硬编码 IP 失效）
+def _build_servers_from_env():
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+    servers = {}
+    if not os.path.exists(env_path):
+        return servers
+    base_domain = '290372913.xyz'
+    label_map = {
+        'JP': '🇯🇵 日本',
+        'HK': '🇭🇰 香港',
+        'HK1': '🇭🇰 香港1(直连)',
+        'HKCEPIN': '🇭🇰 香港Cepin',
+        'SG': '🇸🇬 新加坡',
+    }
+    try:
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip().rstrip('\r')
+                if line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                k = k.strip()
+                v = v.split('#', 1)[0].strip().strip('"').strip("'").rstrip('\r')
+                if k == 'CF_DOMAIN' and '.' in v:
+                    base_domain = v.split('.', 1)[1]
+                if k.endswith('_SSH_IP') and v:
+                    prefix = k.replace('_SSH_IP', '')
+                    servers[v] = {
+                        'name': prefix,
+                        'label': label_map.get(prefix, prefix),
+                        'domain': f'{prefix.lower()}.{base_domain}',
+                        'prefix': prefix,
+                    }
+    except Exception:
+        pass
+    return servers
+
+SERVERS = _build_servers_from_env()
 
 # 协议与端口映射（用于日志匹配）
 # v4.14.0: VLESS-HTTPUpgrade (vless-upgrade/2053) 已下线，从协议映射中移除
+# v4.15.12: 加 anyTLS（端口 2096 直连），修正 'TUIC v5' 空格违规为 'TUIC-v5'
 PROTOCOLS = {
     'vless-reality': {'port': 443, 'label': 'VLESS-Reality', 'transport': 'tcp'},
     'vless-ws': {'port': 8443, 'label': 'VLESS-WS', 'transport': 'tcp'},
     'trojan-ws': {'port': 2083, 'label': 'Trojan-WS', 'transport': 'tcp'},
-    'tuic': {'port_env': 'TUIC_PORT', 'label': 'TUIC v5', 'transport': 'udp'},
+    'anytls': {'port_env': 'ANYTLS_PORT', 'label': 'anyTLS', 'transport': 'tcp'},
+    'tuic': {'port_env': 'TUIC_PORT', 'label': 'TUIC-v5', 'transport': 'udp'},
 }
 
 # 远程路径
@@ -244,13 +272,23 @@ def resolve_server(target):
         return list(SERVERS.keys())
 
     target_lower = target.lower().strip()
-    # 按名称别名匹配
-    if target_lower in ('jp', 'japan', '日本'):
-        return ['52.195.179.240']
-    if target_lower in ('sg', 'singapore', '新加坡'):
-        return ['13.212.37.11']
+    # v4.15.12: 改为遍历 SERVERS 匹配 prefix/label，避免硬编码 IP 失效
     if target_lower in ('all', '全部'):
         return list(SERVERS.keys())
+
+    # 按 prefix/name 别名匹配（jp/japan/日本 -> JP）
+    alias_map = {
+        'jp': 'JP', 'japan': 'JP', '日本': 'JP',
+        'hk': 'HK', 'hongkong': 'HK', '香港': 'HK',
+        'hk1': 'HK1', '香港1': 'HK1',
+        'hkcepin': 'HKCEPIN', '香港cepin': 'HKCEPIN',
+        'sg': 'SG', 'singapore': 'SG', '新加坡': 'SG',
+    }
+    target_prefix = alias_map.get(target_lower)
+    if target_prefix:
+        for ip, info in SERVERS.items():
+            if info.get('name') == target_prefix or info.get('prefix') == target_prefix:
+                return [ip]
 
     # 直接IP匹配
     if target_lower in SERVERS:

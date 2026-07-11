@@ -19,16 +19,18 @@ def test_proxy_skip_expression_is_host_port_path_based_not_client_ip():
 
     expression = module.build_proxy_skip_expression(
         zone_name="290372913.xyz",
-        subdomains=["jp", "sg", "hk"],
-        ports=[2087, 8443, 2053, 2083],
-        paths=["/vless-ws", "/vless-upgrade", "/trojan-ws", "/sub", "/clash", "/api/cdn-status"],
+        subdomains=["jp", "hk", "hkcepin"],
+        ports=[2087, 8443, 2083],
+        paths=["/api/v1/stream", "/api/v1/data", "/sub", "/clash", "/api/cdn-status"],
     )
 
     assert "ip.src" not in expression
     assert "http.host in" in expression
     assert '"jp.290372913.xyz"' in expression
-    assert "cf.edge.server_port in {2087 8443 2053 2083}" in expression
-    assert 'starts_with(http.request.uri.path, "/vless-ws")' in expression
+    assert '"hkcepin.290372913.xyz"' in expression
+    assert '"sg.290372913.xyz"' not in expression
+    assert "cf.edge.server_port in {2087 8443 2083}" in expression
+    assert 'starts_with(http.request.uri.path, "/api/v1/stream")' in expression
     assert 'starts_with(http.request.uri.path, "/clash")' in expression
 
 
@@ -98,8 +100,7 @@ def test_proxy_skip_rule_deduplicates_stale_same_description_rules():
 
     class FakeClient:
         def __init__(self):
-            self.deleted = []
-            self.added = []
+            self.put_payload = None
 
         def get_zone_id(self, zone_name):
             return "zone"
@@ -125,19 +126,24 @@ def test_proxy_skip_rule_deduplicates_stale_same_description_rules():
                 ],
             }
 
-        def delete_rule(self, zone_id, ruleset_id, rule_id):
-            self.deleted.append(rule_id)
-
-        def add_rule(self, zone_id, ruleset_id, rule):
-            self.added.append(rule)
-            return {"id": "new"}
+        def put_phase_entrypoint(self, zone_id, phase, payload):
+            self.put_payload = payload
+            return {
+                "id": "ruleset",
+                "rules": [
+                    {
+                        "id": "new",
+                        "description": module.PROXY_SKIP_RULE_DESCRIPTION,
+                    }
+                ],
+            }
 
     client = FakeClient()
     result = module.ensure_proxy_skip_rule(client)
 
     assert result["status"] == "deduplicated"
-    assert client.deleted == ["stale"]
-    assert client.added == []
+    assert result["removed_rule_ids"] == ["stale"]
+    assert client.put_payload == {"rules": [module.build_proxy_skip_rule()]}
 
 
 def test_apply_path_removes_ddos_l7_override_instead_of_readding_eoff():

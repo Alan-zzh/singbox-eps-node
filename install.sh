@@ -800,6 +800,20 @@ create_env_file() {
     fi
     log_info "CF_DOMAIN: ${CF_DOMAIN_INPUT}"
     log_info "CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}..."
+    # v4.15.13 防复发:基于 CF_DOMAIN 前缀推导正确的 COUNTRY_CODE(服务器标识)
+    # 根因:ipinfo.io 返回 ISO 国家代码(如 HK),但项目 COUNTRY_CODE 是服务器标识(JP/HK/HK1/HKCEPIN)
+    # HKCEPIN/HK1 服务器都在香港→ipinfo 返回 HK,但项目需要 HKCEPIN/HK1
+    # 历史故障:v4.15.x 部署 HKCEPIN/HK1 时 COUNTRY_CODE=HK 导致订阅路由 /clash/HKCEPIN 返回 404
+    if [ -n "$CF_DOMAIN_INPUT" ]; then
+        case "$CF_DOMAIN_INPUT" in
+            jp.*)       COUNTRY_CODE="JP" ;;
+            hk1.*)      COUNTRY_CODE="HK1" ;;
+            hkcepin.*)  COUNTRY_CODE="HKCEPIN" ;;
+            hk.*)       COUNTRY_CODE="HK" ;;
+            *)          log_warn "未知 CF_DOMAIN 前缀($CF_DOMAIN_INPUT),COUNTRY_CODE 保持自动检测值: $COUNTRY_CODE" ;;
+        esac
+        log_info "基于域名前缀修正 COUNTRY_CODE: $COUNTRY_CODE (原 ipinfo 值已覆盖)"
+    fi
     cat > "$BASE_DIR/.env" << EOF
 # Singbox EPS Node 环境变量配置
 # 由安装脚本自动生成于 $(date '+%Y-%m-%d %H:%M:%S')

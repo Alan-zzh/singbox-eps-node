@@ -73,8 +73,8 @@ except (ImportError, SystemExit):
 ALERT_DEDUP_MINUTES = 30
 ALERT_DEDUP_DIR = '/tmp'
 
-# 三台服务器的区域代码
-ALL_REGIONS = ['jp', 'sg', 'hk']
+# 监控的区域代码（v4.15.12: 删除已废弃的 sg，加 hkcepin）
+ALL_REGIONS = ['jp', 'hk', 'hk1', 'hkcepin']
 
 # 监控超时（秒）
 TLS_TIMEOUT = 8
@@ -84,6 +84,7 @@ HTTP_TIMEOUT = 10
 def _build_sub_domain(region, base_domain):
     """根据区域代码和基础域名构造 sub-* 直连子域名
     例: ('jp', '290372913.xyz') -> 'sub-jp.290372913.xyz'
+    例: ('hk1', '290372913.xyz') -> 'sub-hk1.290372913.xyz'
     """
     return f"sub-{region}.{base_domain}"
 

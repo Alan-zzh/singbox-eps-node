@@ -143,6 +143,10 @@ def test_subscription_client_query_aliases(subscription_service_module):
     assert subscription_service_module.resolve_subscription_capability("shadowrocket", "v2rayN/6.60") == "full"
     assert subscription_service_module.resolve_subscription_capability("full", "v2rayN/6.60") == "full"
     assert subscription_service_module.resolve_subscription_capability("", "unknown-client") == "full"
+    assert subscription_service_module.resolve_subscription_capability("", "") == "full"
+    assert subscription_service_module.resolve_subscription_capability("", "curl/8.0") == "full"
+    assert subscription_service_module.resolve_subscription_capability("", "Go-http-client/2.0") == "full"
+    assert subscription_service_module.resolve_subscription_capability("xray", "sing-box/1.13") == "xray"
 
 
 def test_base64_subscription_body_omits_comment_lines_for_v2rayn(subscription_service_module, monkeypatch):
@@ -178,23 +182,23 @@ def test_base64_links_keep_all_nodes_for_supported_clients(subscription_service_
     links = subscription_service_module.generate_all_links(capability="full")
     text = "\n".join(links)
 
-    assert "VLESS-HTTPUpgrade-CDN" in text
-    assert "TUIC%20v5" in text
+    assert "VLESS-HTTPUpgrade-CDN" not in text
+    assert "TUIC-v5" in text
     assert "VLESS-WS-CDN" in text
     assert "Trojan-WS-CDN" in text
-    assert len(links) == 7
+    assert len(links) == 6
 
 
 def test_base64_share_link_fragments_are_url_encoded(subscription_service_module, monkeypatch):
     monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
     links = subscription_service_module.generate_all_links(capability="full")
 
-    assert len(links) == 7
+    assert len(links) == 6
     for link in links:
         assert "#" in link
         fragment = link.rsplit("#", 1)[1]
         assert " " not in fragment
-    assert any(link.endswith("#" + subscription_service_module.share_fragment("TUIC v5")) for link in links)
+    assert any(link.endswith("#" + subscription_service_module.share_fragment("TUIC-v5")) for link in links)
 
 
 def test_standard_override_still_filters_extended_nodes(subscription_service_module, monkeypatch):
@@ -204,7 +208,7 @@ def test_standard_override_still_filters_extended_nodes(subscription_service_mod
 
     assert "VLESS-HTTPUpgrade" not in text
     assert "TUIC v5" not in text
-    assert len(links) == 5
+    assert len(links) == 4
 
 
 def test_shadowrocket_subscription_keeps_all_nodes_with_compat_params(subscription_service_module, monkeypatch):
@@ -212,11 +216,7 @@ def test_shadowrocket_subscription_keeps_all_nodes_with_compat_params(subscripti
     links = subscription_service_module.generate_all_links(capability="full")
     text = "\n".join(links)
 
-    assert "VLESS-gRPC" in text
-    assert "mode=gun" in text
-    assert "alpn=h2" in text
     assert "allowInsecure=1" in text
-    assert "VLESS-HTTPUpgrade" in text
     assert "TUIC" in text
     assert "allow_insecure=1" in text
     assert "insecure=1" in text
@@ -224,7 +224,7 @@ def test_shadowrocket_subscription_keeps_all_nodes_with_compat_params(subscripti
     assert "Trojan-TCP" in text
     assert "VLESS-WS-CDN" in text
     assert "Trojan-WS-CDN" in text
-    assert len(links) == 7
+    assert len(links) == 6
 
 
 def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_module, monkeypatch):
@@ -241,10 +241,8 @@ def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_mo
     singbox_tags = {outbound["tag"] for outbound in singbox["outbounds"] if "tag" in outbound}
 
     assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-WS-CDN" in clash_names
-    assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-HTTPUpgrade-CDN" in clash_names
     assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in clash_names
     assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-WS-CDN" in singbox_tags
-    assert f"{subscription_service_module.COUNTRY_CODE}-VLESS-HTTPUpgrade-CDN" in singbox_tags
     assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in singbox_tags
 
 

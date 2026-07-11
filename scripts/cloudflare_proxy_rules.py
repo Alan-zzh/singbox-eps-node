@@ -22,14 +22,13 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 ENV_FILE = BASE_DIR / ".env"
 
 ZONE_NAME = "290372913.xyz"
-PROXY_SUBDOMAINS = ["jp", "sg", "hk", "hkcepin"]
+PROXY_SUBDOMAINS = ["jp", "hk", "hkcepin"]
 # v4.14.0: 移除 2053 (VLESS-HTTPUpgrade 已下线)；anyTLS (2096) 为直连协议不走 CF 代理
+# v4.15.11: WS 路径已改为非代理特征路径 /api/v1/stream /api/v1/data，旧 /vless-ws /trojan-ws 不再使用
 PROXY_PORTS = [2087, 8443, 2083]
 PROXY_PATHS = [
     "/api/v1/stream",
     "/api/v1/data",
-    "/vless-ws",
-    "/trojan-ws",
     "/sub",
     "/clash",
     "/api/cdn-status",
@@ -121,6 +120,20 @@ def build_proxy_skip_rule(zone_name: str = ZONE_NAME) -> dict:
         "description": PROXY_SKIP_RULE_DESCRIPTION,
         "enabled": True,
     }
+
+
+def _ruleset_put_rule(rule: dict) -> dict:
+    """Keep only fields accepted by the Rulesets phase-entrypoint PUT API."""
+    allowed = {
+        "action",
+        "action_parameters",
+        "expression",
+        "description",
+        "enabled",
+        "logging",
+        "ratelimit",
+    }
+    return {key: value for key, value in rule.items() if key in allowed}
 
 
 def find_temporary_ip_rules(rules: list[dict]) -> list[str]:
@@ -254,33 +267,72 @@ def ensure_proxy_skip_rule(client: CloudflareClient, zone_name: str = ZONE_NAME)
             and rule.get("enabled") is True
         )
     ]
-    stale_or_duplicate_ids = [
-        str(rule["id"])
-        for rule in matching_rules
-        if not desired_matches or rule.get("id") != desired_matches[0].get("id")
-    ]
-    for rule_id in stale_or_duplicate_ids:
-        client.delete_rule(zone_id, entrypoint["id"], rule_id)
     if desired_matches:
+        stale_or_duplicate_ids = [
+            str(rule["id"])
+            for rule in matching_rules
+            if rule.get("id") != desired_matches[0].get("id")
+        ]
+        if stale_or_duplicate_ids:
+            preserved_rules = [
+                _ruleset_put_rule(rule)
+                for rule in entrypoint.get("rules", [])
+                if rule.get("description") != PROXY_SKIP_RULE_DESCRIPTION
+            ]
+            updated = client.put_phase_entrypoint(
+                zone_id,
+                CUSTOM_PHASE,
+                {"rules": preserved_rules + [desired_rule]},
+            )
+            rule_id = next(
+                (
+                    rule.get("id")
+                    for rule in updated.get("rules", [])
+                    if rule.get("description") == PROXY_SKIP_RULE_DESCRIPTION
+                ),
+                desired_matches[0].get("id"),
+            )
+            return {
+                "status": "deduplicated",
+                "zone_id": zone_id,
+                "ruleset_id": updated["id"],
+                "rule_id": rule_id,
+                "removed_rule_ids": stale_or_duplicate_ids,
+            }
         return {
-            "status": "already_exists" if not stale_or_duplicate_ids else "deduplicated",
+            "status": "already_exists",
             "zone_id": zone_id,
             "ruleset_id": entrypoint["id"],
             "rule_id": desired_matches[0]["id"],
-            "removed_rule_ids": stale_or_duplicate_ids,
-        }
-    if matching_rules:
-        updated = client.add_rule(zone_id, entrypoint["id"], desired_rule)
-        return {
-            "status": "updated_rule",
-            "zone_id": zone_id,
-            "ruleset_id": entrypoint["id"],
-            "rule_id": updated["id"],
-            "removed_rule_ids": stale_or_duplicate_ids,
+            "removed_rule_ids": [],
         }
 
-    client.add_rule(zone_id, entrypoint["id"], desired_rule)
-    return {"status": "created_rule", "zone_id": zone_id, "ruleset_id": entrypoint["id"]}
+    stale_or_duplicate_ids = [str(rule["id"]) for rule in matching_rules if rule.get("id")]
+    preserved_rules = [
+        _ruleset_put_rule(rule)
+        for rule in entrypoint.get("rules", [])
+        if rule.get("description") != PROXY_SKIP_RULE_DESCRIPTION
+    ]
+    updated = client.put_phase_entrypoint(
+        zone_id,
+        CUSTOM_PHASE,
+        {"rules": preserved_rules + [desired_rule]},
+    )
+    rule_id = next(
+        (
+            rule.get("id")
+            for rule in updated.get("rules", [])
+            if rule.get("description") == PROXY_SKIP_RULE_DESCRIPTION
+        ),
+        None,
+    )
+    return {
+        "status": "updated_rule" if matching_rules else "created_rule",
+        "zone_id": zone_id,
+        "ruleset_id": updated["id"],
+        "rule_id": rule_id,
+        "removed_rule_ids": stale_or_duplicate_ids,
+    }
 
 
 def ensure_tls_settings(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:

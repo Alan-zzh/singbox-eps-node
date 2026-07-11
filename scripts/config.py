@@ -621,12 +621,14 @@ def verify_port_integrity():
 
 
 def get_node_name(protocol):
-    """生成节点名称"""
+    """生成节点名称（已废弃：保留以兼容老调用，新代码请用 subscription_service.node_name）
+    v4.15.12: 修正 'TUIC v5' 空格违规为 'TUIC-v5'（AGENTS.md 铁律 2）
+    """
     names = {
         'vless-reality': f'{NODE_PREFIX}-VLESS-Reality',
-        'vless-ws': f'{NODE_PREFIX}-VLESS-WS',
-        'trojan-ws': f'{NODE_PREFIX}-Trojan-WS',
-        'tuic': f'{NODE_PREFIX}-TUIC v5',
+        'vless-ws': f'{NODE_PREFIX}-VLESS-WS-CDN',
+        'trojan-ws': f'{NODE_PREFIX}-Trojan-WS-CDN',
+        'tuic': f'{NODE_PREFIX}-TUIC-v5',
         'socks5': f'{NODE_PREFIX}-SOCKS5'
     }
     return names.get(protocol, f'{NODE_PREFIX}-{protocol}')
