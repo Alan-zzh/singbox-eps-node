@@ -2,8 +2,8 @@
 """
 Singbox 证书管理服务
 Author: Alan
-Version: v4.3.5
-Date: 2026-05-01
+Version: v4.15.24
+Date: 2026-07-23
 功能：证书管理
 """
 
@@ -19,7 +19,10 @@ from urllib.error import URLError
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import CERT_DIR, CF_DOMAIN, CERT_VALIDITY_DAYS, SERVER_IP, BASE_DIR, DATA_DIR
+    from config import (
+        CERT_DIR, CF_DOMAIN, CERT_VALIDITY_DAYS, SERVER_IP, BASE_DIR, DATA_DIR,
+        DIRECT_MODE_ENABLED, SUB_PORT,
+    )
     from logger import get_logger
 except ImportError:
     def get_logger(name):
@@ -33,6 +36,8 @@ except ImportError:
     CF_DOMAIN = ''
     CERT_VALIDITY_DAYS = 365
     SERVER_IP = ''
+    DIRECT_MODE_ENABLED = False
+    SUB_PORT = 2087
 
 logger = get_logger('cert_manager')
 
@@ -217,35 +222,93 @@ def generate_self_signed_cert(domain=None):
         logger.error(f"[ERROR] {result.stderr}")
         return False
 
+
+def obtain_letsencrypt_certificate(domain, extra_domains=None):
+    """为用户实际访问的灰云订阅域名签发公网可信证书。
+
+    direct 模式的客户端会直接看到源站证书，Cloudflare Origin CA
+    和自签名证书都不能作为客户端可信证书。
+    """
+    acme_sh = os.path.expanduser('~/.acme.sh/acme.sh')
+    if not os.path.isfile(acme_sh) or not os.access(acme_sh, os.X_OK):
+        logger.error("[ERROR] direct 模式需要 acme.sh 签发 Let's Encrypt 证书")
+        return False
+
+    domains = [domain] + [item for item in (extra_domains or []) if item and item != domain]
+    issue_args = [acme_sh, '--issue', '--standalone']
+    for item in domains:
+        issue_args.extend(['-d', item])
+    issue_args.extend(['--keylength', 'ec-256', '--server', 'letsencrypt'])
+    issue = subprocess.run(
+        issue_args,
+        capture_output=True, text=True, timeout=180,
+    )
+    if issue.returncode != 0:
+        logger.error("[ERROR] Let's Encrypt 签发失败: %s", (issue.stderr or issue.stdout)[-1000:])
+        return False
+
+    ensure_cert_dir()
+    fullchain_file = os.path.join(CERT_DIR, 'fullchain.pem')
+    install = subprocess.run(
+        [acme_sh, '--install-cert', '-d', domain, '--ecc',
+         '--key-file', KEY_FILE,
+         '--fullchain-file', fullchain_file,
+         '--reloadcmd', 'systemctl try-restart singbox singbox-sub'],
+        capture_output=True, text=True, timeout=60,
+    )
+    if install.returncode != 0:
+        logger.error("[ERROR] Let's Encrypt 证书安装失败: %s", (install.stderr or install.stdout)[-1000:])
+        return False
+
+    import shutil
+    shutil.copy2(fullchain_file, CERT_FILE)
+    os.chmod(KEY_FILE, 0o600)
+    logger.info("[OK] Let's Encrypt 公网可信证书已安装: %s", ', '.join(domains))
+    return True
+
 def obtain_certificate():
     """获取证书主函数"""
     ensure_cert_dir()
 
-    cf_token = get_cf_api_token()
     domain = CF_DOMAIN
 
-    if cf_token and domain:
-        logger.info(f"尝试使用 Cloudflare API 获取证书...")
-        cf_cert = request_cf_ssl_certificate(domain, cf_token)
-
-        if cf_cert:
-            with open(CERT_FILE, 'w') as f:
-                f.write(cf_cert['certificate'])
-            if cf_cert.get('private_key'):
-                with open(KEY_FILE, 'w') as f:
-                    f.write(cf_cert['private_key'])
-            logger.info(f"[OK] Cloudflare 证书已保存")
+    if domain:
+        extra_domains = [] if DIRECT_MODE_ENABLED else [_build_sub_domain(domain)]
+        logger.info("订阅端点必须使用 Let's Encrypt 公网可信证书...")
+        if obtain_letsencrypt_certificate(domain, extra_domains):
             return True
-        else:
-            logger.warning("[WARN] Cloudflare API 失败，尝试自签名证书...")
+        logger.error("[ERROR] 有域名的订阅服务拒绝回退到自签名/Origin CA 证书")
+        return False
 
     logger.info("使用自签名证书...")
     return generate_self_signed_cert()
+
+
+def subscription_certificate_is_trusted():
+    """使用系统 CA 校验用户实际访问的订阅域名。"""
+    if not CF_DOMAIN:
+        return True
+    if not os.path.isfile(os.path.join(CERT_DIR, 'fullchain.pem')):
+        return False
+    subscription_domain = CF_DOMAIN if DIRECT_MODE_ENABLED else _build_sub_domain(CF_DOMAIN)
+    result = subprocess.run(
+        ['openssl', 's_client', '-connect', f'127.0.0.1:{SUB_PORT}',
+         '-servername', subscription_domain,
+         '-verify_hostname', subscription_domain,
+         '-verify_return_error', '-CApath', '/etc/ssl/certs'],
+        input='', capture_output=True, text=True, timeout=15,
+    )
+    output = result.stdout + result.stderr
+    return result.returncode == 0 and 'Verify return code: 0' in output
 
 def check_cert_expiry():
     """检查证书是否过期
     检查顺序：fullchain.pem（Let's Encrypt） > cert.pem（Cloudflare API/自签名）
     """
+    if not subscription_certificate_is_trusted():
+        logger.warning("[WARN] 订阅证书未通过系统 CA/域名校验，需要重新签发")
+        return True
+
     for cert_name in ['fullchain.pem', 'cert.pem']:
         cert_path = os.path.join(CERT_DIR, cert_name)
         if os.path.exists(cert_path):
@@ -348,11 +411,12 @@ if __name__ == "__main__":
         if sys.argv[1] == "--renew":
             renew_cert()
         elif sys.argv[1] == "--cf-cert":
-            obtain_certificate()
+            sys.exit(0 if obtain_certificate() else 1)
         else:
             logger.info(f"未知参数: {sys.argv[1]}")
     else:
         ensure_cert_dir()
         if not os.path.exists(CERT_FILE):
-            obtain_certificate()
+            if not obtain_certificate():
+                sys.exit(1)
         logger.info(f"[INFO] 证书状态: {'已存在' if os.path.exists(CERT_FILE) else '不存在'}")

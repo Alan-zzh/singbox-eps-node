@@ -19,7 +19,7 @@ def test_proxy_skip_expression_is_host_port_path_based_not_client_ip():
 
     expression = module.build_proxy_skip_expression(
         zone_name="290372913.xyz",
-        subdomains=["jp", "hk", "hkcepin"],
+        subdomains=["jp"],
         ports=[2087, 8443, 2083],
         paths=["/api/v1/stream", "/api/v1/data", "/sub", "/clash", "/api/cdn-status"],
     )
@@ -27,7 +27,7 @@ def test_proxy_skip_expression_is_host_port_path_based_not_client_ip():
     assert "ip.src" not in expression
     assert "http.host in" in expression
     assert '"jp.290372913.xyz"' in expression
-    assert '"hkcepin.290372913.xyz"' in expression
+    assert '"hkcepin.290372913.xyz"' not in expression
     assert '"sg.290372913.xyz"' not in expression
     assert "cf.edge.server_port in {2087 8443 2083}" in expression
     assert 'starts_with(http.request.uri.path, "/api/v1/stream")' in expression
@@ -150,3 +150,104 @@ def test_apply_path_removes_ddos_l7_override_instead_of_readding_eoff():
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert 'result["ddos_l7_override"] = ensure_no_ddos_l7_override' in source
+
+
+def test_cdn_origin_rules_route_edge_443_by_websocket_path_without_changing_protocols():
+    module = load_module()
+
+    rules = module.build_cdn_origin_rules("290372913.xyz")
+
+    assert len(rules) == 2
+    by_description = {rule["description"]: rule for rule in rules}
+    vless = by_description[module.VLESS_WS_ORIGIN_RULE_DESCRIPTION]
+    trojan = by_description[module.TROJAN_WS_ORIGIN_RULE_DESCRIPTION]
+
+    assert vless["action"] == "route"
+    assert vless["action_parameters"] == {"origin": {"port": 8443}}
+    assert "cf.edge.server_port eq 443" in vless["expression"]
+    assert 'http.request.uri.path eq "/api/v1/stream"' in vless["expression"]
+
+    assert trojan["action"] == "route"
+    assert trojan["action_parameters"] == {"origin": {"port": 2083}}
+    assert "cf.edge.server_port eq 443" in trojan["expression"]
+    assert 'http.request.uri.path eq "/api/v1/data"' in trojan["expression"]
+
+
+def test_cloudflare_apply_ensures_cdn_origin_rules():
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert 'result["cdn_origin_rules"] = ensure_cdn_origin_rules' in source
+
+
+def test_required_dns_records_keep_direct_gray_and_cdn_subscription_gray():
+    module = load_module()
+
+    direct = module.build_required_dns_records(
+        "hk2.290372913.xyz", "47.238.146.170", "direct"
+    )
+    assert direct == [
+        {
+            "type": "A",
+            "name": "hk2.290372913.xyz",
+            "content": "47.238.146.170",
+            "proxied": False,
+            "ttl": 1,
+        }
+    ]
+
+    cdn = module.build_required_dns_records(
+        "jp.290372913.xyz", "3.113.4.86", "cdn"
+    )
+    assert cdn[0]["name"] == "jp.290372913.xyz"
+    assert cdn[0]["proxied"] is True
+    assert cdn[1]["name"] == "sub-jp.290372913.xyz"
+    assert cdn[1]["proxied"] is False
+
+
+def test_dns_sync_updates_stale_record_and_removes_duplicate():
+    module = load_module()
+
+    class FakeClient:
+        def __init__(self):
+            self.updated = []
+            self.deleted = []
+
+        @staticmethod
+        def get_zone_id(zone_name):
+            assert zone_name == "290372913.xyz"
+            return "zone"
+
+        @staticmethod
+        def list_dns_records(zone_id, record_type, name):
+            assert zone_id == "zone"
+            assert record_type == "A"
+            return [
+                {
+                    "id": "primary",
+                    "type": "A",
+                    "name": name,
+                    "content": "192.0.2.10",
+                    "proxied": True,
+                },
+                {"id": "duplicate", "type": "A", "name": name},
+            ]
+
+        def update_dns_record(self, zone_id, record_id, payload):
+            self.updated.append((zone_id, record_id, payload))
+            return {"id": record_id}
+
+        def delete_dns_record(self, zone_id, record_id):
+            self.deleted.append((zone_id, record_id))
+
+    client = FakeClient()
+    result = module.ensure_dns_records(
+        client,
+        domain="hk2.290372913.xyz",
+        server_ip="47.238.146.170",
+        mode="direct",
+    )
+
+    assert result["records"][0]["status"] == "updated"
+    assert client.updated[0][2]["proxied"] is False
+    assert client.updated[0][2]["content"] == "47.238.146.170"
+    assert client.deleted == [("zone", "duplicate")]

@@ -183,10 +183,10 @@ check_env_issues() {
     
     # 3. HK1 必须是直连模式
     cf_dom=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n\t ')
-    if echo "$cf_dom" | grep -qE '^hk1\.'; then
+    if echo "$cf_dom" | grep -qE '^hk[12]\.'; then
         dm=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n\t ')
         if [ "$dm" != "direct" ]; then
-            log "  ❌ HK1($cf_dom) 必须 direct 模式，当前: $dm"
+            log "  ❌ 香港直连节点($cf_dom) 必须 direct 模式，当前: $dm"
         else
             log "  ✓  HK1 正确直连模式"
         fi
@@ -304,6 +304,22 @@ check_cert() {
         log "  到期时间: $EXP (剩余 $DAYS_LEFT 天)"
         if [ "$DAYS_LEFT" -lt 30 ]; then
             log "  ⚠️  证书即将到期，请检查 cert_manager.py 续签任务"
+        fi
+        DEPLOY_MODE_CERT=$(grep '^DEPLOY_MODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+        CF_DOMAIN_CERT=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "'\" \t\r")
+        if [ -n "$CF_DOMAIN_CERT" ]; then
+            if [ "$DEPLOY_MODE_CERT" = "cdn" ]; then
+                CF_DOMAIN_CERT="sub-${CF_DOMAIN_CERT}"
+            fi
+            if printf '' | openssl s_client -connect 127.0.0.1:2087 -servername "$CF_DOMAIN_CERT" -verify_hostname "$CF_DOMAIN_CERT" -verify_return_error -CApath /etc/ssl/certs 2>&1 | grep -q 'Verify return code: 0'; then
+                log "  ✓ 订阅证书已通过系统 CA 与域名校验"
+            else
+                log "  ❌ 订阅证书不可信，立即尝试 Let's Encrypt 修复"
+                python3 "$BASE_DIR/scripts/cert_manager.py" --renew >> "$LOG_FILE" 2>&1 || true
+                if ! printf '' | openssl s_client -connect 127.0.0.1:2087 -servername "$CF_DOMAIN_CERT" -verify_hostname "$CF_DOMAIN_CERT" -verify_return_error -CApath /etc/ssl/certs 2>&1 | grep -q 'Verify return code: 0'; then
+                    log "  ❌ 订阅证书修复失败"
+                fi
+            fi
         fi
     else
         log "  ❌ 证书文件不存在: $CERT"

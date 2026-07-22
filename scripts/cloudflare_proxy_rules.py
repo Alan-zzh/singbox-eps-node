@@ -22,10 +22,10 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 ENV_FILE = BASE_DIR / ".env"
 
 ZONE_NAME = "290372913.xyz"
-PROXY_SUBDOMAINS = ["jp", "hk", "hkcepin"]
+PROXY_SUBDOMAINS = ["jp"]
 # v4.14.0: 移除 2053 (VLESS-HTTPUpgrade 已下线)；anyTLS (2096) 为直连协议不走 CF 代理
 # v4.15.11: WS 路径已改为非代理特征路径 /api/v1/stream /api/v1/data，旧 /vless-ws /trojan-ws 不再使用
-PROXY_PORTS = [2087, 8443, 2083]
+PROXY_PORTS = [2087, 443]
 PROXY_PATHS = [
     "/api/v1/stream",
     "/api/v1/data",
@@ -37,9 +37,13 @@ PROXY_PATHS = [
 ]
 
 CUSTOM_PHASE = "http_request_firewall_custom"
+ORIGIN_PHASE = "http_request_origin"
 DDOS_L7_PHASE = "ddos_l7"
 PROXY_SKIP_RULESET_NAME = "Codex proxy ingress security skips"
 PROXY_SKIP_RULE_DESCRIPTION = "Skip Cloudflare security products for singbox proxy entrypoints"
+CDN_ORIGIN_RULESET_NAME = "Singbox CDN path origin ports"
+VLESS_WS_ORIGIN_RULE_DESCRIPTION = "Route VLESS-WS CDN path to origin 8443"
+TROJAN_WS_ORIGIN_RULE_DESCRIPTION = "Route Trojan-WS CDN path to origin 2083"
 DDOS_L7_OVERRIDE_DESCRIPTION = "Disable DDoS L7 for proxy entries - v4.12.12"
 DDOS_L7_SENSITIVITY_LEVEL = "eoff"
 MIN_TLS_VERSION = "1.2"
@@ -120,6 +124,28 @@ def build_proxy_skip_rule(zone_name: str = ZONE_NAME) -> dict:
         "description": PROXY_SKIP_RULE_DESCRIPTION,
         "enabled": True,
     }
+
+
+def build_cdn_origin_rules(zone_name: str = ZONE_NAME) -> list[dict]:
+    """Route both public HTTPS 443 CDN nodes to their unchanged TLS origins."""
+    hosts = [f"{subdomain}.{zone_name}" for subdomain in PROXY_SUBDOMAINS]
+    base = f"http.host in {_quote_set(hosts)} and cf.edge.server_port eq 443"
+    return [
+        {
+            "action": "route",
+            "action_parameters": {"origin": {"port": 8443}},
+            "expression": f'({base} and http.request.uri.path eq "/api/v1/stream")',
+            "description": VLESS_WS_ORIGIN_RULE_DESCRIPTION,
+            "enabled": True,
+        },
+        {
+            "action": "route",
+            "action_parameters": {"origin": {"port": 2083}},
+            "expression": f'({base} and http.request.uri.path eq "/api/v1/data")',
+            "description": TROJAN_WS_ORIGIN_RULE_DESCRIPTION,
+            "enabled": True,
+        },
+    ]
 
 
 def _ruleset_put_rule(rule: dict) -> dict:
@@ -233,12 +259,109 @@ class CloudflareClient:
     def set_zone_setting(self, zone_id: str, setting: str, value: str) -> dict:
         return self.request("PATCH", f"/zones/{zone_id}/settings/{setting}", {"value": value})["result"]
 
+    def list_dns_records(self, zone_id: str, record_type: str, name: str) -> list[dict]:
+        query = urlencode({"type": record_type, "name": name, "per_page": 100})
+        result = self.request("GET", f"/zones/{zone_id}/dns_records?{query}")
+        return list(result.get("result", []))
+
+    def create_dns_record(self, zone_id: str, payload: dict) -> dict:
+        return self.request("POST", f"/zones/{zone_id}/dns_records", payload)["result"]
+
+    def update_dns_record(self, zone_id: str, record_id: str, payload: dict) -> dict:
+        return self.request("PUT", f"/zones/{zone_id}/dns_records/{record_id}", payload)["result"]
+
+    def delete_dns_record(self, zone_id: str, record_id: str) -> None:
+        self.request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
+
     def list_managed_rulesets(self, zone_id: str) -> list[dict]:
         result = self.request("GET", f"/zones/{zone_id}/rulesets")
         return [r for r in result.get("result", []) if r.get("kind") == "managed"]
 
     def put_phase_entrypoint(self, zone_id: str, phase: str, payload: dict) -> dict:
         return self.request("PUT", f"/zones/{zone_id}/rulesets/phases/{phase}/entrypoint", payload)["result"]
+
+
+def build_required_dns_records(domain: str, server_ip: str, mode: str) -> list[dict]:
+    """Return the exact A records required by a node installation.
+
+    Direct subscriptions use the main hostname in DNS-only mode. CDN nodes use
+    an orange-cloud main hostname and a DNS-only sub-* subscription hostname.
+    """
+    domain = domain.strip().rstrip(".").lower()
+    server_ip = server_ip.strip()
+    if not domain or "." not in domain:
+        raise ValueError("domain must be a fully-qualified hostname")
+    if not server_ip:
+        raise ValueError("server_ip is required")
+    if mode not in {"direct", "cdn"}:
+        raise ValueError("mode must be direct or cdn")
+
+    records = [
+        {
+            "type": "A",
+            "name": domain,
+            "content": server_ip,
+            "proxied": mode == "cdn",
+            "ttl": 1,
+        }
+    ]
+    if mode == "cdn":
+        first, rest = domain.split(".", 1)
+        records.append(
+            {
+                "type": "A",
+                "name": f"sub-{first}.{rest}",
+                "content": server_ip,
+                "proxied": False,
+                "ttl": 1,
+            }
+        )
+    return records
+
+
+def ensure_dns_records(
+    client: CloudflareClient,
+    domain: str,
+    server_ip: str,
+    mode: str,
+    zone_name: str = ZONE_NAME,
+) -> dict:
+    """Create/update required records and remove exact-name duplicate A records."""
+    if not domain.lower().endswith(f".{zone_name.lower()}"):
+        raise ValueError(f"domain {domain!r} is not inside Cloudflare zone {zone_name!r}")
+
+    zone_id = client.get_zone_id(zone_name)
+    changes: list[dict] = []
+    for desired in build_required_dns_records(domain, server_ip, mode):
+        current = client.list_dns_records(zone_id, "A", desired["name"])
+        if not current:
+            created = client.create_dns_record(zone_id, desired)
+            changes.append({"name": desired["name"], "status": "created", "id": created.get("id")})
+            continue
+
+        primary = current[0]
+        already_ok = all(
+            primary.get(key) == desired[key]
+            for key in ("type", "name", "content", "proxied")
+        )
+        if already_ok:
+            status = "already_ok"
+        else:
+            client.update_dns_record(zone_id, str(primary["id"]), desired)
+            status = "updated"
+
+        duplicate_ids = [str(record["id"]) for record in current[1:] if record.get("id")]
+        for record_id in duplicate_ids:
+            client.delete_dns_record(zone_id, record_id)
+        changes.append(
+            {
+                "name": desired["name"],
+                "status": status,
+                "id": primary.get("id"),
+                "removed_duplicate_ids": duplicate_ids,
+            }
+        )
+    return {"zone_id": zone_id, "mode": mode, "records": changes}
 
 
 def ensure_proxy_skip_rule(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:
@@ -332,6 +455,57 @@ def ensure_proxy_skip_rule(client: CloudflareClient, zone_name: str = ZONE_NAME)
         "ruleset_id": updated["id"],
         "rule_id": rule_id,
         "removed_rule_ids": stale_or_duplicate_ids,
+    }
+
+
+def ensure_cdn_origin_rules(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:
+    zone_id = client.get_zone_id(zone_name)
+    desired_rules = build_cdn_origin_rules(zone_name)
+    descriptions = {
+        VLESS_WS_ORIGIN_RULE_DESCRIPTION,
+        TROJAN_WS_ORIGIN_RULE_DESCRIPTION,
+    }
+    entrypoint = client.get_phase_entrypoint(zone_id, ORIGIN_PHASE)
+    if entrypoint is None:
+        ruleset = client.create_ruleset(
+            zone_id,
+            ORIGIN_PHASE,
+            CDN_ORIGIN_RULESET_NAME,
+            "Path-based origin ports for CDN nodes exposed on HTTPS 443",
+            desired_rules,
+        )
+        return {
+            "status": "created_ruleset",
+            "zone_id": zone_id,
+            "ruleset_id": ruleset["id"],
+        }
+
+    current_managed = [
+        _ruleset_put_rule(rule)
+        for rule in entrypoint.get("rules", [])
+        if rule.get("description") in descriptions
+    ]
+    if current_managed == desired_rules:
+        return {
+            "status": "already_exists",
+            "zone_id": zone_id,
+            "ruleset_id": entrypoint["id"],
+        }
+
+    preserved_rules = [
+        _ruleset_put_rule(rule)
+        for rule in entrypoint.get("rules", [])
+        if rule.get("description") not in descriptions
+    ]
+    updated = client.put_phase_entrypoint(
+        zone_id,
+        ORIGIN_PHASE,
+        {"rules": preserved_rules + desired_rules},
+    )
+    return {
+        "status": "updated_rules" if current_managed else "created_rules",
+        "zone_id": zone_id,
+        "ruleset_id": updated["id"],
     }
 
 
@@ -479,13 +653,30 @@ def remove_temporary_access_rules(client: CloudflareClient, zone_name: str = ZON
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Maintain Cloudflare proxy ingress rules.")
-    parser.add_argument("action", choices=["apply", "cleanup-temp", "status", "remove-ddos-override"])
+    parser.add_argument(
+        "action",
+        choices=["apply", "cleanup-temp", "status", "remove-ddos-override", "dns-sync"],
+    )
     parser.add_argument("--zone", default=ZONE_NAME)
+    parser.add_argument("--domain")
+    parser.add_argument("--server-ip")
+    parser.add_argument("--mode", choices=["direct", "cdn"])
     args = parser.parse_args()
 
     client = CloudflareClient(load_env())
-    if args.action == "apply":
+    if args.action == "dns-sync":
+        if not args.domain or not args.server_ip or not args.mode:
+            parser.error("dns-sync requires --domain, --server-ip and --mode")
+        result = ensure_dns_records(
+            client,
+            domain=args.domain,
+            server_ip=args.server_ip,
+            mode=args.mode,
+            zone_name=args.zone,
+        )
+    elif args.action == "apply":
         result = ensure_proxy_skip_rule(client, args.zone)
+        result["cdn_origin_rules"] = ensure_cdn_origin_rules(client, args.zone)
         result["tls_settings"] = ensure_tls_settings(client, args.zone)
         result["ddos_l7_override"] = ensure_no_ddos_l7_override(client, args.zone)
     elif args.action == "cleanup-temp":
@@ -501,6 +692,7 @@ def main() -> int:
             "expression": build_proxy_skip_expression(args.zone),
             "min_tls_version": client.get_zone_setting(zone_id, "min_tls_version"),
             "entrypoint": client.get_phase_entrypoint(zone_id, CUSTOM_PHASE),
+            "origin_entrypoint": client.get_phase_entrypoint(zone_id, ORIGIN_PHASE),
             "ddos_l7_entrypoint": client.get_phase_entrypoint(zone_id, DDOS_L7_PHASE),
         }
     print(json.dumps(result, ensure_ascii=False, indent=2))

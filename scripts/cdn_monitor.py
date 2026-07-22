@@ -80,7 +80,7 @@ try:
         CDN_API_001315_CT, CDN_API_001315_CU, CDN_API_001315_CMCC,
         CDN_API_090227_CT, CDN_API_090227_CU, CDN_API_090227_CMCC,
         CDN_API_VVHAN,
-        VLESS_WS_PORT, TROJAN_WS_PORT,
+        VLESS_WS_EDGE_PORT, TROJAN_WS_EDGE_PORT,
         CDN_CUSTOM_SOURCE_URLS, CDN_FASTEST_LIMIT, CDN_REGION_FILTER,
         USER_DDNS_DOMAIN, USER_EXPECTED_ISP, USER_PROBE_INTERVAL,
         USER_LATENCY_SPIKE_THRESHOLD, HUNAN_CT_OPTIMAL_PREFIXES,
@@ -97,9 +97,9 @@ except ImportError:
     SERVER_IP = ''
     CF_DOMAIN = ''
     SUB_PORT = 2087
-    VLESS_WS_PORT = 8443
+    VLESS_WS_EDGE_PORT = 443
     # v4.14.0: VLESS-HTTPUpgrade (2053) 已下线，删除 fallback 定义
-    TROJAN_WS_PORT = 2083
+    TROJAN_WS_EDGE_PORT = 443
     DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
     CDN_PREFERRED_IPS = [
         '162.159.38.161', '108.162.198.221', '162.159.44.242',
@@ -158,14 +158,19 @@ DOH_SERVERS = [
 IPDB_API_URL = CDN_API_IPDB
 
 # [TRAE SOLO CN] v4.10.16 用户路径优先评分权重
-SCORE_VPS_CDN_WEIGHT = 0.10
+# v4.15.17 调整：延迟优先（用户反馈速度100Mbps够用，主要看延迟）
+#   VPS延迟(20%) + 用户路径延迟(40%) = 60% 决定延迟
+#   VPS速度(10%) + 用户路径速度(10%) = 20% 决定速度
+#   三网均衡(10%) + 稳定性(10%) = 20% 决定稳定性
+#   延迟100ms内为优，70-80ms更佳；速度100Mbps即满分
+SCORE_VPS_CDN_WEIGHT = 0.20
 SCORE_VPS_SPEED_WEIGHT = 0.10
-SCORE_USER_PATH_LAT_WEIGHT = 0.35
-SCORE_USER_PATH_SPEED_WEIGHT = 0.35
-SCORE_CROSS_ISP_WEIGHT = 0.05
-SCORE_STABILITY_WEIGHT = 0.05
-SCORE_VPS_CDN_WEIGHT_FALLBACK = 0.25
-SCORE_VPS_SPEED_WEIGHT_FALLBACK = 0.25
+SCORE_USER_PATH_LAT_WEIGHT = 0.40
+SCORE_USER_PATH_SPEED_WEIGHT = 0.10
+SCORE_CROSS_ISP_WEIGHT = 0.10
+SCORE_STABILITY_WEIGHT = 0.10
+SCORE_VPS_CDN_WEIGHT_FALLBACK = 0.30
+SCORE_VPS_SPEED_WEIGHT_FALLBACK = 0.20
 SCORE_CROSS_ISP_WEIGHT_FALLBACK = 0.20
 SCORE_STABILITY_WEIGHT_FALLBACK = 0.30
 CROSS_ISP_TELECOM_WEIGHT = 0.45
@@ -808,9 +813,15 @@ def calculate_composite_score(perf, current_latency=None, user_probe_result=None
                              google_result=None, isp_type='unknown',
                              user_path_result=None, cross_isp_score=None):
     """
-    [TRAE SOLO CN] v4.10.6 用户路径+三网均衡评分
-    用户路径可用: VPS延迟(15%) + VPS速度(15%) + 用户路径延迟(25%) + 用户路径速度(25%) + 三网均衡(15%) + 稳定性(5%)
-    用户路径不可用: VPS延迟(25%) + VPS速度(25%) + 三网均衡(30%) + 稳定性(20%)
+    [TRAE SOLO CN] v4.15.17 延迟优先综合评分
+    用户路径可用: VPS延迟(20%) + VPS速度(10%) + 用户路径延迟(40%) + 用户路径速度(10%) + 三网均衡(10%) + 稳定性(10%)
+    用户路径不可用: VPS延迟(30%) + VPS速度(20%) + 三网均衡(20%) + 稳定性(30%)
+
+    设计原则（v4.15.17）：
+      - 延迟优先：用户路径延迟(40%)+VPS延迟(20%)=60%权重决定延迟
+      - 速度达标即可：100Mbps满分，>50Mbps良好，主要看延迟
+      - 延迟分档细化：<50ms→100, <80ms→95, <100ms→85, <120ms→70, <150ms→55
+      - 高延迟重罚：用户路径>250ms→30分, >400ms→0分（避免HKCEPIN 380ms还拿高分）
     """
     if perf is None or perf['total_tests'] == 0:
         return 50.0
@@ -821,29 +832,46 @@ def calculate_composite_score(perf, current_latency=None, user_probe_result=None
     consec_fails = perf['consecutive_fails']
     speed_mbps = perf.get('speed_mbps', 0.0) or 0.0
 
-    # 1. VPS→CDN延迟评分
+    # 1. VPS→CDN延迟评分（细化分档，100ms内为优）
     if avg_lat > 0:
-        vps_cdn_score = max(0, 100 * (1 - avg_lat / 500))
+        if avg_lat < 50:
+            vps_cdn_score = 100
+        elif avg_lat < 80:
+            vps_cdn_score = 95
+        elif avg_lat < 100:
+            vps_cdn_score = 85
+        elif avg_lat < 120:
+            vps_cdn_score = 70
+        elif avg_lat < 150:
+            vps_cdn_score = 55
+        elif avg_lat < 200:
+            vps_cdn_score = 35
+        elif avg_lat < 300:
+            vps_cdn_score = 15
+        else:
+            vps_cdn_score = 0
     else:
         vps_cdn_score = 50
 
-    # 2. VPS→CDN速度评分
-    if speed_mbps >= 50:
+    # 2. VPS→CDN速度评分（100Mbps即满分，细化低端）
+    if speed_mbps >= 200:
         vps_speed_score = 100
+    elif speed_mbps >= 100:
+        vps_speed_score = 95
+    elif speed_mbps >= 50:
+        vps_speed_score = 85
     elif speed_mbps >= 30:
-        vps_speed_score = 80
+        vps_speed_score = 70
     elif speed_mbps >= 10:
-        vps_speed_score = 60
+        vps_speed_score = 50
     elif speed_mbps >= 5:
-        vps_speed_score = 40
+        vps_speed_score = 30
     elif speed_mbps >= 1:
-        vps_speed_score = 20
-    elif speed_mbps > 0:
         vps_speed_score = 10
     else:
         vps_speed_score = 0
 
-    # 3. 用户路径延迟评分
+    # 3. 用户路径延迟评分（细化分档，高延迟重罚）
     user_path_lat_score = 0
     user_path_speed_score = 0
     has_user_path = False
@@ -851,29 +879,37 @@ def calculate_composite_score(perf, current_latency=None, user_probe_result=None
         has_user_path = True
         u_lat = user_path_result.get('latency_ms', 0)
         if u_lat > 0:
-            if u_lat < 150:
+            if u_lat < 50:
                 user_path_lat_score = 100
+            elif u_lat < 80:
+                user_path_lat_score = 95
+            elif u_lat < 100:
+                user_path_lat_score = 85
+            elif u_lat < 120:
+                user_path_lat_score = 70
+            elif u_lat < 150:
+                user_path_lat_score = 55
             elif u_lat < 250:
-                user_path_lat_score = 80
+                user_path_lat_score = 30
             elif u_lat < 400:
-                user_path_lat_score = 50
-            elif u_lat < 600:
-                user_path_lat_score = 20
+                user_path_lat_score = 10
             else:
                 user_path_lat_score = 0
         u_spd = user_path_result.get('speed_mbps', 0) or 0
-        if u_spd >= 50:
+        if u_spd >= 100:
             user_path_speed_score = 100
+        elif u_spd >= 50:
+            user_path_speed_score = 90
         elif u_spd >= 30:
-            user_path_speed_score = 80
+            user_path_speed_score = 75
         elif u_spd >= 10:
-            user_path_speed_score = 60
+            user_path_speed_score = 55
         elif u_spd >= 5:
-            user_path_speed_score = 40
+            user_path_speed_score = 35
         elif u_spd >= 1:
-            user_path_speed_score = 20
+            user_path_speed_score = 15
         elif u_spd > 0:
-            user_path_speed_score = 10
+            user_path_speed_score = 5
 
     # 4. 三网均衡度评分
     if cross_isp_score is not None:
@@ -1982,7 +2018,7 @@ def fetch_cdn_ips():
     
     if CDN_MODE == 'domain_optimized':
         logger.info("[优选域名模式] CDN_MODE=domain_optimized，执行优选域名测速")
-        best_domain = select_best_domain(CDN_OPTIMIZED_DOMAINS, VLESS_WS_PORT)
+        best_domain = select_best_domain(CDN_OPTIMIZED_DOMAINS, VLESS_WS_EDGE_PORT)
         if best_domain:
             db_path_save = init_db()
             if db_path_save:
@@ -2183,7 +2219,11 @@ def fetch_cdn_ips():
     first_stage.sort(key=lambda x: x['latency'])
     
     # 阶段2：只对前30个测速度（节省时间和流量）
-    logger.info(f"\n  阶段2：对前30个IP测速度（共{len(first_stage)}个存活IP）")
+    # v4.15.16 修复：local源（用户投喂 CDN_PREFERRED_IPS）强制进入测速
+    # 原因：用户投喂的好IP在VPS侧延迟排序可能排在30名外，导致 speed_mbps=0、评分=0 被淘汰
+    # 修复：local源IP无条件做速度测试，让它们有评分数据参与公平排序
+    local_count = sum(1 for item in first_stage if 'local' in item['info'].get('sources', []))
+    logger.info(f"\n  阶段2：对前30个IP + {local_count}个local源IP测速度（共{len(first_stage)}个存活IP）")
     tested_results = []
     for i, item in enumerate(first_stage):
         ip = item['ip']
@@ -2192,8 +2232,9 @@ def fetch_cdn_ips():
         user_path_result = None
         cross_isp = None
         trusted_user_source = bool({'local', 'isp_matched'} & set(info.get('sources', [])))
-        
-        if i < 30:
+        is_local_source = 'local' in info.get('sources', [])
+
+        if i < 30 or is_local_source:
             if i > 0:
                 time.sleep(random.uniform(2, 3))
             

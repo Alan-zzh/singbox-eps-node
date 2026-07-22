@@ -53,7 +53,7 @@ anytls_pass = env_vars.get('ANYTLS_PASSWORD', '') or trojan_pass
 tuic_pass = env_vars.get('TUIC_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
 tuic_uuid = env_vars.get('TUIC_UUID', str(uuid.uuid4()))
 enable_tuic = env_vars.get('ENABLE_TUIC', 'true').lower() == 'true'  # v4.15.0: 默认 true（加回 TUIC）
-tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 50444
+tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 443
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
 reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
 # v4.10.20.2 兼容过渡：服务器端 short_id 数组同时保留旧客户端用的 abcd1234

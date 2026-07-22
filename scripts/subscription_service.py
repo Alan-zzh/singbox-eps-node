@@ -77,14 +77,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from config import (
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
-        VLESS_WS_PORT, VLESS_UPGRADE_PORT, TROJAN_WS_PORT, TUIC_PORT, SOCKS5_PORT,
+        VLESS_WS_PORT, VLESS_WS_EDGE_PORT, VLESS_UPGRADE_PORT,
+        TROJAN_WS_PORT, TROJAN_WS_EDGE_PORT, TUIC_PORT, SOCKS5_PORT,
         TROJAN_TCP_PORT, ANYTLS_PORT, ANYTLS_PASSWORD,
         REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
         AI_SOCKS5_ROUTING, AI_SOCKS5_POOL, COUNTRY_CODE, SUB_TOKEN, get_sub_domain, BASE_DIR,
         CDN_PREFERRED_IPS, CDN_IP_BLACKLIST, CDN_IP_HARD_REJECT, CDN_MODE, CDN_OPTIMIZED_DOMAINS,
         HK_DIRECT_MODE,
-        DEPLOY_MODE, CDN_MODE_ENABLED, DIRECT_MODE_ENABLED
+        DEPLOY_MODE, CDN_MODE_ENABLED, DIRECT_MODE_ENABLED,
+        TRAFFIC_RESET_DAY, TRAFFIC_TOTAL_GB, TRAFFIC_TOTAL_BYTES, TRAFFIC_AGGREGATE_ENDPOINTS
     )
     from logger import get_logger
 except ImportError:
@@ -99,10 +101,12 @@ except ImportError:
     DB_FILE = os.path.join(DATA_DIR, 'singbox.db')
     SUB_PORT = int(os.getenv('SUB_PORT', '2087'))
     VLESS_WS_PORT = int(os.getenv('VLESS_WS_PORT', '8443'))
+    VLESS_WS_EDGE_PORT = 443
     VLESS_UPGRADE_PORT = int(os.getenv('VLESS_UPGRADE_PORT', '2053'))
     TROJAN_WS_PORT = int(os.getenv('TROJAN_WS_PORT', '2083'))
+    TROJAN_WS_EDGE_PORT = 443
     ANYTLS_PORT = int(os.getenv('ANYTLS_PORT', '2096'))
-    TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
+    TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 443
     SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '1080'))
     # v4.15.8: VLESS_GRPC_PORT 已删除（v4.15.0 移除 gRPC 协议）
     TROJAN_TCP_PORT = int(os.getenv('TROJAN_TCP_PORT', '0')) or 50443
@@ -113,7 +117,7 @@ except ImportError:
     CDN_MODE = os.getenv('CDN_MODE', 'ip_optimized')
     CDN_OPTIMIZED_DOMAINS = [d.strip() for d in os.getenv('CDN_OPTIMIZED_DOMAINS', 'icook.hk,icook.tw,cf.090227.xyz').split(',') if d.strip()]
     SOCKS5_USER = os.getenv('SOCKS5_USER', '')
-    SOCKS5_PASS = os.getenv('SOCKS5_PASS', '')
+    SOCKS5_PASS = os.getenv('SOCKS5_PASSWORD', '') or os.getenv('SOCKS5_PASS', '')
     REALITY_SHORT_ID = os.getenv('REALITY_SHORT_ID') or __import__('secrets').token_hex(8)
     REALITY_DEST = os.getenv('REALITY_DEST', 'www.apple.com:443')
     REALITY_SNI = os.getenv('REALITY_SNI', 'www.apple.com')
@@ -129,9 +133,8 @@ except ImportError:
     CDN_PREFERRED_IPS = []
     CDN_IP_BLACKLIST = []
     CDN_IP_HARD_REJECT = {'latency_ms': 500, 'packet_loss_rate': 0.3, 'download_speed_mbps': 5}
-    # v4.15.2: HK1 判断改为基于 CF_DOMAIN 域名前缀（hk1.），禁止用 COUNTRY_CODE
-    # HK 与 HK1 地理都在香港，COUNTRY_CODE 无法区分；hk1. 才是直连（香港阿里云）
-    _hk_direct_fallback = (os.getenv('CF_DOMAIN', '') or '').strip().lower().startswith('hk1.')
+    # HK1/HK2 必须按域名前缀识别为直连，禁止用地理 COUNTRY_CODE。
+    _hk_direct_fallback = (os.getenv('CF_DOMAIN', '') or '').strip().lower().startswith(('hk1.', 'hk2.'))
     _env_dm = os.getenv('DEPLOY_MODE', '').lower().strip()
     if _env_dm in ('cdn', 'direct'):
         DEPLOY_MODE = _env_dm
@@ -160,9 +163,9 @@ CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
 
 # v4.15.0: HK_DIRECT_MODE 作为 legacy 标志从 config.py 导入
 # 实际逻辑以 CDN_MODE_ENABLED / DIRECT_MODE_ENABLED 为准
-# v4.15.2: fallback 改为基于 CF_DOMAIN 域名前缀（hk1.），禁止用 COUNTRY_CODE
+# fallback 基于 CF_DOMAIN 域名前缀（hk1./hk2.），禁止用 COUNTRY_CODE
 if 'HK_DIRECT_MODE' not in dir():
-    HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith('hk1.')
+    HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith(('hk1.', 'hk2.'))
 
 # 标准 6 节点 SOP：Reality / Trojan-TCP / anyTLS / TUIC + WS-CDN / Trojan-WS-CDN
 #   full     = 完整 6 节点（含 anyTLS anytls:// + TUIC v5 tuic:// URI）
@@ -531,7 +534,8 @@ EXTERNAL_SUBS = os.getenv('EXTERNAL_SUBS', '')
 
 COUNTRY_NAME_MAP = {
     'SG': '新加坡', 'JP': '日本', 'US': '美国', 'UK': '英国',
-    'DE': '德国', 'HK': '香港', 'TW': '台湾', 'KR': '韩国',
+    'DE': '德国', 'HK': '香港', 'HK1': '香港1', 'HK2': '香港2',
+    'TW': '台湾', 'KR': '韩国',
     'CA': '加拿大', 'AU': '澳洲', 'NL': '荷兰', 'FR': '法国',
 }
 
@@ -550,7 +554,7 @@ def init_db():
                 value TEXT
             )
         """)
-        # [Codex] 按月流量统计表（每月14号更新baseline，不清零iptables）
+        # 按月流量统计表（按 TRAFFIC_RESET_DAY 更新 baseline，不清零 iptables）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS traffic_stats (
                 key TEXT PRIMARY KEY,
@@ -695,10 +699,11 @@ def check_and_reset_month():
                 conn.commit()
                 return
 
-        # 判断是否需要重置：月份变了，或者今天是14号且本月还没重置过
+        # 判断是否需要重置：月份变了，或者今天是重置日且本月还没重置过
+        # v4.15.19: 使用 TRAFFIC_RESET_DAY 配置（原硬编码 14）
         if stored_month != current_month:
             need_reset = True
-        elif now.day == 14 and not last_reset.startswith(current_month):
+        elif now.day == TRAFFIC_RESET_DAY and not last_reset.startswith(current_month):
             need_reset = True
 
         if need_reset:
@@ -777,7 +782,7 @@ def get_traffic_stats():
         'bytes_used': bytes_used,
         'mb_used': round(bytes_used / (1024 * 1024), 2),
         'gb_used': round(bytes_used / (1024 * 1024 * 1024), 2),
-        'reset_day': 14,
+        'reset_day': TRAFFIC_RESET_DAY,
         'last_reset': get_last_reset_date()
     }
 
@@ -1175,7 +1180,7 @@ def generate_all_links(capability='full'):
             'allowInsecure': '1'
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=True)}")
+        links.append(f"vless://{VLESS_WS_UUID}@{vless_ws_addr}:{VLESS_WS_EDGE_PORT}?{param_str}#{share_fragment('VLESS-WS', cdn=True)}")
 
         # 4. Trojan-WS (CDN)
         params = {
@@ -1188,7 +1193,7 @@ def generate_all_links(capability='full'):
             'host': ws_sni,
         }
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
-        links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=True)}")
+        links.append(f"trojan://{TROJAN_PASSWORD}@{trojan_ws_addr}:{TROJAN_WS_EDGE_PORT}?{param_str}#{share_fragment('Trojan-WS', cdn=True)}")
 
     # 5. anyTLS (直连) - 仅 full 能力客户端输出（anytls:// 非标准URI，纯Xray内核客户端不认识）
     if include_advanced:
@@ -1470,7 +1475,7 @@ def generate_singbox_config(capability='full'):
                 "type": "vless",
                 "tag": node_name("VLESS-WS", cdn=True),
                 "server": vless_ws_addr,
-                "server_port": VLESS_WS_PORT,
+                "server_port": VLESS_WS_EDGE_PORT,
                 "uuid": VLESS_WS_UUID,
                 "packet_encoding": "xudp",
                 "tcp_multi_path": False,
@@ -1501,7 +1506,7 @@ def generate_singbox_config(capability='full'):
                 "type": "trojan",
                 "tag": node_name("Trojan-WS", cdn=True),
                 "server": trojan_ws_addr,
-                "server_port": TROJAN_WS_PORT,
+                "server_port": TROJAN_WS_EDGE_PORT,
                 "password": TROJAN_PASSWORD,
                 "tcp_multi_path": False,
                 "multiplex": {
@@ -1913,7 +1918,7 @@ def generate_clash_config(capability='full'):
             "name": node_name("VLESS-WS", cdn=True),
             "type": "vless",
             "server": vless_ws_addr,
-            "port": VLESS_WS_PORT,
+            "port": VLESS_WS_EDGE_PORT,
             "uuid": VLESS_WS_UUID,
             "tls": True,
             "udp": True,
@@ -1936,7 +1941,7 @@ def generate_clash_config(capability='full'):
             "name": node_name("Trojan-WS", cdn=True),
             "type": "trojan",
             "server": trojan_ws_addr,
-            "port": TROJAN_WS_PORT,
+            "port": TROJAN_WS_EDGE_PORT,
             "password": TROJAN_PASSWORD,
             "tls": True,
             "udp": True,
@@ -2401,14 +2406,143 @@ def create_app():
     def traffic_api():
         """流量统计API（不加token认证，铁律13）
         返回当月流量使用情况JSON
+        v4.15.19: 使用 TRAFFIC_TOTAL_GB / TRAFFIC_TOTAL_BYTES 配置（原硬编码 900GB）
         """
         stats = get_traffic_stats()
-        stats['total_bytes'] = 900 * 1024 * 1024 * 1024
-        stats['total_gb'] = 900
+        stats['total_bytes'] = TRAFFIC_TOTAL_BYTES
+        stats['total_gb'] = TRAFFIC_TOTAL_GB
         stats['remaining_bytes'] = max(stats['total_bytes'] - stats['bytes_used'], 0)
         stats['remaining_gb'] = round(stats['remaining_bytes'] / (1024**3), 2)
         stats['usage_percent'] = round(stats['bytes_used'] / stats['total_bytes'] * 100, 2) if stats['total_bytes'] > 0 else 0
+        stats['server_name'] = get_country_name()
+        stats['server_code'] = COUNTRY_CODE
+        stats['sub_domain'] = get_sub_domain()
         return jsonify(stats)
+
+    @app.route('/api/traffic-summary')
+    def traffic_summary_api():
+        """跨服务器流量汇总API（v4.15.19）
+        并发拉取 TRAFFIC_AGGREGATE_ENDPOINTS 中所有端点的 /api/traffic，汇总返回整体流量。
+        本机数据直接调用 get_traffic_stats()，其他服务器通过 HTTPS 拉取。
+        超时 5 秒，失败的单台服务器标记为 unreachable。
+        """
+        import urllib.request
+        import ssl
+        import concurrent.futures
+
+        # 本机数据
+        local_stats = get_traffic_stats()
+        local_data = {
+            'server_name': get_country_name(),
+            'server_code': COUNTRY_CODE,
+            'sub_domain': get_sub_domain(),
+            'bytes_used': local_stats['bytes_used'],
+            'gb_used': local_stats['gb_used'],
+            'total_bytes': TRAFFIC_TOTAL_BYTES,
+            'total_gb': TRAFFIC_TOTAL_GB,
+            'remaining_bytes': max(TRAFFIC_TOTAL_BYTES - local_stats['bytes_used'], 0),
+            'remaining_gb': round(max(TRAFFIC_TOTAL_BYTES - local_stats['bytes_used'], 0) / (1024**3), 2),
+            'usage_percent': round(local_stats['bytes_used'] / TRAFFIC_TOTAL_BYTES * 100, 2) if TRAFFIC_TOTAL_BYTES > 0 else 0,
+            'reset_day': TRAFFIC_RESET_DAY,
+            'last_reset': local_stats['last_reset'],
+            'reachable': True,
+            'error': None,
+        }
+
+        # 远端服务器列表（排除本机 sub_domain）
+        local_sub = get_sub_domain()
+        remote_endpoints = [ep for ep in TRAFFIC_AGGREGATE_ENDPOINTS if ep and not ep.startswith(local_sub)]
+
+        def fetch_remote(endpoint):
+            # 远端 endpoint 已在 remote_endpoints 过滤掉本机，这里只处理真正的远端
+            url = f'https://{endpoint}/api/traffic'
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'singbox-traffic-aggregator/1.0'})
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+
+                    def _to_int(v, default=0):
+                        """字节类字段转 int（防 null/字符串导致 sum() 异常）"""
+                        try:
+                            return int(v) if v is not None else default
+                        except (TypeError, ValueError):
+                            return default
+
+                    def _to_float(v, default=0.0):
+                        """GB/百分比类字段转 float（保留小数精度）"""
+                        try:
+                            return float(v) if v is not None else default
+                        except (TypeError, ValueError):
+                            return default
+
+                    return {
+                        'server_name': data.get('server_name', endpoint) or endpoint,
+                        'server_code': data.get('server_code', '?') or '?',
+                        'sub_domain': data.get('sub_domain', endpoint.split(':')[0]) or endpoint.split(':')[0],
+                        'bytes_used': _to_int(data.get('bytes_used')),
+                        'gb_used': _to_float(data.get('gb_used')),
+                        'total_bytes': _to_int(data.get('total_bytes')),
+                        'total_gb': _to_float(data.get('total_gb')),
+                        'remaining_bytes': _to_int(data.get('remaining_bytes')),
+                        'remaining_gb': _to_float(data.get('remaining_gb')),
+                        'usage_percent': _to_float(data.get('usage_percent')),
+                        'reset_day': _to_int(data.get('reset_day'), TRAFFIC_RESET_DAY),
+                        'last_reset': data.get('last_reset', '') or '',
+                        'reachable': True,
+                        'error': None,
+                    }
+            except Exception as e:
+                return {
+                    'server_name': endpoint,
+                    'server_code': '?',
+                    'sub_domain': endpoint.split(':')[0] if ':' in endpoint else endpoint,
+                    'bytes_used': 0,
+                    'gb_used': 0.0,
+                    'total_bytes': 0,
+                    'total_gb': 0.0,
+                    'remaining_bytes': 0,
+                    'remaining_gb': 0.0,
+                    'usage_percent': 0.0,
+                    'reset_day': TRAFFIC_RESET_DAY,
+                    'last_reset': '',
+                    'reachable': False,
+                    'error': str(e)[:100],
+                }
+
+        remote_results = []
+        if remote_endpoints:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(remote_endpoints), 5)) as executor:
+                remote_results = list(executor.map(fetch_remote, remote_endpoints))
+
+        all_servers = [local_data] + remote_results
+
+        # 汇总
+        total_used = sum(s['bytes_used'] for s in all_servers if s['reachable'])
+        total_quota = sum(s['total_bytes'] for s in all_servers if s['reachable'])
+        reachable_count = sum(1 for s in all_servers if s['reachable'])
+        unreachable_count = len(all_servers) - reachable_count
+
+        return jsonify({
+            'summary': {
+                'total_used_bytes': total_used,
+                'total_used_gb': round(total_used / (1024**3), 2),
+                'total_quota_bytes': total_quota,
+                'total_quota_gb': round(total_quota / (1024**3), 2),
+                'total_remaining_bytes': max(total_quota - total_used, 0),
+                'total_remaining_gb': round(max(total_quota - total_used, 0) / (1024**3), 2),
+                'overall_usage_percent': round(total_used / total_quota * 100, 2) if total_quota > 0 else 0,
+                'reachable_servers': reachable_count,
+                'unreachable_servers': unreachable_count,
+                'total_servers': len(all_servers),
+                'reset_day': TRAFFIC_RESET_DAY,
+                'month': local_stats['month'],
+            },
+            'servers': all_servers,
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
 
     @app.route(f'/info/{COUNTRY_CODE}')
     @app.route(f'/info/{COUNTRY_CODE.lower()}')
@@ -2417,15 +2551,20 @@ def create_app():
         """流量信息端点（纯文本，给所有客户端看）
         [TRAE SOLO CN] v4.12.1：v2rayN 不解析 subscription-userinfo header，
         用户需要直接访问此端点查看流量。
+        v4.15.19：使用 TRAFFIC_TOTAL_GB 配置（原硬编码 900GB）；支持 ?summary=1 显示整体流量
         """
         from flask import request as _req
         accept = _req.headers.get('Accept', '')
         stats = get_traffic_stats()
-        total_bytes = 900 * 1024 * 1024 * 1024
+        total_bytes = TRAFFIC_TOTAL_BYTES
         traffic_gb = round(stats['bytes_used'] / (1024**3), 2)
-        total_gb = int(total_bytes / (1024**3))
+        total_gb = TRAFFIC_TOTAL_GB
         remaining_gb = round((total_bytes - stats['bytes_used']) / (1024**3), 2)
         usage_percent = round(stats['bytes_used'] / total_bytes * 100, 2) if total_bytes > 0 else 0
+
+        # ?summary=1 或 Accept: application/json 且带 summary 参数 → 返回整体汇总
+        if _req.args.get('summary') == '1':
+            return _render_traffic_summary(accept)
 
         if 'application/json' in accept:
             return jsonify({
@@ -2441,6 +2580,8 @@ def create_app():
                 'reset_day': stats['reset_day'],
                 'last_reset': stats['last_reset'] or '尚未重置',
                 'reset_note': f'每月{stats["reset_day"]}号 00:03 更新baseline（不清零iptables计数器）',
+                'aggregate_endpoint': f'/api/traffic-summary',
+                'aggregate_hint': '访问 /api/traffic-summary 或 /info?summary=1 查看所有服务器整体流量',
             })
         # 默认纯文本（最通用，v2rayN 浏览器都能看）
         text = (
@@ -2454,6 +2595,10 @@ def create_app():
             f"重置规则: 每月{stats['reset_day']}号 00:03 更新baseline（不清零iptables）\n"
             f"上次重置: {stats['last_reset'] or '尚未重置'}\n"
             f"==========================================\n"
+            f"🌐 查看所有服务器整体流量：\n"
+            f"  - https://{get_sub_domain()}:{SUB_PORT}/info?summary=1\n"
+            f"  - https://{get_sub_domain()}:{SUB_PORT}/api/traffic-summary\n"
+            f"==========================================\n"
             f"提示：\n"
             f"- Clash/Stash/Clash Verge 客户端：打开订阅即可看到流量\n"
             f"- v2rayN/v2rayNG：每次更新订阅看不到流量属客户端限制（不支持 subscription-userinfo header），\n"
@@ -2461,6 +2606,151 @@ def create_app():
             f"- 流量来源：iptables 内核级计数器（重启不丢失）\n"
         )
         return Response(text, mimetype='text/plain; charset=utf-8')
+
+    def _render_traffic_summary(accept='text/plain'):
+        """渲染所有服务器整体流量汇总（v4.15.19）
+        本机数据直接调用 get_traffic_stats()；其他服务器通过 HTTPS 拉取 /api/traffic。
+        """
+        import urllib.request
+        import ssl
+        import concurrent.futures
+
+        local_stats = get_traffic_stats()
+        local_sub = get_sub_domain()
+        local_name = get_country_name()
+
+        # 本机数据直接取，不走 HTTP
+        local_used_bytes = local_stats['bytes_used']
+        local_total_bytes = TRAFFIC_TOTAL_BYTES
+        local_used_gb = local_stats['gb_used']
+        local_remaining_bytes = max(local_total_bytes - local_used_bytes, 0)
+        local_remaining_gb = round(local_remaining_bytes / (1024**3), 2)
+        local_percent = round(local_used_bytes / local_total_bytes * 100, 2) if local_total_bytes > 0 else 0
+
+        local_info = {
+            'name': local_name,
+            'code': COUNTRY_CODE,
+            'endpoint': f'{local_sub}:{SUB_PORT}',
+            'used_gb': local_used_gb,
+            'total_gb': TRAFFIC_TOTAL_GB,
+            'percent': local_percent,
+            'remaining_gb': local_remaining_gb,
+            'last_reset': local_stats['last_reset'],
+            'reset_day': TRAFFIC_RESET_DAY,
+            'reachable': True,
+        }
+
+        # 远端服务器列表（排除本机）
+        remote_endpoints = [ep for ep in TRAFFIC_AGGREGATE_ENDPOINTS if ep and not ep.startswith(local_sub)]
+
+        def fetch_remote(endpoint):
+            url = f'https://{endpoint}/api/traffic'
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'singbox-traffic-summary/1.0'})
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+                    return json.loads(resp.read().decode('utf-8')), None
+            except Exception as e:
+                return None, str(e)[:100]
+
+        def _to_int(v, default=0):
+            """字节类字段转 int（防 null/字符串导致 sum() 异常）"""
+            try:
+                return int(v) if v is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        def _to_float(v, default=0.0):
+            """GB/百分比类字段转 float（保留小数精度）"""
+            try:
+                return float(v) if v is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        remote_results = {}
+        if remote_endpoints:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(remote_endpoints), 5)) as executor:
+                futures = {executor.submit(fetch_remote, ep): ep for ep in remote_endpoints}
+                for fut in concurrent.futures.as_completed(futures):
+                    ep = futures[fut]
+                    data, err = fut.result()
+                    remote_results[ep] = (data, err)
+
+        servers_info = [local_info]
+        total_used = local_used_bytes
+        total_quota = local_total_bytes
+        reachable = 1  # 本机算可达
+        for ep in remote_endpoints:
+            data, err = remote_results.get(ep, (None, '未执行'))
+            if data:
+                reachable += 1
+                total_used += _to_int(data.get('bytes_used'))
+                total_quota += _to_int(data.get('total_bytes'))
+                servers_info.append({
+                    'name': data.get('server_name', ep) or ep,
+                    'code': data.get('server_code', '?') or '?',
+                    'endpoint': ep,
+                    'used_gb': _to_float(data.get('gb_used')),
+                    'total_gb': _to_float(data.get('total_gb')),
+                    'percent': _to_float(data.get('usage_percent')),
+                    'remaining_gb': _to_float(data.get('remaining_gb')),
+                    'last_reset': data.get('last_reset', '') or '',
+                    'reset_day': _to_int(data.get('reset_day'), TRAFFIC_RESET_DAY),
+                    'reachable': True,
+                })
+            else:
+                servers_info.append({
+                    'name': ep, 'code': '?', 'endpoint': ep,
+                    'used_gb': 0.0, 'total_gb': 0.0, 'percent': 0.0, 'remaining_gb': 0.0,
+                    'last_reset': '', 'reset_day': TRAFFIC_RESET_DAY,
+                    'reachable': False, 'error': err,
+                })
+
+        total_remaining = max(total_quota - total_used, 0)
+        overall_percent = round(total_used / total_quota * 100, 2) if total_quota > 0 else 0
+        total_used_gb = round(total_used / (1024**3), 2)
+        total_quota_gb = round(total_quota / (1024**3), 2)
+        total_remaining_gb = round(total_remaining / (1024**3), 2)
+
+        summary_obj = {
+            'month': local_stats['month'],
+            'reset_day': TRAFFIC_RESET_DAY,
+            'total_used_gb': total_used_gb,
+            'total_quota_gb': total_quota_gb,
+            'total_remaining_gb': total_remaining_gb,
+            'overall_usage_percent': overall_percent,
+            'reachable_servers': reachable,
+            'total_servers': len(servers_info),
+            'servers': servers_info,
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+
+        if 'application/json' in accept:
+            return jsonify(summary_obj)
+
+        # 纯文本表格
+        lines = []
+        lines.append(f"🌐 所有服务器整体流量汇总（{local_stats['month']}）")
+        lines.append(f"==========================================")
+        lines.append(f"统计月份: {local_stats['month']}")
+        lines.append(f"重置日: 本机每月 {TRAFFIC_RESET_DAY} 号（各服务器独立配置）")
+        lines.append(f"可达服务器: {reachable}/{len(servers_info)}")
+        lines.append(f"------------------------------------------")
+        lines.append(f"{'服务器':<20} {'已用GB':<10} {'总量GB':<10} {'使用率':<10} {'剩余GB':<10} {'重置日':<6} 状态")
+        lines.append(f"------------------------------------------")
+        for s in servers_info:
+            status = '✅' if s['reachable'] else f'❌ {s.get("error", "")[:30]}'
+            name = (s.get('name') or s['endpoint'])[:18]
+            rd = s.get('reset_day', '?')
+            lines.append(f"{name:<20} {s['used_gb']:<10} {s['total_gb']:<10} {s['percent']:<10} {s['remaining_gb']:<10} {rd:<6} {status}")
+        lines.append(f"------------------------------------------")
+        lines.append(f"{'合计':<20} {total_used_gb:<10} {total_quota_gb:<10} {overall_percent:<10} {total_remaining_gb:<10}")
+        lines.append(f"==========================================")
+        lines.append(f"生成时间: {summary_obj['generated_at']}")
+        lines.append(f"提示：本端点并发拉取所有订阅服务器 /api/traffic 汇总，5秒超时")
+        return Response('\n'.join(lines), mimetype='text/plain; charset=utf-8')
 
     if COUNTRY_CODE.upper() == 'HK1':
         app.add_url_rule('/sub/hk', 'get_subscription_hk_legacy_alias', get_subscription)

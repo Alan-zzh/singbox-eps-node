@@ -58,11 +58,11 @@
 2. **协议增删必须三层同步**：① 订阅层 `subscription_service.py`（Base64 URI + sing-box JSON + Clash YAML 三处生成 + CLIENT_CAPABILITIES + CDN_PROTOCOL_KEYS + cdn_status_api）；② 服务端层 `config_generator.py`（入站块完全删除不能条件保留 `if enable_xxx`）；③ 辅助脚本 `install.sh` + `health_check.sh` + `diagnose.sh` + `cdn_monitor.py` + `cloudflare_proxy_rules.py` + `diagnose_disconnect.py`（端口/防火墙/iptables/CDN IP/诊断字典）。
    - 加回协议时用 `grep -rn "ENABLE_xxx\|enable_xxx"` 扫描所有变量引用点，确认每处都有条件包裹，推荐 `*([{...}] if enable_xxx else [])` 解包语法
    - 每次协议增删强制 `grep` 检查 `node_name("...")` 参数不能含空格（如 `"TUIC-v5"` 不是 `"TUIC v5"`）
-   - CDN WS 节点命名必须带 `-CDN` 后缀：`{CC}-VLESS-WS-CDN` / `{CC}-Trojan-WS-CDN`。Base64 fragment、Clash `name`、sing-box `tag`、proxy-groups 和 `cdn_status_api` 必须一致；HK1 direct 模式不输出 CDN 节点。
+   - CDN WS 节点命名必须带 `-CDN` 后缀：`{CC}-VLESS-WS-CDN` / `{CC}-Trojan-WS-CDN`。Base64 fragment、Clash `name`、sing-box `tag`、proxy-groups 和 `cdn_status_api` 必须一致；HK1/HK2 direct 模式不输出 CDN 节点。
 3. **CRLF 换行污染**：Windows → Linux 的 `.env` 文件行尾 `\r` 会导致 hex 校验失败。所有 `.env` 读取命令加 `tr -d "\r"`。工具链：`deploy.py` pre-flight check + `scripts/deploy_verify.py` + `health_check.sh` 均已处理。
 4. **凭据一致性**：服务端生成随机凭据时必须写入 `.env` 并被订阅端读取。订阅端实现凭据降级——`ENABLE_xxx=true` 且凭据为空时自动 `ENABLE_xxx=False`。
 5. **Debian 12 PEP 668**：`pip3 install` 被阻止 → 用 `apt install python3-xxx` 或 `--break-system-packages`。一键安装脚本必须处理。
-6. **自签证书必须含 SAN**：`openssl -addext "subjectAltName=DNS:域名"`，否则 CF 回源 520。
+6. **证书信任边界**：自签证书必须含 SAN（`openssl -addext "subjectAltName=DNS:域名"`），否则 CF 回源 520；但用户直接访问的灰云订阅域名必须使用 Let's Encrypt 等公网可信证书，禁止用 `curl -k` 掩盖验证失败。一键安装必须从最终落盘 `.env` 读取域名，先同步/验证 DNS，再通过系统 CA 实际下载并校验三类订阅；任一步失败必须非零退出。
 7. **小内存 VPS 必须配 MemoryMin + GOMEMLIMIT 双保险**，414MB 机器还需配 2GB Swap。
 8. **pkill 自杀陷阱**：ExecStartPre 中禁止 `pkill -f "服务名.py"`，改用 `fuser -k 端口/tcp`。
 
@@ -79,17 +79,17 @@
     curl.exe -s -4 --max-time 10 -k --noproxy "*" -o NUL -w "%{http_code}" `
       -H "Upgrade: websocket" -H "Connection: Upgrade" `
       -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" `
-      "https://{domain}:8443/api/v1/stream"
+      "https://{domain}:443/api/v1/stream"
     ```
     - **期望值**：`101`（∉403/520）
     - **铁律**：❌ 禁止 `-o /dev/null`（Windows 不识别，假 403）；❌ 禁止服务器自测（CF 拦服务器 IP，假 403）；❌ 禁止单次 403 就判 CDN 损坏（CF 瞬断重试即可）
     - **真实标准**：`tests/full_audit.py` 全 101 ✅；客户端实际能通 ✅
 ### 三、服务器识别
 
-15. **HK1 与 HK 必须按域名前缀区分，禁止用 COUNTRY_CODE**：
-    - HK（`hk.290372913.xyz`）= CDN 模式（6 节点，橙云）
-    - HK1（`hk1.290372913.xyz`）= 直接模式（4 节点，无 CDN，阿里云 200GB）
-    - `DEPLOY_MODE` 显式设置最高优先，fallback 用 `CF_DOMAIN.startswith('hk1.')`
+15. **HK1/HK2 直连模式必须按域名前缀区分，禁止用 COUNTRY_CODE**：
+    - HK1（`hk1.290372913.xyz`）= 直接模式（4 节点，无 CDN）
+    - HK2（`hk2.290372913.xyz`）= 直接模式（4 节点，无 CDN）
+    - `DEPLOY_MODE` 显式设置最高优先，fallback 用 `CF_DOMAIN.startswith(('hk1.', 'hk2.'))`
 
 ### 四、协议与数据
 

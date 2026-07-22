@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v4.15.0
+# 版本: v4.15.24
 # 用途: 新VPS全自动部署（含双部署模式+系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -24,6 +24,13 @@
 
 set -e
 
+# 非交互模式自适应：保留 set -e，让真实失败返回非零；仅启用 AUTO_YES 跳过交互。
+# 修复场景：bash install.sh < /dev/null 或 SSH 非交互执行时不能因 read -p 退出，
+# 也不能用 set +e 把安装失败伪装成成功。
+if [ ! -t 0 ]; then
+    export AUTO_YES="${AUTO_YES:-1}"
+fi
+
 # 非root用户检查 [Trae CN] 2026-06-04
 if [ "$EUID" -ne 0 ]; then
     echo "[错误] 此脚本必须以root用户运行"
@@ -41,6 +48,7 @@ REPO_URL="https://github.com/Alan-zzh/singbox-eps-node"
 
 CF_DEFAULT_DOMAIN="${CF_DOMAIN:-}"
 CF_DEFAULT_API_TOKEN="${CF_API_TOKEN:-}"
+INSTALL_BUNDLE="${INSTALL_BUNDLE:-}"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -54,6 +62,17 @@ cleanup_broken_xanmod_source() {
             log_warn "检测到损坏的 XanMod APT key/source，先清理后重建"
             rm -f /etc/apt/sources.list.d/xanmod-release.list /etc/apt/keyrings/xanmod-archive-keyring.gpg
         fi
+    fi
+}
+
+cleanup_partial_xanmod_packages() {
+    local partial
+    partial=$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' 2>/dev/null | \
+        awk '$1 ~ /^iU|^iF|^iH/ && ($2 ~ /^linux-xanmod-/ || $2 ~ /^linux-headers-.*xanmod/ || $2 ~ /^linux-image-.*xanmod/){print $2}')
+    if [ -n "$partial" ]; then
+        log_warn "检测到上次磁盘不足遗留的 XanMod 半安装包，先清理后按磁盘容量重装"
+        # shellcheck disable=SC2086
+        dpkg --remove --force-depends --force-remove-reinstreq $partial 2>/dev/null || true
     fi
 }
 
@@ -77,22 +96,79 @@ detect_os() {
     fi
 }
 
+repair_bootstrap_network_and_apt() {
+    log_step "修复新机 DNS 与 APT 源基线..."
+    local probe_host codename
+    probe_host="archive.ubuntu.com"
+    [ "$OS" = "debian" ] && probe_host="deb.debian.org"
+
+    if ! getent ahostsv4 "$probe_host" >/dev/null 2>&1; then
+        log_warn "系统 DNS 无法解析 $probe_host，写入持久化公共 DNS 兜底"
+        mkdir -p /etc/systemd/resolved.conf.d
+        cat > /etc/systemd/resolved.conf.d/singbox-bootstrap-dns.conf << 'EOF'
+[Resolve]
+DNS=223.5.5.5 1.1.1.1
+FallbackDNS=8.8.8.8 119.29.29.29
+EOF
+        systemctl restart systemd-resolved 2>/dev/null || true
+        sleep 2
+        if ! getent ahostsv4 "$probe_host" >/dev/null 2>&1; then
+            cp -a /etc/resolv.conf /etc/resolv.conf.pre-singbox 2>/dev/null || true
+            rm -f /etc/resolv.conf
+            printf 'nameserver 223.5.5.5\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+        fi
+    fi
+
+    # 部分云镜像把 deb822 Suites 错写成 UNAVAILABLE，apt-get update 仍可能返回 0，
+    # 但后续所有包都会显示 no installation candidate。按真实发行版代号原位修复。
+    if grep -Rqs 'UNAVAILABLE' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+        . /etc/os-release
+        codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+        if [ -z "$codename" ]; then
+            case "${ID:-}:${VERSION_ID:-}" in
+                ubuntu:24.04) codename="noble" ;;
+                ubuntu:22.04) codename="jammy" ;;
+                debian:12) codename="bookworm" ;;
+                *) log_error "无法从 /etc/os-release 推导 APT 发行版代号"; return 1 ;;
+            esac
+        fi
+        while IFS= read -r source_file; do
+            cp -a "$source_file" "${source_file}.pre-singbox" 2>/dev/null || true
+            sed -i "s/UNAVAILABLE/${codename}/g" "$source_file"
+            log_info "已修复 APT 源: $source_file -> $codename"
+        done < <(grep -Rls 'UNAVAILABLE' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null)
+    fi
+
+    getent ahostsv4 "$probe_host" >/dev/null 2>&1 || {
+        log_error "DNS 修复后仍无法解析 $probe_host"
+        return 1
+    }
+}
+
 update_system() {
     log_step "【阶段1-步骤1/4】更新系统+安装语言包..."
     cleanup_broken_xanmod_source
+    cleanup_partial_xanmod_packages
+    # 云镜像常带自定义 sudoers/sshd 配置；非交互安装统一保留现有配置，
+    # 并先收口上一次中断的 dpkg 状态，避免 conffile prompt 读到 EOF。
+    DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold --configure -a
     log_info "更新软件源..."
-    apt-get update -y
+    apt-get update --error-on=any -o Acquire::Retries=3
     log_info "升级系统已安装的包..."
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+    DEBIAN_FRONTEND=noninteractive apt-get \
+        -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y
     log_info "安装语言包和基础工具..."
     if [ "$OS" = "ubuntu" ]; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
             locales language-pack-en-base language-pack-zh-hans \
             sudo gnupg2 ca-certificates lsb-release
     else
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
             locales sudo gnupg2 ca-certificates lsb-release
     fi
+    apt-get clean
     locale-gen en_US.UTF-8 2>/dev/null || true
     update-locale LANG=en_US.UTF-8 2>/dev/null || true
     timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
@@ -101,10 +177,12 @@ update_system() {
 
 install_dependencies() {
     log_step "【阶段1-步骤2/4】安装运行依赖..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive apt-get \
+        -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
         curl wget unzip python3 python3-pip python3-venv \
         cron iptables-persistent sqlite3 dnsutils openssl \
         net-tools procps iproute2 psmisc
+    apt-get clean
     log_info "运行依赖安装完成"
 }
 
@@ -247,14 +325,37 @@ install_bbrv3_kernel() {
     echo "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org ${codename} main" > /etc/apt/sources.list.d/xanmod-release.list
 
     apt-get update -y
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"; then
-        log_info "BBRv3 内核包已安装: $pkg"
+    local install_pkg="$pkg"
+    local free_root_mb
+    free_root_mb=$(df -Pm / | awk 'NR==2{print $4}')
+    if [ "$free_root_mb" -lt 1400 ]; then
+        local image_pkg
+        image_pkg=$(apt-cache depends "$pkg" 2>/dev/null | awk '/Depends: linux-image-/{print $2; exit}')
+        if [ -n "$image_pkg" ]; then
+            install_pkg="$image_pkg"
+            log_warn "根分区仅剩 ${free_root_mb}MB，改为只安装 XanMod 内核 image（不安装约600MB编译 headers）: $image_pkg"
+        fi
+    fi
+    if [ "$install_pkg" != "$pkg" ]; then
+        local image_kb required_mb
+        image_kb=$(apt-cache show "$install_pkg" 2>/dev/null | awk '/^Installed-Size:/{print $2; exit}')
+        required_mb=$(( ${image_kb:-0} / 1024 + 230 ))
+        if [ "$free_root_mb" -lt "$required_mb" ]; then
+            log_warn "XanMod image 预计需要 ${required_mb}MB（含下载缓存和安全余量），当前仅 ${free_root_mb}MB；保留系统 BBR+FQ，避免写满根分区"
+            return 0
+        fi
+    fi
+    if DEBIAN_FRONTEND=noninteractive apt-get \
+        -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+        --no-install-recommends install -y "$install_pkg"; then
+        apt-get clean
+        log_info "BBRv3 内核包已安装: $install_pkg"
         if ! uname -r | grep -qi "xanmod"; then
             touch /var/run/reboot-required 2>/dev/null || true
             log_warn "BBRv3 内核已安装但尚未运行；需要重启后生效。当前内核: $(uname -r)"
         fi
     else
-        log_warn "安装 $pkg 失败，保留系统 BBR+FQ"
+        log_warn "安装 $install_pkg 失败，保留系统 BBR+FQ"
     fi
 }
 
@@ -429,7 +530,12 @@ install_singbox() {
         echo -e "  1) 卸载重装（清除所有数据：配置/证书/流量记录/服务，全新安装）"
         echo -e "  2) 保留当前版本（默认，直接继续）"
         echo ""
-        read -p "  请输入选择 [1/2]（默认2）: " SINGBOX_CHOICE
+        if [ "${AUTO_YES:-0}" = "1" ]; then
+            SINGBOX_CHOICE=2
+            log_info "非交互模式保留当前 Singbox 版本"
+        else
+            read -p "  请输入选择 [1/2]（默认2）: " SINGBOX_CHOICE
+        fi
         SINGBOX_CHOICE=${SINGBOX_CHOICE:-2}
 
         if [ "$SINGBOX_CHOICE" = "1" ]; then
@@ -443,8 +549,9 @@ install_singbox() {
                 for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD ANYTLS_PASSWORD \
                              REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID \
                              COUNTRY_CODE DEPLOY_MODE \
+                             ENABLE_SOCKS5 SOCKS5_PORT SOCKS5_USER SOCKS5_PASSWORD \
                              CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
-                             AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
+                             AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_POOL AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
                              TG_ADMIN_CHAT_ID WARP_UNLOCK WARP_PRIVATE_KEY WARP_PEER_PUBLIC_KEY \
                              WARP_PEER_ENDPOINT WARP_CLIENT_IPV4 WARP_CLIENT_IPV6 WARP_RESERVED \
                              ENABLE_TUIC; do
@@ -486,7 +593,7 @@ install_singbox() {
         *)       log_error "不支持的架构: $ARCH"; exit 1 ;;
     esac
 
-    SINGBOX_VER="1.13.13"
+    SINGBOX_VER="1.13.14"
     SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${SINGBOX_ARCH}.tar.gz"
     log_info "下载 Singbox v${SINGBOX_VER} (${SINGBOX_ARCH})..."
     cd /tmp
@@ -508,7 +615,11 @@ clone_repo() {
         log_warn "$BASE_DIR 已存在，备份后重新部署..."
         mv "$BASE_DIR" "${BASE_DIR}.bak.$(date +%Y%m%d%H%M%S)"
     fi
-    if command -v git &>/dev/null; then
+    if [ -n "$INSTALL_BUNDLE" ] && [ -f "$INSTALL_BUNDLE" ]; then
+        mkdir -p "$BASE_DIR"
+        tar -xzf "$INSTALL_BUNDLE" -C "$BASE_DIR"
+        log_info "已从本地安装包部署项目: $INSTALL_BUNDLE"
+    elif command -v git &>/dev/null; then
         git clone "$REPO_URL" "$BASE_DIR"
     else
         apt-get install -y git
@@ -521,12 +632,21 @@ clone_repo() {
 setup_python_env() {
     log_step "配置Python环境..."
     cd "$BASE_DIR"
-    pip3 install --break-system-packages --quiet flask python-dotenv pyyaml 2>/dev/null || pip3 install --quiet flask python-dotenv pyyaml 2>/dev/null || apt-get install -y -qq python3-flask python3-dotenv python3-yaml 2>/dev/null || echo "[警告] pip安装flask/python-dotenv/pyyaml失败，部分功能可能异常"
+    # Debian/Ubuntu 优先使用系统包，避免 PEP 668；关键依赖失败必须中止，不能继续假安装。
+    DEBIAN_FRONTEND=noninteractive apt-get \
+        -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+        install -y -qq python3-flask python3-dotenv python3-yaml || \
+        pip3 install --break-system-packages --quiet flask python-dotenv pyyaml
     # 安装gevent（优先apt，降级pip）[Trae CN] 2026-06-04
-    apt-get install -y -qq python3-gevent 2>/dev/null || \
-        pip3 install --break-system-packages --quiet gevent 2>/dev/null || \
-        pip3 install --quiet gevent 2>/dev/null || \
-        echo "[警告] gevent安装失败，订阅服务将使用Flask开发服务器"
+    DEBIAN_FRONTEND=noninteractive apt-get \
+        -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+        install -y -qq python3-gevent 2>/dev/null || \
+        pip3 install --break-system-packages --quiet gevent
+    python3 -c "import flask, dotenv, yaml, gevent" || {
+        log_error "Python关键依赖导入失败"
+        return 1
+    }
+    apt-get clean
     log_info "Python依赖已安装（flask + python-dotenv + pyyaml + gevent）"
 }
 
@@ -549,6 +669,10 @@ generate_uuids_and_passwords() {
                 REALITY_SHORT_ID) REALITY_SHORT_ID="$value" ;;
                 COUNTRY_CODE) COUNTRY_CODE="$value" ;;
                 DEPLOY_MODE) DEPLOY_MODE="$value" ;;
+                ENABLE_SOCKS5) ENABLE_SOCKS5="$value" ;;
+                SOCKS5_PORT) SOCKS5_PORT="$value" ;;
+                SOCKS5_USER) SOCKS5_USER="$value" ;;
+                SOCKS5_PASSWORD) SOCKS5_PASSWORD="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
         chmod 600 "$PASSWORD_BACKUP"
@@ -561,11 +685,22 @@ generate_uuids_and_passwords() {
     TUIC_UUID=${TUIC_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     # v4.14.0 新增：anyTLS 协议密码（独立于 TROJAN_PASSWORD，向后兼容）
     ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
+    # 带认证 SOCKS5 入站默认开启；可用 ENABLE_SOCKS5=false 显式关闭。
+    ENABLE_SOCKS5=${ENABLE_SOCKS5:-true}
+    SOCKS5_PORT=${SOCKS5_PORT:-1080}
+    if [ "$ENABLE_SOCKS5" = "true" ]; then
+        SOCKS5_USER=${SOCKS5_USER:-eps$(python3 -c "import secrets; print(secrets.token_hex(3))")}
+        SOCKS5_PASSWORD=${SOCKS5_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_urlsafe(18))")}
+    else
+        SOCKS5_USER=""
+        SOCKS5_PASSWORD=""
+    fi
     # v4.15.8: REALITY_SHORT_ID（若 .env 已有则保留，否则生成随机值）
     REALITY_SHORT_ID=${REALITY_SHORT_ID:-$(python3 -c "import secrets; print(secrets.token_hex(8))")}
     # 随机端口生成（10000-65535 之间，避免常用端口）
     TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-$(python3 -c "import secrets; print(secrets.randbelow(55536) + 10000)")}
-    TUIC_PORT=${TUIC_PORT:-$(python3 -c "import secrets; print(secrets.randbelow(55536) + 10000)")}
+    # TUIC 使用 UDP 443，与 VLESS-Reality 的 TCP 443 不冲突。
+    TUIC_PORT=${TUIC_PORT:-443}
     # v4.15.8: VLESS_GRPC_PORT 已删除（v4.15.0 移除 gRPC 协议），不再生成
     # 尝试多次获取 SERVER_IP（DNS/网络刚初始化可能失败）
     SERVER_IP=""
@@ -624,16 +759,15 @@ generate_reality_keys() {
 }
 
 select_deploy_mode() {
-    # v4.15.2 铁律：HK1 香港阿里云（域名 hk1.* ）必须直连模式，禁止 CDN
-    # HK（hk.*）和 HK1（hk1.*）地理都在香港，COUNTRY_CODE 无法区分，只能靠域名前缀
-    _hk1_domain=""
+    # HK1/HK2 是固定纯直连节点，必须按域名前缀区分，禁止被地理代码误判为 CDN。
+    _direct_domain=""
     if [ -n "${CF_DOMAIN:-}" ]; then
-        _hk1_domain="$CF_DOMAIN"
+        _direct_domain="$CF_DOMAIN"
     elif [ -f "$BASE_DIR/.env" ]; then
-        _hk1_domain=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        _direct_domain=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || echo "")
     fi
-    if [ -n "$_hk1_domain" ] && echo "$_hk1_domain" | grep -qi '^hk1\.'; then
-        log_info "检测到 HK1 香港阿里云域名 ($_hk1_domain)，强制使用纯直连模式（4节点，无CDN依赖）"
+    if [ -n "$_direct_domain" ] && echo "$_direct_domain" | grep -Eqi '^hk[12]\.'; then
+        log_info "检测到香港直连域名 ($_direct_domain)，强制使用纯直连模式（4节点，无CDN依赖）"
         DEPLOY_MODE="direct"
         return
     fi
@@ -689,20 +823,25 @@ create_env_file() {
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
     # 确保 DEPLOY_MODE 有值（向后兼容：旧版本无此字段时默认cdn）
     DEPLOY_MODE=${DEPLOY_MODE:-cdn}
-    AI_SOCKS5_SERVER=""
-    AI_SOCKS5_PORT=""
-    AI_SOCKS5_USER=""
-    AI_SOCKS5_PASS=""
-    AI_SOCKS5_ROUTING="off"
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  AI住宅代理配置（可选）${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  配置后，AI网站（ChatGPT/Claude/Gemini等）流量自动走SOCKS5代理"
-    echo -e "  X/推特/groK不走代理，直连"
-    echo -e "  如果没有代理节点，直接回车跳过即可"
-    echo ""
-    read -p "  是否配置AI住宅代理？(y/N): " SETUP_AI
+    # 保留调用方预置的 AI SOCKS5 参数；非交互安装不再清空已有配置。
+    AI_SOCKS5_SERVER="${AI_SOCKS5_SERVER:-}"
+    AI_SOCKS5_PORT="${AI_SOCKS5_PORT:-}"
+    AI_SOCKS5_USER="${AI_SOCKS5_USER:-}"
+    AI_SOCKS5_PASS="${AI_SOCKS5_PASS:-}"
+    AI_SOCKS5_POOL="${AI_SOCKS5_POOL:-}"
+    AI_SOCKS5_ROUTING="${AI_SOCKS5_ROUTING:-off}"
+    SETUP_AI="n"
+    if [ "${AUTO_YES:-0}" != "1" ] && [ -z "$AI_SOCKS5_SERVER" ] && [ -z "$AI_SOCKS5_POOL" ]; then
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  AI住宅代理配置（可选）${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  配置后，AI网站（ChatGPT/Claude/Gemini等）流量自动走SOCKS5代理"
+        echo -e "  X/推特/groK不走代理，直连"
+        echo -e "  如果没有代理节点，直接回车跳过即可"
+        echo ""
+        read -p "  是否配置AI住宅代理？(y/N): " SETUP_AI
+    fi
     if [[ "$SETUP_AI" =~ ^[Yy]$ ]]; then
         read -p "  SOCKS5服务器地址: " AI_SOCKS5_SERVER
         read -p "  SOCKS5端口: " AI_SOCKS5_PORT
@@ -725,8 +864,10 @@ create_env_file() {
             AI_SOCKS5_USER=""
             AI_SOCKS5_PASS=""
         fi
-    else
+    elif [ -z "$AI_SOCKS5_SERVER" ] && [ -z "$AI_SOCKS5_POOL" ]; then
         log_info "跳过AI住宅代理配置（后续可手动编辑.env）"
+    else
+        log_info "使用预置 AI SOCKS5 配置，路由状态: $AI_SOCKS5_ROUTING"
     fi
     WARP_UNLOCK="off"
     if [ "${AUTO_YES:-0}" != "1" ]; then
@@ -776,26 +917,30 @@ create_env_file() {
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         if [ "$DEPLOY_MODE" = "direct" ]; then
-            echo -e "${CYAN}  域名配置（直连模式下可选）${NC}"
+            echo -e "${CYAN}  域名配置（直连订阅必须配置）${NC}"
             echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo -e "  直连模式下域名可选，无域名则使用自签名证书"
-            read -p "  域名（留空使用IP+自签名证书）: " CF_DOMAIN_INPUT
+            echo -e "  域名用于签发客户端可信证书；不再允许静默使用自签名证书"
+            read -p "  域名（必填）: " CF_DOMAIN_INPUT
         else
-            echo -e "${CYAN}  Cloudflare 域名配置（推荐配置，用于CDN和SSL证书）${NC}"
+            echo -e "${CYAN}  Cloudflare 域名配置（CDN和可信订阅证书必填）${NC}"
             echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            read -p "  Cloudflare域名（留空跳过）: " CF_DOMAIN_INPUT
+            read -p "  Cloudflare域名（必填）: " CF_DOMAIN_INPUT
         fi
         if [ -n "$CF_DOMAIN_INPUT" ]; then
-            read -p "  Cloudflare API Token（留空则使用自签名证书）: " CF_API_TOKEN_INPUT
+            read -p "  Cloudflare API Token（留空要求DNS已提前正确配置）: " CF_API_TOKEN_INPUT
         fi
     fi
-    # v4.15.2 铁律：HK1 香港阿里云（域名 hk1.* ）必须直连模式，二次确认防止用户选错
-    if [ -n "$CF_DOMAIN_INPUT" ] && echo "$CF_DOMAIN_INPUT" | grep -qi '^hk1\.'; then
+    if [ -z "$CF_DOMAIN_INPUT" ]; then
+        log_error "CF_DOMAIN 不能为空：可信 HTTPS 订阅必须使用可验证域名"
+        return 1
+    fi
+    # HK1/HK2 铁律：二次确认，防止交互选择或旧环境把香港直连节点切成 CDN。
+    if echo "$CF_DOMAIN_INPUT" | grep -Eqi '^hk[12]\.'; then
         if [ "$DEPLOY_MODE" != "direct" ]; then
-            log_warn "检测到 HK1 香港阿里云域名 ($CF_DOMAIN_INPUT)，强制切换为纯直连模式（HK1 禁用 CDN）"
+            log_warn "检测到香港直连域名 ($CF_DOMAIN_INPUT)，强制切换为纯直连模式（禁用 CDN）"
             DEPLOY_MODE="direct"
         else
-            log_info "已确认 HK1 香港阿里云域名 ($CF_DOMAIN_INPUT) 使用纯直连模式"
+            log_info "已确认香港直连域名 ($CF_DOMAIN_INPUT) 使用纯直连模式"
         fi
     fi
     log_info "CF_DOMAIN: ${CF_DOMAIN_INPUT}"
@@ -808,6 +953,7 @@ create_env_file() {
         case "$CF_DOMAIN_INPUT" in
             jp.*)       COUNTRY_CODE="JP" ;;
             hk1.*)      COUNTRY_CODE="HK1" ;;
+            hk2.*)      COUNTRY_CODE="HK2" ;;
             hkcepin.*)  COUNTRY_CODE="HKCEPIN" ;;
             hk.*)       COUNTRY_CODE="HK" ;;
             *)          log_warn "未知 CF_DOMAIN 前缀($CF_DOMAIN_INPUT),COUNTRY_CODE 保持自动检测值: $COUNTRY_CODE" ;;
@@ -849,6 +995,12 @@ TUIC_PORT=${TUIC_PORT}
 # v4.14.0 新增：anyTLS 端口（固定 2096，CF CDN 支持端口）
 ANYTLS_PORT=2096
 
+# ============ 带认证 SOCKS5 入站 ============
+ENABLE_SOCKS5=${ENABLE_SOCKS5}
+SOCKS5_PORT=${SOCKS5_PORT}
+SOCKS5_USER=${SOCKS5_USER}
+SOCKS5_PASSWORD=${SOCKS5_PASSWORD}
+
 # ============ 可选 ============
 CF_API_TOKEN=${CF_API_TOKEN_INPUT}
 COUNTRY_CODE=${COUNTRY_CODE}
@@ -857,6 +1009,7 @@ AI_SOCKS5_SERVER=${AI_SOCKS5_SERVER}
 AI_SOCKS5_PORT=${AI_SOCKS5_PORT}
 AI_SOCKS5_USER=${AI_SOCKS5_USER}
 AI_SOCKS5_PASS=${AI_SOCKS5_PASS}
+AI_SOCKS5_POOL=${AI_SOCKS5_POOL}
 AI_SOCKS5_ROUTING=${AI_SOCKS5_ROUTING}
 TG_BOT_TOKEN=
 TG_ADMIN_CHAT_ID=
@@ -875,10 +1028,15 @@ WARP_PEER_ENDPOINT=162.159.193.10:2408
 WARP_CLIENT_IPV4=
 WARP_CLIENT_IPV6=
 WARP_RESERVED=
+
+# ============ 流量统计 ============
+TRAFFIC_TOTAL_GB=${TRAFFIC_TOTAL_GB:-900}
+TRAFFIC_RESET_DAY=${TRAFFIC_RESET_DAY:-14}
+TRAFFIC_AGGREGATE_ENDPOINTS=${TRAFFIC_AGGREGATE_ENDPOINTS:-}
 EOF
     chmod 600 "$BASE_DIR/.env"
     # v4.15.8: 验证关键变量不为空
-    _CRITICAL_VARS="SERVER_IP VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID ANYTLS_PASSWORD"
+    _CRITICAL_VARS="SERVER_IP CF_DOMAIN VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID ANYTLS_PASSWORD SOCKS5_USER SOCKS5_PASSWORD"
     _VALIDATION_FAILED=false
     for _var in $_CRITICAL_VARS; do
         _val=$(grep "^${_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
@@ -899,10 +1057,87 @@ generate_config() {
     python3 scripts/config_generator.py
 }
 
+setup_subscription_dns() {
+    log_step "同步并验证订阅 DNS..."
+    local dns_domain dns_server_ip dns_mode dns_token dns_zone subscription_host attempt
+    dns_domain=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    dns_server_ip=$(grep '^SERVER_IP=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    dns_mode=$(grep '^DEPLOY_MODE=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    dns_token=$(grep '^CF_API_TOKEN=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+
+    if [ -z "$dns_domain" ] || [ -z "$dns_server_ip" ]; then
+        log_error "CF_DOMAIN/SERVER_IP 缺失，无法建立可信订阅入口"
+        return 1
+    fi
+    dns_mode=${dns_mode:-cdn}
+    dns_zone=$(echo "$dns_domain" | awk -F. 'NF>=2 {print $(NF-1)"."$NF}')
+    if [ -z "$dns_zone" ]; then
+        log_error "无法从 $dns_domain 推导 Cloudflare Zone"
+        return 1
+    fi
+
+    if [ -n "$dns_token" ]; then
+        if ! python3 "$BASE_DIR/scripts/cloudflare_proxy_rules.py" dns-sync \
+            --zone "$dns_zone" --domain "$dns_domain" \
+            --server-ip "$dns_server_ip" --mode "$dns_mode"; then
+            log_error "Cloudflare DNS 自动同步失败，拒绝继续签发错误域名证书"
+            return 1
+        fi
+    else
+        log_warn "未配置 CF_API_TOKEN，只校验已存在的 DNS，不会自动修改"
+    fi
+
+    if [ "$dns_mode" = "direct" ]; then
+        subscription_host="$dns_domain"
+    else
+        subscription_host="sub-${dns_domain}"
+    fi
+    attempt=0
+    while [ "$attempt" -lt 36 ]; do
+        if getent ahostsv4 "$subscription_host" 2>/dev/null | awk '{print $1}' | grep -Fxq "$dns_server_ip"; then
+            log_info "订阅 DNS 已生效: $subscription_host -> $dns_server_ip（灰云直连）"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 36 ] && sleep 5
+    done
+    log_error "等待 180 秒后订阅 DNS 仍未指向本机: $subscription_host -> $dns_server_ip"
+    log_error "请确认该 A 记录为灰云（proxied=false），且没有重复 A 记录"
+    return 1
+}
+
 setup_certificate() {
     log_step "配置SSL证书..."
     cd "$BASE_DIR"
-    python3 scripts/cert_manager.py --cf-cert || python3 scripts/cert_manager.py
+
+    local cert_domain
+    cert_domain=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+
+    # 用户实际下载订阅的域名都是灰云：direct 使用主域名，CDN 模式使用 sub-* 域名。
+    # Cloudflare Origin CA/自签名不被客户端信任，所以只要配置了域名就必须签发 Let's Encrypt。
+    if [ -n "$cert_domain" ]; then
+        if [ ! -x /root/.acme.sh/acme.sh ]; then
+            apt-get clean
+            rm -f -- /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends socat curl ca-certificates
+            curl -fsSL --connect-timeout 15 --max-time 60 https://get.acme.sh -o /tmp/acme-install.sh
+            sh /tmp/acme-install.sh
+            rm -f -- /tmp/acme-install.sh
+        fi
+        /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+        rm -rf "$BASE_DIR/cert"
+        mkdir -p "$BASE_DIR/cert"
+        if ! python3 scripts/cert_manager.py --cf-cert; then
+            log_error "Let's Encrypt 证书签发失败，拒绝回退到客户端不信任的自签名/Origin CA 证书"
+            return 1
+        fi
+        apt-get clean
+        rm -f -- /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
+        return 0
+    fi
+
+    log_error "CF_DOMAIN 为空，拒绝生成客户端不信任的自签名订阅证书"
+    return 1
 }
 
 # v4.15.8: setup_tuic_firewall 已合并到 setup_iptables_traffic_counter
@@ -991,22 +1226,31 @@ setup_health_check_cron() {
     (crontab -l 2>/dev/null | grep -v "health_check.sh"; echo "*/15 * * * * ${BASE_DIR}/scripts/health_check.sh >> ${BASE_DIR}/logs/health_check.log 2>&1") | crontab -
     (crontab -l 2>/dev/null | grep -v "cert_manager.py"; echo "0 3 1 * * /usr/bin/python3 ${BASE_DIR}/scripts/cert_manager.py --renew >> /var/log/singbox.log 2>&1") | crontab -
     (crontab -l 2>/dev/null | grep -v "reset_iptables.sh") | crontab -
-    log_info "定时任务已配置（健康检查每15分钟 + 证书续签每月1号凌晨3点；流量每月14号由订阅服务baseline重置，不清零iptables）"
+    log_info "定时任务已配置（健康检查每15分钟 + 证书续签每月1号凌晨3点；流量按 TRAFFIC_RESET_DAY 更新baseline，不清零iptables）"
 }
 
 setup_swap_and_optimize() {
     log_step "检查内存和Swap..."
     local total_mem=$(free -m | awk '/^Mem:/{print $2}')
     if [ "$total_mem" -lt 1024 ] && [ ! -f /swapfile ]; then
-        log_info "内存 ${total_mem}MB < 1GB，创建2GB Swap..."
-        dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
-        echo '/swapfile none swap sw 0 0' >> /etc/fstab
-        sysctl vm.swappiness=10 >> /dev/null 2>&1 || true
-        grep -q 'vm.swappiness' /etc/sysctl.conf && sed -i 's/vm.swappiness=.*/vm.swappiness=10/' /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf
-        log_info "2GB Swap已创建并启用"
+        # 小磁盘 VPS 不能盲目写 2GB：保留至少 384MB 给系统和日志，Swap 取 256MB~2GB。
+        local free_mb target_swap_mb
+        free_mb=$(df -Pm / | awk 'NR==2{print $4}')
+        target_swap_mb=$((free_mb - 384))
+        [ "$target_swap_mb" -gt 2048 ] && target_swap_mb=2048
+        if [ "$target_swap_mb" -ge 256 ]; then
+            log_info "内存 ${total_mem}MB < 1GB，创建 ${target_swap_mb}MB 自适应 Swap（磁盘可用 ${free_mb}MB）..."
+            fallocate -l "${target_swap_mb}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$target_swap_mb" status=progress
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            grep -q '^/swapfile ' /etc/fstab 2>/dev/null || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            sysctl vm.swappiness=10 >> /dev/null 2>&1 || true
+            grep -q 'vm.swappiness' /etc/sysctl.conf && sed -i 's/vm.swappiness=.*/vm.swappiness=10/' /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+            log_info "${target_swap_mb}MB Swap已创建并启用"
+        else
+            log_warn "磁盘可用仅 ${free_mb}MB，为避免写满系统跳过 Swap；其余内存优化继续执行"
+        fi
     elif [ -f /swapfile ]; then
         log_info "Swap已存在，跳过"
     else
@@ -1064,13 +1308,14 @@ setup_iptables_traffic_counter() {
     # 从 .env 读取端口配置和部署模式
     DEPLOY_MODE_IPT="cdn"
     if [ -f "$BASE_DIR/.env" ]; then
-        VLESS_GRPC_PORT=$(grep "^VLESS_GRPC_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
         TROJAN_TCP_PORT=$(grep "^TROJAN_TCP_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
         DEPLOY_MODE_IPT=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
     fi
     # 默认值
-    VLESS_GRPC_PORT=${VLESS_GRPC_PORT:-50051}
     TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-50443}
+    SOCKS5_PORT_IPT=$(grep "^SOCKS5_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "1080")
+    SOCKS5_USER_IPT=$(grep "^SOCKS5_USER=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
+    SOCKS5_PASSWORD_IPT=$(grep "^SOCKS5_PASSWORD=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
 
     iptables -F INPUT 2>/dev/null || true
     iptables -A INPUT -p tcp --dport 443 -j ACCEPT
@@ -1086,18 +1331,19 @@ setup_iptables_traffic_counter() {
     # v4.14.0 新增：anyTLS 端口（替换已下线的 2053 HTTPUpgrade）
     iptables -A INPUT -p tcp --dport 2096 -j ACCEPT
     iptables -A INPUT -p udp --dport 2096 -j ACCEPT
-    # 动态端口
-    iptables -A INPUT -p tcp --dport $VLESS_GRPC_PORT -j ACCEPT
-    iptables -A INPUT -p udp --dport $VLESS_GRPC_PORT -j ACCEPT
+    if [ -n "$SOCKS5_USER_IPT" ] && [ -n "$SOCKS5_PASSWORD_IPT" ]; then
+        iptables -A INPUT -p tcp --dport "$SOCKS5_PORT_IPT" -j ACCEPT
+        log_info "带认证 SOCKS5 入站防火墙已开放 (TCP:$SOCKS5_PORT_IPT)"
+    fi
+    # Trojan-TCP 动态端口（VLESS-gRPC 已删除，不再开放其历史端口）
     iptables -A INPUT -p tcp --dport $TROJAN_TCP_PORT -j ACCEPT
     iptables -A INPUT -p udp --dport $TROJAN_TCP_PORT -j ACCEPT
     # TUIC v5 端口（仅 ENABLE_TUIC=true 时添加）
-    TUIC_PORT_IPT=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "50444")
+    TUIC_PORT_IPT=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "443")
     _enable_tuic_ipt=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     if [ "${_enable_tuic_ipt:-true}" = "true" ]; then
-        iptables -A INPUT -p tcp --dport $TUIC_PORT_IPT -j ACCEPT
         iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
-        log_info "TUIC v5 防火墙规则已配置 (端口: $TUIC_PORT_IPT, TCP+UDP)"
+        log_info "TUIC v5 防火墙规则已配置 (UDP端口: $TUIC_PORT_IPT)"
     else
         log_info "TUIC v5 已关闭（ENABLE_TUIC=false），跳过防火墙规则"
     fi
@@ -1180,7 +1426,7 @@ verify_installation() {
 
     # v4.15.8: 验证 .env 关键变量
     echo -e "  环境变量检查:"
-    _CRITICAL_VARS="SERVER_IP VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID"
+    _CRITICAL_VARS="SERVER_IP CF_DOMAIN VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID SOCKS5_USER SOCKS5_PASSWORD"
     for _var in $_CRITICAL_VARS; do
         _val=$(grep "^${_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
         if [ -z "$_val" ]; then
@@ -1220,6 +1466,12 @@ verify_installation() {
     else
         CHECK_PORTS="443 8443 2083 2087 2096"
     fi
+    _socks_user=$(grep '^SOCKS5_USER=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2-)
+    _socks_pass=$(grep '^SOCKS5_PASSWORD=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2-)
+    _socks_port=$(grep '^SOCKS5_PORT=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2)
+    if [ -n "$_socks_user" ] && [ -n "$_socks_pass" ]; then
+        CHECK_PORTS="$CHECK_PORTS ${_socks_port:-1080}"
+    fi
     for port in $CHECK_PORTS; do
         if ss -tlnp | grep -q ":$port "; then
             echo -e "    ${GREEN}✅${NC} 端口 $port: 监听中"
@@ -1245,8 +1497,8 @@ verify_installation() {
     if [ "$enable_tuic_check" = "true" ]; then
         tuic_vport=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
         if [ -n "$tuic_vport" ]; then
-            if ss -tulnp | grep -q ":$tuic_vport "; then
-                echo -e "    ${GREEN}✅${NC} 端口 $tuic_vport (TUIC_PORT): TCP+UDP 监听中"
+            if ss -ulnp | grep -q ":$tuic_vport "; then
+                echo -e "    ${GREEN}✅${NC} UDP端口 $tuic_vport (TUIC_PORT): 监听中"
             else
                 echo -e "    ${RED}❌${NC} 端口 $tuic_vport (TUIC_PORT): 未监听"
                 ALL_OK=false
@@ -1255,6 +1507,50 @@ verify_installation() {
     else
         echo -e "    ${YELLOW}⏸️${NC} TUIC v5: 已关闭（ENABLE_TUIC=false）"
     fi
+
+    echo ""
+    echo -e "  订阅端到端检查（系统 CA，禁止 -k）:"
+    _verify_domain=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    _verify_country=$(grep '^COUNTRY_CODE=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    if [ "$DEPLOY_MODE_VERIFY" = "direct" ]; then
+        _verify_host="$_verify_domain"
+    else
+        _verify_host="sub-${_verify_domain}"
+    fi
+    _verify_tmp="/tmp/singbox-subscription-verify.$$"
+    mkdir -p "$_verify_tmp"
+    if curl -fsS --connect-timeout 10 --max-time 30 \
+        --resolve "${_verify_host}:2087:127.0.0.1" \
+        "https://${_verify_host}:2087/sub/${_verify_country}" \
+        -o "$_verify_tmp/base64.txt" \
+        && tr -d '\r\n' < "$_verify_tmp/base64.txt" | base64 -d >/dev/null 2>&1; then
+        echo -e "    ${GREEN}✅${NC} Base64: 可信证书 + HTTP 200 + 可解码"
+    else
+        echo -e "    ${RED}❌${NC} Base64: 下载、证书或内容校验失败"
+        ALL_OK=false
+    fi
+    if curl -fsS --connect-timeout 10 --max-time 30 \
+        --resolve "${_verify_host}:2087:127.0.0.1" \
+        "https://${_verify_host}:2087/singbox/${_verify_country}" \
+        -o "$_verify_tmp/singbox.json" \
+        && python3 -m json.tool "$_verify_tmp/singbox.json" >/dev/null 2>&1; then
+        echo -e "    ${GREEN}✅${NC} sing-box: 可信证书 + HTTP 200 + 合法 JSON"
+    else
+        echo -e "    ${RED}❌${NC} sing-box: 下载、证书或内容校验失败"
+        ALL_OK=false
+    fi
+    if curl -fsS --connect-timeout 10 --max-time 30 \
+        --resolve "${_verify_host}:2087:127.0.0.1" \
+        "https://${_verify_host}:2087/clash/${_verify_country}" \
+        -o "$_verify_tmp/clash.yaml" \
+        && grep -q '^proxies:' "$_verify_tmp/clash.yaml"; then
+        echo -e "    ${GREEN}✅${NC} Clash: 可信证书 + HTTP 200 + 节点配置"
+    else
+        echo -e "    ${RED}❌${NC} Clash: 下载、证书或内容校验失败"
+        ALL_OK=false
+    fi
+    rm -rf -- "$_verify_tmp"
+
     echo ""
     echo -e "  系统优化:"
     if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q "bbr"; then
@@ -1279,6 +1575,7 @@ verify_installation() {
     else
         echo -e "  ${YELLOW}⚠️ 部分服务异常，请检查日志${NC}"
         echo -e "  查看日志: journalctl -u singbox-sub -f"
+        return 1
     fi
 }
 
@@ -1286,6 +1583,8 @@ print_summary() {
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "YOUR_SERVER_IP")
     CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
     COUNTRY=$(grep "^COUNTRY_CODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "US")
+    TRAFFIC_RESET_DAY_SUMMARY=$(grep "^TRAFFIC_RESET_DAY=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r' || echo "14")
+    TRAFFIC_RESET_DAY_SUMMARY=${TRAFFIC_RESET_DAY_SUMMARY:-14}
     DEPLOY_MODE_SUMMARY="cdn"
     if [ -f "$BASE_DIR/.env" ]; then
         DEPLOY_MODE_SUMMARY=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
@@ -1331,7 +1630,7 @@ print_summary() {
     fi
     echo "  首页查看:  https://${STATS_HOST}:2087/"
     echo "  API接口:   https://${CF_DOMAIN:-$SERVER_IP}:2087/api/traffic"
-    echo "  重置规则:  每月14号更新baseline（不清零iptables计数器）"
+    echo "  重置规则:  每月${TRAFFIC_RESET_DAY_SUMMARY}号更新baseline（不清零iptables计数器）"
     echo ""
     if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
         echo "📡 纯直连模式，无CDN依赖"
@@ -1348,8 +1647,10 @@ print_summary() {
     echo "⚡ 系统优化（已自动完成；BBRv3 内核首次启用需重启）:"
     if uname -r | grep -qi "xanmod"; then
         echo "  BBRv3加速:    已启用（XanMod $(uname -r)）"
+    elif dpkg-query -W -f='${db:Status-Abbrev}' 'linux-image-*xanmod*' 2>/dev/null | grep -q '^ii'; then
+        echo "  BBRv3加速:    XanMod image 已安装，重启后生效（当前 $(uname -r)）"
     else
-        echo "  BBRv3加速:    内核已安装则重启后生效（当前 $(uname -r)）"
+        echo "  BBR加速:      已启用 BBR+FQ；XanMod BBRv3 未安装（磁盘空间不足，当前 $(uname -r)）"
     fi
     echo "  FQ公平队列:   已启用（为每个TCP连接独立缓冲）"
     MAIN_IF=$(ip route show default 2>/dev/null | awk '{print $5}' | head -1) || true
@@ -1732,7 +2033,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.0${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.24${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -1799,11 +2100,12 @@ main() {
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.0${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.24${NC}"
             echo "=========================================="
             echo ""
             check_root
             detect_os
+            repair_bootstrap_network_and_apt
             update_system
             install_dependencies
             optimize_system
@@ -1816,6 +2118,7 @@ main() {
             select_deploy_mode
             create_env_file
             generate_config
+            setup_subscription_dns
             setup_certificate
             setup_firewall
             setup_tuic_firewall

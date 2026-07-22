@@ -1,4 +1,6 @@
 .env
+# 同步软件生成的 .env 冲突副本同样可能含凭据，禁止进入 Git
+.sync-conflict-*.env
 cert/
 data/
 logs/

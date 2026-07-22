@@ -86,7 +86,7 @@ check_port_listening() {
     # v4.15.0: TUIC v5 加回，ENABLE_TUIC=true 默认开启
     ENABLE_TUIC_CHK=$(grep "^ENABLE_TUIC=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     if [ "$ENABLE_TUIC_CHK" = "true" ]; then
-        TUIC_CHK_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
+        TUIC_CHK_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "443")
         if ss -ulnp 2>/dev/null | grep -q ":$TUIC_CHK_PORT "; then
             mark_pass "UDP $TUIC_CHK_PORT: 监听中 (TUIC v5)"
         else
@@ -184,11 +184,11 @@ check_port_hopping() {
         return
     fi
 
-    TUIC_FW_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "50444")
+    TUIC_FW_PORT=$(grep "^TUIC_PORT=" /root/singbox-eps-node/.env 2>/dev/null | cut -d'=' -f2 || echo "443")
     if iptables -L INPUT -n | grep -q "$TUIC_FW_PORT"; then
         mark_pass "TUIC v5 防火墙规则: 已配置 (端口 $TUIC_FW_PORT)"
     else
-        mark_fail "TUIC v5 防火墙规则: 缺失" "运行 install.sh 或手动添加: iptables -A INPUT -p tcp --dport $TUIC_FW_PORT -j ACCEPT && iptables -A INPUT -p udp --dport $TUIC_FW_PORT -j ACCEPT"
+        mark_fail "TUIC v5 防火墙规则: 缺失" "运行 install.sh 或手动添加: iptables -A INPUT -p udp --dport $TUIC_FW_PORT -j ACCEPT"
     fi
 }
 

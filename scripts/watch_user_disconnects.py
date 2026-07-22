@@ -25,24 +25,6 @@ except ImportError:
     paramiko = None
 
 
-# 从 .env 动态读取服务器列表
-def _build_servers():
-    """从 .env 读取所有 SSH 凭据构建服务器字典"""
-    env = load_env()
-    servers = {}
-    for k, v in env.items():
-        if k.endswith('_SSH_IP') and v:
-            p = k.replace('_SSH_IP', '').lower()
-            servers[p] = {
-                "host": v,
-                "label": p.upper(),
-                "username": env.get(f'{p.upper()}_SSH_USER', 'root'),
-                "password": env.get(f'{p.upper()}_SSH_PASS', ''),
-            }
-    return servers
-
-SERVERS = _build_servers()
-
 ERROR_PATTERN = "unexpected EOF|EOF|processed invalid connection|timeout|reset|fatal|panic"
 
 
@@ -58,6 +40,26 @@ def load_env():
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
     return values
+
+
+# 从 .env 动态读取服务器列表。必须在 load_env 定义后初始化，避免模块导入即 NameError。
+def _build_servers():
+    """从 .env 读取所有 SSH 凭据构建服务器字典"""
+    env = load_env()
+    servers = {}
+    for k, v in env.items():
+        if k.endswith('_SSH_IP') and v:
+            p = k.replace('_SSH_IP', '').lower()
+            servers[p] = {
+                "host": v,
+                "label": p.upper(),
+                "username": env.get(f'{p.upper()}_SSH_USER', 'root'),
+                "password": env.get(f'{p.upper()}_SSH_PASS', ''),
+            }
+    return servers
+
+
+SERVERS = _build_servers()
 
 
 def resolve_related_ip(explicit_ip=""):

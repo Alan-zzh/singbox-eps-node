@@ -5,23 +5,25 @@
 """
 import subprocess, json, base64, sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 servers = [
-    ('JP', 'sub-jp.290372913.xyz', 'JP', 'jp.290372913.xyz'),
-    ('HK', 'sub-hk.290372913.xyz', 'HK', 'hk.290372913.xyz'),
-    ('HKCEPIN', 'sub-hkcepin.290372913.xyz', 'HKCEPIN', 'hkcepin.290372913.xyz'),
-    ('HK1', 'hk1.290372913.xyz', 'HK1', 'hk1.290372913.xyz'),
+    ('JP', 'sub-jp.290372913.xyz', 'JP', 'jp.290372913.xyz', True),
+    ('HK1', 'hk1.290372913.xyz', 'HK1', 'hk1.290372913.xyz', False),
+    ('HK2', 'hk2.290372913.xyz', 'HK2', 'hk2.290372913.xyz', False),
 ]
 
 all_ok = True
 
-for sname, sub_domain, cc, main_domain in servers:
+for sname, sub_domain, cc, main_domain, is_cdn in servers:
     print(f'\n{"="*60}')
     print(f'  {sname} ({sub_domain}:2087)')
     print(f'{"="*60}')
     
     # 1. /clash/{cc}
     try:
-        r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
+        r = subprocess.run(['curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
                            '-o', 'NUL', '-w', '%{http_code}',
                            f'https://{sub_domain}:2087/clash/{cc}'],
                           capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
@@ -29,7 +31,7 @@ for sname, sub_domain, cc, main_domain in servers:
         ok = code == '200'
         print(f'  /clash/{cc}: HTTP {code} {"OK" if ok else "FAIL"}')
         if ok:
-            r2 = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
+            r2 = subprocess.run(['curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
                                 f'https://{sub_domain}:2087/clash/{cc}'],
                                capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
             # CDN 节点按协议名识别，避免 proxy-groups 或历史命名差异影响架构检查。
@@ -59,7 +61,7 @@ for sname, sub_domain, cc, main_domain in servers:
     
     # 2. /sub/{cc} (Base64 - V2RAYN format)
     try:
-        r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
+        r = subprocess.run(['curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
                            f'https://{sub_domain}:2087/sub/{cc}'],
                           capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
         raw = r.stdout.strip()
@@ -85,7 +87,7 @@ for sname, sub_domain, cc, main_domain in servers:
     
     # 3. /singbox/{cc}
     try:
-        r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
+        r = subprocess.run(['curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
                            '-o', 'NUL', '-w', '%{http_code}',
                            f'https://{sub_domain}:2087/singbox/{cc}'],
                           capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
@@ -99,14 +101,14 @@ for sname, sub_domain, cc, main_domain in servers:
         all_ok = False
     
     # 4. CDN WS 路径测试（主域名，CDN 模式专用）
-    if sname != 'HK1':  # Skip for direct mode
+    if is_cdn:
         for label, domain, port, path in [
-            ('CDN', main_domain, 8443, '/api/v1/stream'),
-            ('CDN', main_domain, 2083, '/api/v1/data'),
+            ('CDN', main_domain, 443, '/api/v1/stream'),
+            ('CDN', main_domain, 443, '/api/v1/data'),
         ]:
             try:
                 r = subprocess.run([
-                    'curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '8',
+                    'curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '8',
                     '-o', 'NUL', '-w', '%{http_code}',
                     '-H', 'Connection: Upgrade',
                     '-H', 'Upgrade: websocket',
@@ -124,9 +126,9 @@ for sname, sub_domain, cc, main_domain in servers:
                 all_ok = False
 
     # 5. 验证 CDN 节点 server 字段使用主域名
-    if sname != 'HK1':
+    if is_cdn:
         try:
-            r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
+            r = subprocess.run(['curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
                                f'https://{sub_domain}:2087/clash/{cc}'],
                               capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')
             yaml_text = r.stdout
@@ -159,7 +161,7 @@ for sname, sub_domain, cc, main_domain in servers:
 
     # 6. V2RAYN UA 测试
     try:
-        r = subprocess.run(['curl.exe', '-s', '-4', '-k', '--noproxy', '*', '--max-time', '10',
+        r = subprocess.run(['curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
                            '-A', 'v2rayN/6.0',
                            f'https://{sub_domain}:2087/sub/{cc}'],
                           capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace')

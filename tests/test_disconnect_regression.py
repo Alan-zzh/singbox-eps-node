@@ -246,6 +246,39 @@ def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_mo
     assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in singbox_tags
 
 
+def test_cdn_nodes_keep_ws_protocols_and_use_edge_443(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    monkeypatch.setattr(subscription_service_module, "get_cdn_ip_for_protocol", lambda key: {
+        "vless_ws_cdn_ip": "1.1.1.1",
+        "vless_upgrade_cdn_ip": "2.2.2.2",
+        "trojan_ws_cdn_ip": "3.3.3.3",
+    }[key])
+
+    clash = subscription_service_module.generate_clash_config()
+    proxies = {proxy["name"]: proxy for proxy in clash["proxies"]}
+    vless = proxies[f"{subscription_service_module.COUNTRY_CODE}-VLESS-WS-CDN"]
+    trojan = proxies[f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN"]
+
+    assert vless["type"] == "vless"
+    assert vless["network"] == "ws"
+    assert vless["tls"] is True
+    assert vless["port"] == 443
+    assert trojan["type"] == "trojan"
+    assert trojan["network"] == "ws"
+    assert trojan["port"] == 443
+
+
+def test_port_defaults_keep_reality_tcp443_and_move_tuic_to_udp443():
+    config_source = (PROJECT_ROOT / "scripts" / "config.py").read_text(encoding="utf-8")
+    generator_source = (PROJECT_ROOT / "scripts" / "config_generator.py").read_text(encoding="utf-8")
+    install_source = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert "SINGBOX_PORT = 443" in config_source
+    assert "TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 443" in config_source
+    assert "tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 443" in generator_source
+    assert "TUIC_PORT=${TUIC_PORT:-443}" in install_source
+
+
 def test_iptables_traffic_rules_count_output_by_source_port():
     source = (PROJECT_ROOT / "scripts" / "subscription_service.py").read_text(encoding="utf-8")
 
@@ -333,7 +366,7 @@ def test_diagnose_disconnect_targets_30_10_3_keepalive_baseline():
 def test_cdn_monitor_preserves_ranked_ip_order_for_assignment():
     source = (PROJECT_ROOT / "scripts" / "cdn_monitor.py").read_text(encoding="utf-8")
 
-    assert "selected_ips = list(ips[:3])" in source
+    assert "selected_ips = list(ips[:2])" in source
     assert "信任 fetch_cdn_ips() 已经产出的顺序" in source
 
 
@@ -416,16 +449,16 @@ def test_deploy_syncs_cdn_monitor_for_runtime_selection():
 
     assert "scripts/cdn_monitor.py" in source
     assert "/opt/singbox-eps-node/scripts/cdn_monitor.py" in source
-    assert "systemctl restart singbox-cdn" in source
+    assert "systemctl restart {svc}" in source
 
 
 def test_cdn_config_uses_stricter_reject_thresholds():
     source = (PROJECT_ROOT / "scripts" / "config.py").read_text(encoding="utf-8")
 
-    assert "'latency_ms': 180" in source
-    assert "'user_path_latency_ms': 120" in source
-    assert "'packet_loss_rate': 0.08" in source
-    assert "'download_speed_mbps': 20" in source
+    assert "'latency_ms': 250" in source
+    assert "'user_path_latency_ms': 200" in source
+    assert "'packet_loss_rate': 0.10" in source
+    assert "'download_speed_mbps': 10" in source
 
 
 def test_cdn_config_contains_user_verified_fast_ips():
@@ -507,7 +540,7 @@ def test_cdn_health_check_refreshes_when_current_ip_user_path_exceeds_hard_rejec
 
     def fake_fetch():
         refreshed["called"] = True
-        return (["2.2.2.2", "3.3.3.3", "4.4.4.4"], None, "telecom")
+        return (["2.2.2.2", "3.3.3.3", "4.4.4.4"], None, "telecom", [])
 
     def fake_assign(ips, **kwargs):
         refreshed["assigned"] = ips == ["2.2.2.2", "3.3.3.3", "4.4.4.4"]

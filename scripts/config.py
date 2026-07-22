@@ -26,7 +26,7 @@ Date: 2026-06-27
   - VLESS_UPGRADE_PORT 保留常量定义以兼容旧 .env，但不再使用
 【v4.15.0 协议栈调整】：
   - 加回 TUIC v5（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
-  - TUIC_PORT 重新启用，默认 50444，ENABLE_TUIC 默认 true
+  - TUIC_PORT 重新启用，默认 UDP 443，ENABLE_TUIC 默认 true
   - v2rayN 6.x+ / v2rayNG 1.x+ 归 full 能力（内置 sing-box 内核，支持 anytls:// 和 tuic://）
 """
 
@@ -130,23 +130,29 @@ CF_DOMAIN = os.getenv('CF_DOMAIN', '') or _load_env_value('CF_DOMAIN', '')
 SUB_PORT = 2087
 SINGBOX_PORT = 443
 VLESS_WS_PORT = 8443
+# CDN 客户端统一走 Cloudflare HTTPS 443；源站仍由 VLESS_WS_PORT 监听 8443。
+VLESS_WS_EDGE_PORT = 443
 # v4.14.0: VLESS_UPGRADE_PORT 保留以兼容旧 .env，但不再使用（HTTPUpgrade 协议已下线）
 VLESS_UPGRADE_PORT = 2053
 TROJAN_WS_PORT = 2083
+# CDN 客户端统一走 Cloudflare HTTPS 443；源站仍由 TROJAN_WS_PORT 监听 2083。
+TROJAN_WS_EDGE_PORT = 443
 ANYTLS_PORT = 2096  # v4.14.0 新增：anyTLS 直连隐蔽协议（固定端口）
-# v4.15.0: TUIC v5 加回（用户要求 TCP+UDP 双协议支持），默认 50444
-TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 50444
+# TUIC 使用 UDP 443，与 VLESS-Reality 的 TCP 443 不冲突。
+TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 443
 # VLESS-gRPC / Trojan-TCP 可配置端口（从 .env 读取，不固定，随机更安全）
 VLESS_GRPC_PORT = int(os.getenv('VLESS_GRPC_PORT', '0')) or 50051
 TROJAN_TCP_PORT = int(os.getenv('TROJAN_TCP_PORT', '0')) or 50443
-SOCKS5_PORT = 1080
+SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '') or _load_env_value('SOCKS5_PORT', '1080') or '1080')
 
 LOCKED_PORTS = {
     'SUB_PORT': SUB_PORT,
     'SINGBOX_PORT': SINGBOX_PORT,
     'VLESS_WS_PORT': VLESS_WS_PORT,
+    'VLESS_WS_EDGE_PORT': VLESS_WS_EDGE_PORT,
     'VLESS_UPGRADE_PORT': VLESS_UPGRADE_PORT,
     'TROJAN_WS_PORT': TROJAN_WS_PORT,
+    'TROJAN_WS_EDGE_PORT': TROJAN_WS_EDGE_PORT,
     'ANYTLS_PORT': ANYTLS_PORT,
     'TUIC_PORT': TUIC_PORT,
     'VLESS_GRPC_PORT': VLESS_GRPC_PORT,
@@ -160,39 +166,39 @@ COUNTRY_CODE = os.getenv('COUNTRY_CODE', 'US')
 # v4.15.9: 流量统计配置（每个服务器独立配置）
 # TRAFFIC_TOTAL_GB = 套餐总流量（GB），默认 900
 # TRAFFIC_RESET_DAY = 每月流量重置日（1-28），默认 14
-TRAFFIC_TOTAL_GB = int(os.getenv('TRAFFIC_TOTAL_GB', '900') or '900')
-TRAFFIC_RESET_DAY = int(os.getenv('TRAFFIC_RESET_DAY', '14') or '14')
+# v4.15.19: 与其他变量一致，补齐 _load_env_value fallback（本地直接运行 python 时也能读 .env）
+TRAFFIC_TOTAL_GB = int(os.getenv('TRAFFIC_TOTAL_GB', '') or _load_env_value('TRAFFIC_TOTAL_GB', '900') or '900')
+TRAFFIC_RESET_DAY = int(os.getenv('TRAFFIC_RESET_DAY', '') or _load_env_value('TRAFFIC_RESET_DAY', '14') or '14')
 # 确保重置日在合法范围
 if TRAFFIC_RESET_DAY < 1:
     TRAFFIC_RESET_DAY = 14
 if TRAFFIC_RESET_DAY > 28:
     TRAFFIC_RESET_DAY = 14
 TRAFFIC_TOTAL_BYTES = TRAFFIC_TOTAL_GB * 1024 * 1024 * 1024
+# v4.15.19: 跨服务器流量汇总端点（逗号分隔的 host:port 列表）
+TRAFFIC_AGGREGATE_ENDPOINTS = [
+    ep.strip() for ep in (os.getenv('TRAFFIC_AGGREGATE_ENDPOINTS', '') or _load_env_value('TRAFFIC_AGGREGATE_ENDPOINTS', '')).split(',')
+    if ep.strip()
+]
 
 # v4.14.0: anyTLS 协议密码（安装时随机生成，与 TROJAN_PASSWORD 独立）
 ANYTLS_PASSWORD = os.getenv('ANYTLS_PASSWORD', '')
 
-# v4.15.2: HK1 香港阿里云节点特殊模式 - 全部直连，无 CDN 节点
-# ⚠️ 铁律（v4.15.2 修正）：判断 HK1 必须基于 CF_DOMAIN 域名前缀（hk1.），禁止用 COUNTRY_CODE。
-#   - HK  与 HK1 地理都在香港，COUNTRY_CODE 都可能是 'HK'，用 COUNTRY_CODE 根本无法区分。
-#   - HK  服务器：hk.290372913.xyz  → CDN  模式（6节点，橙云 proxied=true）
-#   - HK1 服务器：hk1.290372913.xyz → 直连模式（4节点，香港阿里云 200GB 流量）
-#   - 旧逻辑 (COUNTRY_CODE == 'HK' → direct) 会导致：
-#     a) HK1 若 COUNTRY_CODE=HK1 → 不匹配 → 错判为 CDN（用户反馈"老是把 HK1 搞 CDN"）
-#     b) HK  若 COUNTRY_CODE=HK  → 匹配 → 错判为 direct（CDN 节点被砍）
-#   - 正确做法：fallback 只看域名前缀，hk1. 才是直连；DEPLOY_MODE 显式设置优先级最高。
-# v4.15.0: 此标志作为 legacy 向后兼容依据，新部署统一使用 DEPLOY_MODE 控制
-_hk1_domain_fallback = (_load_env_value('CF_DOMAIN', '') or os.getenv('CF_DOMAIN', '') or '').strip().lower().startswith('hk1.')
-HK_DIRECT_MODE = _hk1_domain_fallback
+# HK1/HK2 是固定香港直连节点；只能按域名前缀判断，禁止用地理 COUNTRY_CODE。
+# 此标志仅作旧 .env 缺少 DEPLOY_MODE 时的兼容依据；显式 DEPLOY_MODE 仍有最高优先级。
+_hk_direct_domain_fallback = (
+    _load_env_value('CF_DOMAIN', '') or os.getenv('CF_DOMAIN', '') or ''
+).strip().lower().startswith(('hk1.', 'hk2.'))
+HK_DIRECT_MODE = _hk_direct_domain_fallback
 
 # v4.15.0: 部署模式 dual-stack 支持
 # 'cdn'    = CDN混合模式（6节点：4直连+2WS-CDN，启动singbox-cdn服务）
 # 'direct' = 纯直连模式（4节点：去掉WS-CDN和CDN监控，极简无CF依赖）
-# 向后兼容策略（v4.15.2 修正：基于域名前缀，非 COUNTRY_CODE）：
+# 向后兼容策略（基于域名前缀，非 COUNTRY_CODE）：
 #   - 如果 .env 中显式设置了 DEPLOY_MODE → 遵循显式设置（最高优先级）
 #   - 如果未设置 DEPLOY_MODE（旧部署升级）：
-#     * HK1 节点（CF_DOMAIN 以 hk1. 开头，香港阿里云）→ 默认 direct
-#     * 其他节点（HK/JP/SG 等）→ 默认 cdn
+#     * HK1/HK2（CF_DOMAIN 以 hk1./hk2. 开头）→ 默认 direct
+#     * 其他节点（JP 等）→ 默认 cdn
 _env_deploy_mode = os.getenv('DEPLOY_MODE', '').lower().strip() or _load_env_value('DEPLOY_MODE', '').lower().strip()
 if _env_deploy_mode in ('cdn', 'direct'):
     DEPLOY_MODE = _env_deploy_mode
@@ -395,6 +401,22 @@ CDN_PREFERRED_IPS = [
     '172.64.52.224',
     '162.159.39.230',
     '162.159.38.215',
+    # 新增 - 用户实测低延迟优选IP（2026-07-16 第九批）
+    # 用户反馈：当前优选IP上传速度非常慢，需用这批延时低速度好的IP替换
+    # 部署范围：仅CDN模式服务器（JP/HK/HKCEPIN），HK1直连模式不动
+    '162.159.32.164',
+    '104.18.38.165',
+    '162.159.43.35',
+    '108.162.192.174',
+    '172.64.49.197',
+    '172.64.151.208',
+    '162.159.5.104',
+    '162.159.22.242',
+    '172.64.150.15',
+    '104.18.44.233',
+    '172.64.229.7',
+    '172.64.147.253',
+    '172.64.53.1',
 ]
 
 # v3.0 用户手动标记的黑名单IP（你告诉我哪个不好，我加到这里）
@@ -461,12 +483,16 @@ HUNAN_CT_OPTIMAL_PREFIXES = [
     '8.39.', '8.41.', '8.43.'
 ]
 
-# CDN IP硬淘汰阈值：不达标的IP直接淘汰，不进评分（严格标准，全自动无感切换）
+# CDN IP硬淘汰阈值：不达标的IP直接淘汰，不进评分
+# v4.15.17 调整：放宽硬淘汰，让评分系统区分延迟差异（旧值过于激进，120ms就砍掉）
+#   - 硬淘汰只淘汰明显不可用的IP（延迟极高/丢包严重/速度极低）
+#   - 延迟区分由评分公式处理：<100ms→85-100分, <150ms→55分, >250ms→30分
+#   - 速度底线从20降到10（用户反馈100Mbps够用，10是可用底线）
 CDN_IP_HARD_REJECT = {
-    'latency_ms': 180,           # VPS→CF延时超过180ms直接淘汰，避免高延时边缘节点混入
-    'user_path_latency_ms': 120, # 通过CDN到用户路径延时超过120ms直接淘汰
-    'packet_loss_rate': 0.08,    # 丢包率超过8%直接淘汰
-    'download_speed_mbps': 20,   # 下载速度低于20Mbps直接淘汰
+    'latency_ms': 250,           # VPS→CF延时超过250ms直接淘汰（明显不可用）
+    'user_path_latency_ms': 200, # 用户路径延时超过200ms直接淘汰（评分会降到30分以下，200以上无意义）
+    'packet_loss_rate': 0.10,    # 丢包率超过10%直接淘汰
+    'download_speed_mbps': 10,   # 下载速度低于10Mbps直接淘汰（可用底线）
 }
 
 # ============ CDN故障自愈配置（v4.6 多级回退）============
@@ -675,6 +701,7 @@ def get_ssh_credentials(prefix=None):
             'host': env.get(f'{prefix}_SSH_IP', ''),
             'user': env.get(f'{prefix}_SSH_USER', 'root'),
             'password': env.get(f'{prefix}_SSH_PASS', ''),
+            'traffic_reset_day': env.get(f'{prefix}_TRAFFIC_RESET_DAY', ''),
         }
     servers = []
     for k, v in env.items():
@@ -685,6 +712,7 @@ def get_ssh_credentials(prefix=None):
                 'host': v,
                 'user': env.get(f'{p}_SSH_USER', 'root'),
                 'password': env.get(f'{p}_SSH_PASS', ''),
+                'traffic_reset_day': env.get(f'{p}_TRAFFIC_RESET_DAY', ''),
             })
     return servers
 
@@ -702,7 +730,7 @@ def load_all_config():
         'tuic_uuid': get_env('TUIC_UUID', ''),
         'enable_tuic': get_env('ENABLE_TUIC', 'true'),
         'socks5_user': get_env('SOCKS5_USER', ''),
-        'socks5_pass': get_env('SOCKS5_PASS', ''),
+        'socks5_pass': get_env('SOCKS5_PASSWORD', get_env('SOCKS5_PASS', '')),
         'reality_private_key': get_env('REALITY_PRIVATE_KEY', ''),
         'reality_public_key': get_env('REALITY_PUBLIC_KEY', ''),
         'reality_short_id': get_env('REALITY_SHORT_ID', REALITY_SHORT_ID),

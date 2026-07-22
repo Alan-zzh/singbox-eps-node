@@ -6,7 +6,7 @@ Version: v1.0.0
 Date: 2026-06-28
 
 功能：
-  - 每 5 分钟对 sub-jp/sub-sg/sub-hk.290372913.xyz:2087 做 TLS 握手 + HTTP /info 请求
+  - 每 5 分钟对当前唯一 CDN 订阅入口 sub-jp.290372913.xyz:2087 做 TLS 握手 + HTTP /info 请求
   - 失败时调用 tg_bot 推送告警（复用 tg_bot.send_message）
   - 写日志到 /var/log/sub_domain_monitor.log
   - 支持 cron 调度：*/5 * * * * /root/singbox-eps-node/scripts/sub_domain_monitor.py >> /var/log/sub_domain_monitor.log 2>&1
@@ -73,8 +73,8 @@ except (ImportError, SystemExit):
 ALERT_DEDUP_MINUTES = 30
 ALERT_DEDUP_DIR = '/tmp'
 
-# 监控的区域代码（v4.15.12: 删除已废弃的 sg，加 hkcepin）
-ALL_REGIONS = ['jp', 'hk', 'hk1', 'hkcepin']
+# 仅 CDN 模式使用 sub-* 入口；HK1/HK2 均走主域名直连，不应构造 sub-* 假目标。
+ALL_REGIONS = ['jp']
 
 # 监控超时（秒）
 TLS_TIMEOUT = 8
@@ -84,7 +84,6 @@ HTTP_TIMEOUT = 10
 def _build_sub_domain(region, base_domain):
     """根据区域代码和基础域名构造 sub-* 直连子域名
     例: ('jp', '290372913.xyz') -> 'sub-jp.290372913.xyz'
-    例: ('hk1', '290372913.xyz') -> 'sub-hk1.290372913.xyz'
     """
     return f"sub-{region}.{base_domain}"
 
