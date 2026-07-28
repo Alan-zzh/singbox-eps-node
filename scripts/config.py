@@ -144,6 +144,15 @@ TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 443
 VLESS_GRPC_PORT = int(os.getenv('VLESS_GRPC_PORT', '0')) or 50051
 TROJAN_TCP_PORT = int(os.getenv('TROJAN_TCP_PORT', '0')) or 50443
 SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '') or _load_env_value('SOCKS5_PORT', '1080') or '1080')
+# 本机 SOCKS5 入站与“是否发布为客户端节点”是两个独立权限。
+# 默认都关闭；AI_SOCKS5_* 服务器侧出站不依赖 PUBLISH_SOCKS5_NODE。
+ENABLE_SOCKS5 = (
+    os.getenv('ENABLE_SOCKS5', '') or _load_env_value('ENABLE_SOCKS5', 'false')
+).strip().lower() in ('1', 'true', 'yes', 'on')
+PUBLISH_SOCKS5_NODE = (
+    os.getenv('PUBLISH_SOCKS5_NODE', '')
+    or _load_env_value('PUBLISH_SOCKS5_NODE', 'false')
+).strip().lower() in ('1', 'true', 'yes', 'on')
 
 LOCKED_PORTS = {
     'SUB_PORT': SUB_PORT,

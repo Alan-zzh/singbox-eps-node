@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v4.15.28
+# 版本: v4.15.29
 # 用途: 新VPS全自动部署（含双部署模式+系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
 # 【部署模式】
-#   - CDN混合模式（推荐）：默认7节点（含认证 SOCKS5 + 2WS-CDN）
-#   - 纯直连模式：默认5节点（含认证 SOCKS5，无CDN）
+#   - CDN混合模式（推荐）：固定6节点（4直连协议 + 2WS-CDN）
+#   - 纯直连模式：固定4节点（无CDN）
 #
 # 【自动化功能清单】
 # 阶段1-系统准备（全自动，无需用户操作）：
@@ -914,6 +914,7 @@ generate_uuids_and_passwords() {
                 COUNTRY_CODE) COUNTRY_CODE="$value" ;;
                 DEPLOY_MODE) DEPLOY_MODE="$value" ;;
                 ENABLE_SOCKS5) ENABLE_SOCKS5="$value" ;;
+                PUBLISH_SOCKS5_NODE) PUBLISH_SOCKS5_NODE="$value" ;;
                 SOCKS5_PORT) SOCKS5_PORT="$value" ;;
                 SOCKS5_USER) SOCKS5_USER="$value" ;;
                 SOCKS5_PASSWORD) SOCKS5_PASSWORD="$value" ;;
@@ -935,8 +936,9 @@ generate_uuids_and_passwords() {
     TUIC_UUID=${TUIC_UUID:-$(python3 -c "import uuid; print(uuid.uuid4())")}
     # v4.14.0 新增：anyTLS 协议密码（独立于 TROJAN_PASSWORD，向后兼容）
     ANYTLS_PASSWORD=${ANYTLS_PASSWORD:-$(python3 -c "import secrets; print(secrets.token_hex(16))")}
-    # 带认证 SOCKS5 入站默认开启；可用 ENABLE_SOCKS5=false 显式关闭。
-    ENABLE_SOCKS5=${ENABLE_SOCKS5:-true}
+    # 本机 SOCKS5 入站默认关闭；AI_SOCKS5_* 是独立的服务器侧 AI 出口代理。
+    ENABLE_SOCKS5=${ENABLE_SOCKS5:-false}
+    PUBLISH_SOCKS5_NODE=${PUBLISH_SOCKS5_NODE:-false}
     SOCKS5_PORT=${SOCKS5_PORT:-1080}
     if [ "$ENABLE_SOCKS5" = "true" ]; then
         SOCKS5_USER=${SOCKS5_USER:-eps$(python3 -c "import secrets; print(secrets.token_hex(3))")}
@@ -1027,8 +1029,8 @@ select_deploy_mode() {
     # 如果已从备份恢复 DEPLOY_MODE，或已有 .env 中存在 DEPLOY_MODE，直接使用旧值不询问
     if [ -n "${DEPLOY_MODE:-}" ]; then
         case "$DEPLOY_MODE" in
-            direct) log_info "检测到已有部署模式：纯直连模式（默认5节点，无CDN依赖）" ;;
-            cdn) log_info "检测到已有部署模式：CDN混合模式（默认7节点，推荐）" ;;
+            direct) log_info "检测到已有部署模式：纯直连模式（固定4节点，无CDN依赖）" ;;
+            cdn) log_info "检测到已有部署模式：CDN混合模式（固定6节点，推荐）" ;;
             *) log_error "DEPLOY_MODE 非法，只允许 cdn/direct"; return 1 ;;
         esac
         return
@@ -1038,8 +1040,8 @@ select_deploy_mode() {
         if [ -n "$OLD_DEPLOY_MODE" ]; then
             DEPLOY_MODE="$OLD_DEPLOY_MODE"
             case "$DEPLOY_MODE" in
-                direct) log_info "从已有配置读取部署模式：纯直连模式（默认5节点，无CDN依赖）" ;;
-                cdn) log_info "从已有配置读取部署模式：CDN混合模式（默认7节点，推荐）" ;;
+                direct) log_info "从已有配置读取部署模式：纯直连模式（固定4节点，无CDN依赖）" ;;
+                cdn) log_info "从已有配置读取部署模式：CDN混合模式（固定6节点，推荐）" ;;
                 *) log_error "已有 DEPLOY_MODE 非法，只允许 cdn/direct"; return 1 ;;
             esac
             return
@@ -1054,65 +1056,62 @@ select_deploy_mode() {
         _direct_domain=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || echo "")
     fi
     if [ -n "$_direct_domain" ] && echo "$_direct_domain" | grep -Eqi '^(hk[12]|hkbeiyong)\.'; then
-        log_info "检测到香港直连域名 ($_direct_domain)，强制使用纯直连模式（默认5节点，无CDN依赖）"
+        log_info "检测到香港直连域名 ($_direct_domain)，强制使用纯直连模式（固定4节点，无CDN依赖）"
         DEPLOY_MODE="direct"
         return
     fi
 
     if [ "${AUTO_YES:-0}" = "1" ]; then
         DEPLOY_MODE="cdn"
-        log_info "非交互模式，默认选择：CDN混合模式（默认7节点，推荐）"
+        log_info "非交互模式，默认选择：CDN混合模式（固定6节点，推荐）"
         return
     fi
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${CYAN}  🚀 选择部署模式${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}1) CDN混合模式（推荐）${NC} - 默认7节点（含认证 SOCKS5 + 2WS-CDN）"
-    echo -e "  ${YELLOW}2) 纯直连模式${NC}        - 默认5节点（含认证 SOCKS5，无CDN）"
+    echo -e "  ${GREEN}1) CDN混合模式（推荐）${NC} - 固定6节点（4直连协议 + 2WS-CDN）"
+    echo -e "  ${YELLOW}2) 纯直连模式${NC}        - 固定4节点（无CDN）"
     echo ""
     read -p "  请选择部署模式 [1/2]（默认1）: " DEPLOY_MODE_CHOICE
     DEPLOY_MODE_CHOICE=${DEPLOY_MODE_CHOICE:-1}
     if [ "$DEPLOY_MODE_CHOICE" = "2" ]; then
         DEPLOY_MODE="direct"
-        log_info "已选择：纯直连模式（默认5节点，无CDN依赖）"
+        log_info "已选择：纯直连模式（固定4节点，无CDN依赖）"
     else
         DEPLOY_MODE="cdn"
-        log_info "已选择：CDN混合模式（默认7节点，推荐）"
+        log_info "已选择：CDN混合模式（固定6节点，推荐）"
     fi
 }
 
 select_local_socks5_mode() {
-    # 本机认证 SOCKS5 与 AI SOCKS5 是两条独立轴：允许 none/local/AI/local+AI。
-    # 环境变量或重装恢复值优先，便于无人值守矩阵安装。
+    # 本机 SOCKS5 入站不是 AI SOCKS5 出口；默认不启用、更不发布到订阅。
+    # 只有老板明确要求时，才通过预置 ENABLE_SOCKS5=true +
+    # PUBLISH_SOCKS5_NODE=true 开放并发布客户端节点。
     if [ -z "${ENABLE_SOCKS5:-}" ] && [ -f "$BASE_DIR/.env" ]; then
         ENABLE_SOCKS5=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
     fi
+    if [ -z "${PUBLISH_SOCKS5_NODE:-}" ] && [ -f "$BASE_DIR/.env" ]; then
+        PUBLISH_SOCKS5_NODE=$(grep '^PUBLISH_SOCKS5_NODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+    fi
+    ENABLE_SOCKS5=${ENABLE_SOCKS5:-false}
+    PUBLISH_SOCKS5_NODE=${PUBLISH_SOCKS5_NODE:-false}
+    case "$(printf '%s' "$PUBLISH_SOCKS5_NODE" | tr '[:upper:]' '[:lower:]')" in
+        true|1|yes|on) PUBLISH_SOCKS5_NODE=true ;;
+        false|0|no|off) PUBLISH_SOCKS5_NODE=false ;;
+        *) log_error "PUBLISH_SOCKS5_NODE 非法，只允许 true/false"; return 1 ;;
+    esac
     if [ -n "${ENABLE_SOCKS5:-}" ]; then
         case "$(printf '%s' "$ENABLE_SOCKS5" | tr '[:upper:]' '[:lower:]')" in
             true|1|yes|on) ENABLE_SOCKS5=true ;;
             false|0|no|off) ENABLE_SOCKS5=false ;;
             *) log_error "ENABLE_SOCKS5 非法，只允许 true/false"; return 1 ;;
         esac
-        log_info "本机认证 SOCKS5: $ENABLE_SOCKS5（沿用预置/既有配置）"
-        return 0
-    fi
-    if [ "${AUTO_YES:-0}" = "1" ]; then
-        ENABLE_SOCKS5=true
-        log_info "非交互模式默认启用本机认证 SOCKS5；可预置 ENABLE_SOCKS5=false 关闭"
-        return 0
-    fi
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  本机认证 SOCKS5（可选）${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    read -p "  是否开放本服务器的认证 SOCKS5 节点？(Y/n): " ENABLE_LOCAL_SOCKS
-    if [[ "${ENABLE_LOCAL_SOCKS:-y}" =~ ^[Nn]$ ]]; then
-        ENABLE_SOCKS5=false
-        log_info "本机认证 SOCKS5 已关闭"
-    else
-        ENABLE_SOCKS5=true
-        log_info "本机认证 SOCKS5 已启用"
+        if [ "$PUBLISH_SOCKS5_NODE" = "true" ] && [ "$ENABLE_SOCKS5" != "true" ]; then
+            log_error "发布 SOCKS5 节点必须同时显式设置 ENABLE_SOCKS5=true"
+            return 1
+        fi
+        log_info "本机 SOCKS5 入站: $ENABLE_SOCKS5；订阅发布: $PUBLISH_SOCKS5_NODE"
     fi
 }
 
@@ -1272,7 +1271,7 @@ create_env_file() {
 # 由安装脚本自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 
 # ============ 部署模式 ============
-# cdn: CDN混合模式（默认7节点）；direct: 纯直连模式（默认5节点，无CDN）
+# cdn: CDN混合模式（固定6节点）；direct: 纯直连模式（固定4节点，无CDN）
 DEPLOY_MODE=${DEPLOY_MODE}
 
 # ============ 必填 ============
@@ -1304,6 +1303,7 @@ ANYTLS_PORT=2096
 
 # ============ 带认证 SOCKS5 入站 ============
 ENABLE_SOCKS5=${ENABLE_SOCKS5}
+PUBLISH_SOCKS5_NODE=${PUBLISH_SOCKS5_NODE}
 SOCKS5_PORT=${SOCKS5_PORT}
 SOCKS5_USER=${SOCKS5_USER}
 SOCKS5_PASSWORD=${SOCKS5_PASSWORD}
@@ -1680,7 +1680,7 @@ setup_iptables_traffic_counter() {
     SOCKS5_USER_IPT=$(grep "^SOCKS5_USER=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
     SOCKS5_PASSWORD_IPT=$(grep "^SOCKS5_PASSWORD=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
     ENABLE_SOCKS5_IPT=$(grep "^ENABLE_SOCKS5=" "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-    ENABLE_SOCKS5_IPT=${ENABLE_SOCKS5_IPT:-true}
+    ENABLE_SOCKS5_IPT=${ENABLE_SOCKS5_IPT:-false}
 
     iptables -N EPS_INPUT 2>/dev/null || true
     iptables -N EPS_OUTPUT 2>/dev/null || true
@@ -1808,7 +1808,7 @@ verify_installation() {
     require_deploy_mode
     DEPLOY_MODE_VERIFY="$DEPLOY_MODE"
     echo ""
-    echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（默认5节点）" || echo "CDN混合模式（默认7节点）" )"
+    echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（固定4节点）" || echo "CDN混合模式（固定6节点）" )"
     echo ""
     ALL_OK=true
 
@@ -1927,13 +1927,13 @@ verify_installation() {
         local required_nodes="${_verify_country}-VLESS-Reality ${_verify_country}-Trojan-TCP ${_verify_country}-anyTLS"
         local tuic_enabled socks_enabled
         tuic_enabled=$(grep '^ENABLE_TUIC=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-        socks_enabled=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        socks_published=$(grep '^PUBLISH_SOCKS5_NODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
         tuic_enabled=${tuic_enabled:-true}
-        socks_enabled=${socks_enabled:-true}
+        socks_published=${socks_published:-false}
         if [[ "$tuic_enabled" =~ ^(true|1|yes|on)$ ]]; then
             required_nodes="$required_nodes ${_verify_country}-TUIC-v5"
         fi
-        if [[ "$socks_enabled" =~ ^(true|1|yes|on)$ ]]; then
+        if [[ "$socks_published" =~ ^(true|1|yes|on)$ ]]; then
             required_nodes="$required_nodes ${_verify_country}-SOCKS5"
         fi
         for node in $required_nodes; do
@@ -1953,8 +1953,8 @@ verify_installation() {
             echo -e "    ${RED}❌${NC} $artifact_name: direct 模式不应包含 CDN 节点"
             ALL_OK=false
         fi
-        if [[ "$socks_enabled" =~ ^(false|0|no|off)$ ]] && grep -Fq "${_verify_country}-SOCKS5" "$artifact"; then
-            echo -e "    ${RED}❌${NC} $artifact_name: ENABLE_SOCKS5=false 时不应输出 SOCKS5 节点"
+        if [[ "$socks_published" =~ ^(false|0|no|off)$ ]] && grep -Fq "${_verify_country}-SOCKS5" "$artifact"; then
+            echo -e "    ${RED}❌${NC} $artifact_name: 未明确发布时不应输出 SOCKS5 节点"
             ALL_OK=false
         fi
     }
@@ -1986,7 +1986,7 @@ verify_installation() {
         echo -e "    ${RED}❌${NC} Clash: 下载、证书或内容校验失败"
         ALL_OK=false
     fi
-    echo -e "  订阅语义检查（节点、协议、模式与 SOCKS5 开关）:"
+    echo -e "  订阅语义检查（直连/CDN 固定协议；AI SOCKS5 不得成为客户端节点）:"
     [ -f "$_verify_tmp/base64.decoded" ] && verify_subscription_semantics "$_verify_tmp/base64.decoded" "Base64"
     [ -f "$_verify_tmp/singbox.json" ] && verify_subscription_semantics "$_verify_tmp/singbox.json" "sing-box"
     [ -f "$_verify_tmp/clash.yaml" ] && verify_subscription_semantics "$_verify_tmp/clash.yaml" "Clash"
@@ -2045,9 +2045,9 @@ print_summary() {
     echo "=========================================="
     echo ""
     if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
-        echo "  部署模式: 纯直连模式（默认5节点，无CDN依赖）"
+        echo "  部署模式: 纯直连模式（固定4节点，无CDN依赖）"
     else
-        echo "  部署模式: CDN混合模式（默认7节点，推荐）"
+        echo "  部署模式: CDN混合模式（固定6节点，推荐）"
     fi
     echo "📋 配置文件: $BASE_DIR/.env"
     echo ""
@@ -2485,7 +2485,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.28${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.29${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -2552,7 +2552,7 @@ main() {
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.28${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.29${NC}"
             echo "=========================================="
             echo ""
             trap 'rollback_failed_install $?' EXIT

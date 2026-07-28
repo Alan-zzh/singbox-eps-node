@@ -233,7 +233,7 @@ fi
         "severity": "BLOCKER",
         "cmd": r"""
 ENABLED=$(grep ^ENABLE_SOCKS5= /root/singbox-eps-node/.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-ENABLED=${ENABLED:-true}
+ENABLED=${ENABLED:-false}
 case "$ENABLED" in
   false|0|no|off) echo "SKIP: authenticated SOCKS5 disabled"; exit 0 ;;
   true|1|yes|on) ;;
@@ -256,7 +256,7 @@ python3 /root/singbox-eps-node/scripts/ai_socks5_health.py \
 """,
     },
     "SUBSCRIPTION_ENDPOINTS": {
-        "desc": "公网三类订阅严格 TLS 下载且节点/模式/SOCKS5 语义一致",
+        "desc": "公网三类订阅严格 TLS 下载且直连/CDN 协议集合固定，AI SOCKS5 不得发布",
         "severity": "BLOCKER",
         "cmd": r"""
 set -e
@@ -273,7 +273,7 @@ curl -fsS --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 10 --ma
 curl -fsS --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 30 "https://${HOST}:2087/singbox/${CC}" -o "$TMP/singbox.json"
 /usr/local/bin/sing-box check -c "$TMP/singbox.json"
 python3 - "$TMP" /root/singbox-eps-node/.env <<'PY'
-import json, pathlib, sys, yaml
+import json, pathlib, sys, urllib.parse, yaml
 root, env_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 env = {}
 for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -285,15 +285,23 @@ expected = {f"{cc}-VLESS-Reality", f"{cc}-Trojan-TCP", f"{cc}-anyTLS"}
 truthy = {"true", "1", "yes", "on"}
 if env.get("ENABLE_TUIC", "true").lower() in truthy:
     expected.add(f"{cc}-TUIC-v5")
-if env.get("ENABLE_SOCKS5", "true").lower() in truthy:
+publish_socks5 = env.get("PUBLISH_SOCKS5_NODE", "false").lower() in truthy
+if publish_socks5:
+    if env.get("ENABLE_SOCKS5", "false").lower() not in truthy:
+        raise SystemExit("PUBLISH_SOCKS5_NODE requires ENABLE_SOCKS5=true")
     if not env.get("SOCKS5_USER") or not env.get("SOCKS5_PASSWORD"):
-        raise SystemExit("SOCKS5 enabled with incomplete credentials")
+        raise SystemExit("published SOCKS5 node has incomplete credentials")
     expected.add(f"{cc}-SOCKS5")
 is_cdn = env.get("DEPLOY_MODE", "cdn") == "cdn"
 cdn_nodes = {f"{cc}-VLESS-WS-CDN", f"{cc}-Trojan-WS-CDN"}
 if is_cdn:
     expected |= cdn_nodes
 base64_text = (root / "base64.decoded").read_text(encoding="utf-8")
+base64_names = {
+    urllib.parse.unquote(line.rsplit("#", 1)[1])
+    for line in base64_text.splitlines()
+    if "://" in line and "#" in line
+}
 clash = yaml.safe_load((root / "clash.yaml").read_text(encoding="utf-8"))
 singbox = json.loads((root / "singbox.json").read_text(encoding="utf-8"))
 clash_names = {p["name"] for p in clash.get("proxies", [])}
@@ -305,13 +313,27 @@ for label, names in (("Clash", clash_names), ("sing-box", singbox_names)):
     missing = expected - names
     if missing:
         raise SystemExit(f"{label} missing nodes: {sorted(missing)}")
+    unexpected = names - expected
+    if unexpected:
+        raise SystemExit(f"{label} unexpected nodes: {sorted(unexpected)}")
     if not is_cdn and names & cdn_nodes:
         raise SystemExit(f"{label} direct mode leaked CDN nodes")
 for node in expected:
     if node not in base64_text:
         raise SystemExit(f"Base64 missing node: {node}")
+if base64_names != expected:
+    raise SystemExit(
+        f"Base64 protocol set drifted: expected={sorted(expected)} actual={sorted(base64_names)}"
+    )
 if not is_cdn and any(node in base64_text for node in cdn_nodes):
     raise SystemExit("Base64 direct mode leaked CDN nodes")
+if not publish_socks5 and (
+    "socks5://" in base64_text
+    or f"{cc}-SOCKS5" in base64_text
+    or f"{cc}-SOCKS5" in clash_names
+    or f"{cc}-SOCKS5" in singbox_names
+):
+    raise SystemExit("public subscription leaked SOCKS5 node without explicit publish permission")
 print(f"OK public subscriptions: expected_nodes={len(expected)}")
 PY
 """,

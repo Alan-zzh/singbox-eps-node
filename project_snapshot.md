@@ -1,15 +1,15 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.15.28 | **更新**: 2026-07-28（JP CDN 全域规则单一所有者）
+**版本**: v4.15.29 | **更新**: 2026-07-29（固定直连/CDN 协议，AI SOCKS5 仅服务器侧）
 
 ## 当前唯一有效服务器清单
 
 | 服务器 | 域名 | IP | 模式 | 节点数 | 系统 / 内核 | sing-box |
 |--------|------|----|------|--------|-------------|----------|
-| JP | jp.290372913.xyz | 3.113.4.86 | CDN（橙云） | 7 | Ubuntu 24.04 / 6.18.39-x64v3-xanmod1 | 1.13.14 |
+| JP | jp.290372913.xyz | 3.113.4.86 | CDN（橙云） | 6 | Ubuntu 24.04 / 6.18.39-x64v3-xanmod1 | 1.13.14 |
 | HK1 | hk1.290372913.xyz | 47.243.72.97 | **直连**（灰云） | 4 | Ubuntu 24.04 / 6.8.0-110-generic | 1.13.13 |
 | HK2 | hk2.290372913.xyz | 47.238.146.170 | **直连**（灰云） | 4 | Ubuntu 24.04 / 6.8.0-110-generic | 1.13.14 |
-| HKBEIYONG | hkbeiyong.290372913.xyz | 47.242.36.160 | **直连**（灰云） | 5 | Ubuntu 24.04 / 6.8.0-110-generic | 1.13.14 |
+| HKBEIYONG | hkbeiyong.290372913.xyz | 47.242.36.160 | **直连**（灰云） | 4 | Ubuntu 24.04 / 6.8.0-110-generic | 1.13.14 |
 
 > 旧 HKCEPIN（18.166.210.81）已由 HK2 取代。旧 HK、HKCEPIN、SG 及其 `sub-*` Cloudflare DNS 记录已删除，不得重新加入当前部署清单。
 > 2026-07-28 外部复查时 HK1 主机 SSH/443/2087/2096/1080 全部超时；HK1 保留在清单等待原主机恢复，HKBEIYONG 已作为可用香港备用直连节点上线。
@@ -24,12 +24,10 @@
 | Trojan-WS-CDN | ✅ CF 边缘 `:443`，`/api/v1/data` 回源 `:2083` | ❌ |
 | anyTLS | ✅ TCP `:2096` | ✅ TCP `:2096` |
 | TUIC-v5 | ✅ UDP `:443` | ✅ UDP `:443` |
-| 认证 SOCKS5 入站 | ✅ JP `:1080` 已外部验证 | ✅ HK2/HKBEIYONG `:1080` 已外部验证 |
-
 - `DEPLOY_MODE` 是唯一优先判断：JP=`cdn`，HK1/HK2/HKBEIYONG=`direct`。
 - `COUNTRY_CODE` 是服务器标识，不是地理码；一键安装从 `CF_DOMAIN` 首标签生成，例如 `hkbeiyong.*` → `HKBEIYONG`。
 - direct 模式不启动 `singbox-cdn`，不生成 WS-CDN 节点。
-- AI SOCKS5 路由与本机 SOCKS5 入站是两套独立配置。HKBEIYONG 的 AI 流量当前经 JP 认证 SOCKS5 出站；外部端到端 OpenAI 探测返回 401。
+- AI SOCKS5 路由、本机 SOCKS5 入站、客户端节点发布是三套独立权限。JP 保留 1080 作为香港 AI 内部上游但不进入订阅；HK2/HKBEIYONG 本机 1080 已关闭，两台 AI 流量均经 JP 出站并通过 OpenAI 401 门禁。
 
 ## 订阅与 Cloudflare
 
@@ -66,11 +64,14 @@ HK2/HKBEIYONG 系统盘仅 2GB，XanMod 内核包加安全余量无法容纳。H
 | `sub_domain_monitor.py` | 每 5 分钟 | 只监控当前 JP `sub-jp` |
 | subscription baseline | 每月重置日 00:03 | JP=19，香港 direct=1 |
 
-## 2026-07-28 真实验收快照
+## 2026-07-28/29 真实验收快照
 
-- HKBEIYONG 最终部署 10 PASS/1 direct 合理 SKIP；公网三类订阅各 5 节点，Mihomo 与 sing-box 1.13 原生配置检查均通过。
-- HKBEIYONG 外部认证 SOCKS5 → 服务器 AI 路由 → JP SOCKS5 → OpenAI 的端到端探测返回 401；AI 组类型为 urltest，运行时降级标记不存在。
-- JP 最终部署 13 PASS；公网三类订阅各 7 节点；Cloudflare 受管规则完整语义、TLS 与 DDoS override 均由 API 回读，外部 `/api/v1/stream` 与 `/api/v1/data` 均 HTTP 101。
+- 2026-07-29：JP 公网三类订阅固定 6 节点，HK2/HKBEIYONG 固定 4 节点，三台均无客户端 SOCKS5；HK2/HKBEIYONG AI 分流经 JP 上游返回 OpenAI 401；部署门禁分别 13/13、12/12、12/12 PASS，定向 full audit 均 `ALL OK`。
+
+- HKBEIYONG 最终部署 12 PASS/1 direct 合理 SKIP；公网三类订阅各 4 节点，Mihomo 与 sing-box 1.13 原生配置检查均通过。
+- HKBEIYONG/HK2 服务器 AI 路由 → JP 内部 SOCKS5 → OpenAI 的端到端探测返回 401；AI 组类型为 urltest，运行时降级标记不存在。
+- JP 最终部署 13 PASS；公网三类订阅各 6 节点；Cloudflare 受管规则完整语义、TLS 与 DDoS override 均由 API 回读，外部 `/api/v1/stream` 与 `/api/v1/data` 均 HTTP 101。
 - Cloudflare zone 级 skip/origin ruleset 只允许 JP CDN 模式维护；HKBEIYONG/HK2 direct 健康检查已实测跳过且不改变规则版本，模式缺失/非法会阻塞。JP 门禁现为 13/13 PASS。
-- `python -m pytest -q`：`87 passed, 1 skipped`（含目录回滚、模式 fail-closed 与 Cloudflare 完整规则语义回归）；Git Bash 对 `install.sh`/`health_check.sh` 语法检查通过；HKBEIYONG/JP 定向 full audit 均 `ALL OK`。
+- HK2 原有 6 个认证拒绝的 AI SOCKS5 上游已替换为与 HKBEIYONG 相同的 JP 健康上游；AI 分流与完整部署门禁均已恢复。
+- `python -m pytest -q`：`88 passed, 1 skipped`（含 AI SOCKS5 不发布、固定协议集合、目录回滚、模式 fail-closed 与 Cloudflare 完整规则语义回归）；Git Bash 对 `install.sh`/`health_check.sh` 语法检查通过；JP/HK2/HKBEIYONG 定向 full audit 均 `ALL OK`。
 - 流量汇总包含 4 台：JP/HK2/HKBEIYONG 3 台可达，HK1 1 台不可达。

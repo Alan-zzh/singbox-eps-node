@@ -5,6 +5,22 @@
 
 ---
 
+## -9. 把 AI SOCKS5 误发布成香港客户端节点（v4.15.29）
+
+**现象**：用户要求开启的是服务器侧 AI SOCKS5 出口代理，但 JP/HK2/HKBEIYONG 的 Base64、Clash、sing-box 三类订阅都额外出现了 `{CC}-SOCKS5` 客户端节点；HKBEIYONG 因此从固定 4 个直连协议变成 5 节点，JP 从固定 6 个 CDN 协议变成 7 节点。
+
+**已确认根因**：`ENABLE_SOCKS5` 同时控制本机 1080 入站和三类订阅发布，安装器还默认将其设为 true；代码虽然已把 `AI_SOCKS5_*` 出站凭据与本机入站分开，却没有为“发布客户端节点”设置独立权限，导致 AI 代理与订阅协议语义再次混用。
+
+**修复**：
+- 两套用户订阅模板固定为 direct 4 节点、CDN 6 节点；`AI_SOCKS5_*` 只做服务器侧 AI 分流。
+- 新增 `PUBLISH_SOCKS5_NODE=false` 独立发布权限；只有它与 `ENABLE_SOCKS5=true` 同时明确开启且凭据完整时，才允许额外发布本机 SOCKS5。
+- 一键安装默认 `ENABLE_SOCKS5=false`，不再询问或默认开放本机 SOCKS5；部署门禁和外部审计精确校验协议集合并拒绝未授权 SOCKS5。
+- JP 保留 1080 内部入站作为香港 AI 上游但不发布；HK2/HKBEIYONG 关闭本机 1080 入站，AI 出口仍经 JP 工作。
+
+**关键证据**：生产公网复查 JP 三类订阅均为 6 节点，HK2/HKBEIYONG 均为 4 节点，三台 Base64 都不含 `socks5://`；JP 两条 CDN WS 仍为 101；HK2/HKBEIYONG 的 AI 上游均指向 JP，经 SOCKS5 请求 OpenAI 均返回健康 401；JP/HK2/HKBEIYONG 部署门禁分别 13/13、12/12、12/12 PASS；本地回归 `88 passed, 1 skipped`。
+
+**教训**：代理实现使用 SOCKS5 不代表它是用户协议节点。服务端 AI 出站、本机入站和客户端订阅发布必须是三个独立权限；订阅验收要核对精确协议集合，不能只检查最少节点数。
+
 ## -8. direct 健康检查覆盖全域规则，导致 JP CDN 从 101 变 400（v4.15.28）
 
 **现象**：部署香港备用直连机后，JP 订阅仍为 200 且输出 7 节点，但公网 `/api/v1/stream`、`/api/v1/data` 同时从 WebSocket 101 变成 HTTP 400；服务端监听与部署门禁仍显示通过。

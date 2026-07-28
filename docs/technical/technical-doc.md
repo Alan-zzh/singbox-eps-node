@@ -1,7 +1,7 @@
 # Singbox EPS Node 技术文档
-**版本**: v4.15.28 | **更新**: 2026-07-28
+**版本**: v4.15.29 | **更新**: 2026-07-29
 
-> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.28 架构和模块说明。
+> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.29 架构和模块说明。
 > 已删除/已下线的协议在末尾「已删除协议清单」明确标注，避免后续 AI 基于过时文档犯错。
 
 ---
@@ -24,8 +24,8 @@
 
 | 模式 | 节点数 | 协议 | singbox-cdn | 适用场景 |
 |------|--------|------|-------------|----------|
-| `cdn` | 6/7 | 4 直连 + 2 WS-CDN，可选认证 SOCKS5 | 启动 | JP，抗封锁 |
-| `direct` | 4/5 | 4 直连，可选认证 SOCKS5 | 不启动 | HK1/HK2/HKBEIYONG，无 CDN 依赖 |
+| `cdn` | 6 | 4 直连 + 2 WS-CDN | 启动 | JP，抗封锁 |
+| `direct` | 4 | 4 直连 | 不启动 | HK1/HK2/HKBEIYONG，无 CDN 依赖 |
 
 - `DEPLOY_MODE` 显式设置优先级最高
 - 现网每台都必须显式设置 `DEPLOY_MODE`；历史 fallback 仅用于兼容，部署脚本以远端 `.env` 为真相源。
@@ -35,13 +35,13 @@
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| singbox | TCP 443/8443/2083/2096/TROJAN_TCP_PORT/可选1080 + UDP 443 | 代理内核（默认7节点 CDN / 默认5节点 direct） |
+| singbox | TCP 443/8443/2083/2096/TROJAN_TCP_PORT/内部可选1080 + UDP 443 | 代理内核（固定6节点 CDN / 固定4节点 direct） |
 | singbox-sub | 2087 | HTTPS 订阅（JP 走 sub-jp 灰云；所有 direct 节点走主域名） |
 | singbox-cdn | - | CDN 优选 IP 监控（v4.0 用户反馈驱动版，30 分钟存活检测） |
 
 ### 节点列表（v4.15.13 真实架构）
 
-**CDN 模式默认 7 节点**：
+**CDN 模式固定 6 节点**：
 
 | 节点 | 地址 | 方式 | 说明 |
 |------|------|------|------|
@@ -51,11 +51,9 @@
 | {CC}-TUIC-v5 | {IP}:443/UDP | 直连 | QUIC 多路复用 + UDP relay；与 Reality TCP 443 不冲突 |
 | {CC}-VLESS-WS-CDN | 优选IP:443 | CDN | 主域名橙云代理，路径 `/api/v1/stream` 回源 8443 |
 | {CC}-Trojan-WS-CDN | 优选IP:443 | CDN | 主域名橙云代理，路径 `/api/v1/data` 回源 2083 |
-| {CC}-SOCKS5 | {IP}:1080 | 直连 | 可选认证 SOCKS5 入站 |
+**direct 模式固定 4 节点**（HK1/HK2/HKBEIYONG）：去掉 VLESS-WS-CDN / Trojan-WS-CDN / singbox-cdn，保留 VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5。
 
-**direct 模式默认 5 节点**（HK1/HK2/HKBEIYONG）：去掉 VLESS-WS-CDN / Trojan-WS-CDN / singbox-cdn，保留 VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5 / 可选 SOCKS5。
-
-> ⚠️ AI-SOCKS5 是幕后路由出站，不是用户可见节点，不出现在订阅链接和 selector 中。
+> ⚠️ AI-SOCKS5 是幕后路由出站，不是用户可见节点。只有老板单独明确要求并同时开启 `ENABLE_SOCKS5=true`、`PUBLISH_SOCKS5_NODE=true`，才允许额外发布本机 SOCKS5。
 
 ### 端口分配
 
@@ -69,7 +67,7 @@
 | 8443/TCP（源站监听） | VLESS-WS-CDN 回源 | Cloudflare 回源使用 |
 | 2096 | anyTLS | ❌（直连源站） |
 | TROJAN_TCP_PORT | Trojan-TCP（随机 10000-65535） | ❌ |
-| 1080 | SOCKS5 本地代理（幕后路由） | ❌ |
+| 1080 | 可选本机 SOCKS5 入站；当前仅 JP 用作香港 AI 内部上游，不发布订阅 | ❌ |
 
 ### 域名用途铁律（AGENTS.md 铁律 10）
 
@@ -265,8 +263,10 @@
 - 评分算法：存活率评分 = alive_count / total_checks * 100
 
 ### 5. SOCKS5 入站与 AI 路由
-- **认证入站**: 一键安装默认生成 `SOCKS5_PORT=1080` + 随机用户名/密码，供授权客户端经本机出口
-- **强制验证**: 凭据、监听端口、防火墙和最终连接检查纳入安装收尾
+- **AI 出站**: `AI_SOCKS5_*` 只在服务器内部承载 AI 域名分流，不生成客户端节点
+- **本机入站**: 默认关闭；当前仅 JP 保留 1080 作为 HK2/HKBEIYONG 的内部上游
+- **发布权限**: `PUBLISH_SOCKS5_NODE=false`；只有老板明确要求且同时开启本机入站时才额外发布
+- **强制验证**: AI 出站必须经 SOCKS5 获得 OpenAI 401；客户端订阅必须精确匹配 direct 4/CDN 6 协议集合
 - **变量**: `SOCKS5_PORT` / `SOCKS5_USER` / `SOCKS5_PASSWORD`，兼容历史 `SOCKS5_PASS`
 - **触发条件**: `AI_SOCKS5_ROUTING=on`（默认 off）
 - **AI 网站走 SOCKS5**: openai/anthropic/gemini/perplexity/google
@@ -348,7 +348,7 @@ install.sh 把 CF_DOMAIN 首标签校验后转为大写服务器标识：
 |------|------|
 | TROJAN_TCP_PORT | Trojan-TCP 端口（随机 10000-65535） |
 | TUIC_PORT | TUIC-v5 端口（默认 443/UDP） |
-| SOCKS5_PORT | 本机认证 SOCKS5 入站（默认 1080） |
+| SOCKS5_PORT | 可选本机 SOCKS5 入站端口（默认值 1080，入站本身默认关闭） |
 | SUB_PORT | 订阅服务端口（默认 2087） |
 
 ### 可选
@@ -359,6 +359,8 @@ install.sh 把 CF_DOMAIN 首标签校验后转为大写服务器标识：
 | CF_ZONE_ID | Cloudflare Zone ID |
 | COUNTRY_CODE | 服务器标识（当前 JP/HK1/HK2/HKBEIYONG，install.sh 基于 CF_DOMAIN 首标签推导） |
 | SUB_TOKEN | 订阅 Token |
+| ENABLE_SOCKS5 | 本机 SOCKS5 入站开关（默认 false） |
+| PUBLISH_SOCKS5_NODE | 客户端 SOCKS5 节点发布权限（默认 false，须与入站开关同时显式开启） |
 | SOCKS5_USER / SOCKS5_PASSWORD | 本机 SOCKS5 入站认证凭据 |
 | AI_SOCKS5_SERVER / PORT / USER / PASS | AI SOCKS5 凭据 |
 | AI_SOCKS5_ROUTING | AI 路由开关（on/off，默认 off） |
@@ -469,7 +471,7 @@ bash /root/singbox-eps-node/scripts/health_check.sh  # 手动运行
 6. **禁止硬编码 IP/域名/凭据/路径**：所有从 .env 读
 7. **修改配置必须全局搜索所有引用文件**：`grep -r "关键字" scripts/ *.md`
 8. **服务重启必须覆盖所有相关服务**：singbox + singbox-sub + singbox-cdn
-9. **AI-SOCKS5 是幕后路由出站**，不是用户可见节点
+9. **AI-SOCKS5 是幕后路由出站**，不是用户可见节点；direct/CDN 订阅固定为 4/6 节点
 10. **改代码必须同步更新文档**
 11. **防火墙重置必须在端口跳跃之后**
 12. **降级方案必须实际应用到网卡**：`tc qdisc replace dev $MAIN_IF root fq_pie`
@@ -502,6 +504,7 @@ bash /root/singbox-eps-node/scripts/health_check.sh  # 手动运行
 
 | 版本 | 日期 | 更新 |
 |------|------|------|
+| v4.15.29 | 2026-07-29 | AI SOCKS5 与客户端协议发布彻底分离；direct/CDN 固定 4/6 节点；三台生产订阅与香港 AI 401 门禁通过 |
 | v4.15.28 | 2026-07-28 | JP 独占 Cloudflare zone 级 CDN 规则维护；模式 fail-closed；部署门禁新增受管规则完整语义/TLS/DDoS API 回读 |
 | v4.15.26 | 2026-07-28 | 一键安装完整事务回滚（目录/二进制/systemd/crontab/iptables）；8 格 SOCKS/AI 矩阵；真实 OpenAI 401 门禁及可重试降级；订阅域名直连；sing-box 1.13 客户端配置校验；CF/iptables 收口 |
 | v4.15.25 | 2026-07-28 | 新增 HKBEIYONG direct；修复自定义服务器标识、Global Key 邮箱认证、ACME 首装/重跑幂等与 direct 健康检查；生产 TLS/4 节点/SOCKS5 验收通过 |

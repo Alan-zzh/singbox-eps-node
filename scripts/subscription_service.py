@@ -11,7 +11,7 @@ Date: 2026-06-27
   - CDN优选IP自动分配（每个协议独立IP）
   - HTTPS支持（Cloudflare正式证书）
   - 按月流量统计（iptables 内核级计数器）
-  - DEPLOY_MODE 双模式支持：CDN全量（7节点）/ 直连精简（5节点，含认证 SOCKS5）
+  - DEPLOY_MODE 双模式支持：CDN 固定 6 节点 / 直连固定 4 节点
 
 订阅链接格式:
   - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
@@ -23,7 +23,7 @@ Date: 2026-06-27
   ⚠️ 必须使用域名访问（走CDN），IP访问会导致SSL证书不匹配
   ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
-节点命名规则: {国家代码}-{协议}（v4.15.26 起本机认证 SOCKS5 同步进入三类订阅）
+节点命名规则: {国家代码}-{协议}（AI SOCKS5 只做服务器侧分流，不进入订阅）
 - {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
 - {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
 - {COUNTRY_CODE}-anyTLS (直连节点，TLS-in-TLS 加密)
@@ -35,7 +35,7 @@ Date: 2026-06-27
   - 加回 TUIC v5（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
   - 删除 VLESS-gRPC（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
   - v2rayN 6.x+ / v2rayNG 1.x+ 归 full 能力（内置 sing-box 内核，支持 anytls:// 和 tuic://）
-  - 节点数：CDN 模式 7 节点 / 直连模式 5 节点（TUIC/SOCKS5 未启用时动态减少）
+  - 节点数：CDN 模式 6 节点 / 直连模式 4 节点
 
 【v4.14.0 协议栈精简】:
   - 删除 VLESS-HTTPUpgrade-CDN（故障最多，兼容最窄）
@@ -79,6 +79,7 @@ try:
         SERVER_IP, CF_DOMAIN, DATA_DIR, CERT_DIR, DB_FILE, SUB_PORT,
         VLESS_WS_PORT, VLESS_WS_EDGE_PORT, VLESS_UPGRADE_PORT,
         TROJAN_WS_PORT, TROJAN_WS_EDGE_PORT, TUIC_PORT, SOCKS5_PORT,
+        ENABLE_SOCKS5, PUBLISH_SOCKS5_NODE,
         TROJAN_TCP_PORT, ANYTLS_PORT, ANYTLS_PASSWORD,
         REALITY_SHORT_ID, REALITY_DEST, REALITY_SNI,
         AI_SOCKS5_SERVER, AI_SOCKS5_PORT, AI_SOCKS5_USER, AI_SOCKS5_PASS,
@@ -108,6 +109,8 @@ except ImportError:
     ANYTLS_PORT = int(os.getenv('ANYTLS_PORT', '2096'))
     TUIC_PORT = int(os.getenv('TUIC_PORT', '0')) or 443
     SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', '1080'))
+    ENABLE_SOCKS5 = os.getenv('ENABLE_SOCKS5', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
+    PUBLISH_SOCKS5_NODE = os.getenv('PUBLISH_SOCKS5_NODE', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
     # v4.15.8: VLESS_GRPC_PORT 已删除（v4.15.0 移除 gRPC 协议）
     TROJAN_TCP_PORT = int(os.getenv('TROJAN_TCP_PORT', '0')) or 50443
     TROJAN_PASSWORD = os.getenv('TROJAN_PASSWORD', '')
@@ -157,12 +160,15 @@ except ImportError:
 
 logger = get_logger('subscription_service')
 
-# 本机认证 SOCKS5 入站与 AI_SOCKS5_* 幕后出站是两套独立配置。
-# 只有服务端入站显式启用且认证凭据完整时，才把本机 SOCKS5 作为用户可见节点输出。
-ENABLE_SOCKS5 = os.getenv('ENABLE_SOCKS5', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+# 本机认证 SOCKS5 入站、订阅发布权限与 AI_SOCKS5_* 幕后出站是三套独立配置。
+# 默认订阅协议固定为 direct=4/CDN=6；只有老板明确要求时才同时开启发布权限。
 SOCKS5_USER = os.getenv('SOCKS5_USER', '').strip()
 SOCKS5_PASS = (os.getenv('SOCKS5_PASSWORD', '') or os.getenv('SOCKS5_PASS', '')).strip()
-SOCKS5_SUBSCRIPTION_ENABLED = ENABLE_SOCKS5 and bool(SOCKS5_USER and SOCKS5_PASS)
+SOCKS5_SUBSCRIPTION_ENABLED = (
+    ENABLE_SOCKS5
+    and PUBLISH_SOCKS5_NODE
+    and bool(SOCKS5_USER and SOCKS5_PASS)
+)
 
 IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 # v4.14.0: 删除 vless_upgrade_cdn_ip（HTTPUpgrade 已下线）
@@ -174,12 +180,12 @@ CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
 if 'HK_DIRECT_MODE' not in dir():
     HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith(('hk1.', 'hk2.', 'hkbeiyong.'))
 
-# 标准 7 节点 SOP：Reality / Trojan-TCP / anyTLS / TUIC / SOCKS5 + WS-CDN / Trojan-WS-CDN
-#   full     = 完整 7 节点（含 anyTLS anytls:// + TUIC v5 tuic:// + SOCKS5 URI）
+# 标准节点 SOP：direct=4，CDN=6；AI SOCKS5 永不作为客户端节点。
+#   full     = 完整协议节点（含 anyTLS anytls:// + TUIC v5 tuic://）
 #              - Clash Meta (mihomo) 系、sing-box 系、NekoBox/NekoRay
 #              - v2rayN 6.x+ / v2rayNG 1.x+（内置 sing-box 内核，支持 anytls:// + tuic://）
 #              - Shadowrocket（小火箭）iOS 版：原生支持 TUIC v5，anytls:// 安全忽略
-#   xray     = Xray 兼容节点（不含 anyTLS/TUIC），保留标准 VLESS/Trojan/SOCKS5 链接
+#   xray     = Xray 兼容节点（不含 anyTLS/TUIC），保留标准 VLESS/Trojan 链接
 #              - Quantumult/Surge/Loon/Pharos/Potatso 等纯 Xray 内核客户端
 #   standard = 同 xray（兼容旧参数）
 #   unknown  = 按 full 处理；只有明确识别为纯 Xray 客户端或 ?client=xray 才降级
@@ -1044,14 +1050,14 @@ def resolve_ws_targets():
 def generate_all_links(capability='full'):
     """生成所有节点链接
 
-    【v4.15.26 dual-stack 双模式支持 + anyTLS/TUIC v5/SOCKS5】:
+    【双模式固定协议 + anyTLS/TUIC v5】:
     - DIRECT_MODE_ENABLED（直连精简模式）：
-      * full: 5节点（VLESS-Reality/Trojan-TCP/anyTLS/TUIC-v5/SOCKS5）
-      * xray: 3节点（VLESS-Reality/Trojan-TCP/SOCKS5，不含 anyTLS/TUIC）
+      * full: 4节点（VLESS-Reality/Trojan-TCP/anyTLS/TUIC-v5）
+      * xray: 2节点（VLESS-Reality/Trojan-TCP，不含 anyTLS/TUIC）
     - CDN_MODE_ENABLED（CDN全量模式）：
-      * full: 7节点（加上 VLESS-WS-CDN/Trojan-WS-CDN）
-      * xray: 5节点（加上 VLESS-WS-CDN/Trojan-WS-CDN，不含 anyTLS/TUIC）
-    - SOCKS5 仅在 ENABLE_SOCKS5=true 且用户名/密码完整时输出；否则上述数量各减 1
+      * full: 6节点（加上 VLESS-WS-CDN/Trojan-WS-CDN）
+      * xray: 4节点（加上 VLESS-WS-CDN/Trojan-WS-CDN，不含 anyTLS/TUIC）
+    - 本机 SOCKS5 只有双重显式授权才可额外发布；AI SOCKS5 永不进入订阅
     - capability='xray'：纯 Xray 内核客户端，跳过 anytls:// 和 tuic:// 非标准URI
     - capability='standard'：等同 xray（兼容旧参数）
     - v4.15.0: v2rayN 6.x+ 归 full（内置 sing-box 内核，支持 anytls:// 和 tuic://）
@@ -1162,10 +1168,10 @@ def generate_all_links(capability='full'):
 def generate_singbox_config(capability='full'):
     """生成完整sing-box JSON配置（含自动路由规则）
 
-    【标准 SOP 7 节点 / 直连 5 节点】:
-    - DIRECT_MODE_ENABLED（直连精简模式）：5 节点（Reality/Trojan-TCP/anyTLS/TUIC/SOCKS5）
-    - CDN_MODE_ENABLED（CDN全量模式）：7 节点（加 WS-CDN/Trojan-WS-CDN）
-    - SOCKS5 凭据不完整或入站禁用时各减 1
+    【标准 SOP：CDN 6 节点 / 直连 4 节点】:
+    - DIRECT_MODE_ENABLED：4 节点（Reality/Trojan-TCP/anyTLS/TUIC）
+    - CDN_MODE_ENABLED：6 节点（加 WS-CDN/Trojan-WS-CDN）
+    - 本机 SOCKS5 只有双重显式授权才可额外发布；AI SOCKS5 永不进入订阅
     - capability='full' / 'standard' 等同（v4.14.0 起两者无差异）
     """
     ws_outbounds = []
@@ -1271,7 +1277,7 @@ def generate_singbox_config(capability='full'):
         ],
         "outbounds": [
             # ePS-Auto: 用户可见的节点选择器
-            # v4.15.26 dual-stack：CDN 模式 7 节点，直连模式 5 节点（含认证 SOCKS5）
+            # 当前双模式固定协议：CDN 6 节点，直连 4 节点；SOCKS5 仅显式发布
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
@@ -1737,9 +1743,9 @@ def generate_clash_config(capability='full'):
     """生成Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
 
     【v4.15.0 dual-stack 双模式支持】:
-    - DIRECT_MODE_ENABLED（直连精简模式）：5 节点代理（含本机认证 SOCKS5）
-    - CDN_MODE_ENABLED（CDN全量模式）：7 节点代理（含本机认证 SOCKS5）
-    - SOCKS5 凭据不完整或入站禁用时各减 1
+    - DIRECT_MODE_ENABLED：固定 4 节点代理
+    - CDN_MODE_ENABLED：固定 6 节点代理
+    - 本机 SOCKS5 只有双重显式授权才可额外发布；AI SOCKS5 永不进入订阅
     - capability='full' / 'standard' 等同（v4.14.0 起两者无差异）
 
     ⚠️ Clash Meta v1.18.0+ 支持 VLESS-Reality 协议
@@ -1897,8 +1903,7 @@ def generate_clash_config(capability='full'):
         })
 
     proxy_names = [p["name"] for p in proxies]
-    # 标准 SOP：CDN 模式 7 节点、直连模式 5 节点（含本机认证 SOCKS5）
-    # ENABLE_TUIC=false 或 SOCKS5 入站不可用时分别减 1 节点
+    # 标准 SOP：CDN 模式 6 节点、直连模式 4 节点；AI SOCKS5 不发布
     auto_proxy_names_base = [
         node_name("VLESS-Reality"),
         node_name("Trojan-TCP"),
@@ -2000,9 +2005,9 @@ def create_app():
         usage_percent = round(used_gb / total_gb * 100, 1) if total_gb > 0 else 0
 
         # v4.15.0: 删除 VLESS-gRPC（用 TUIC v5 替代），节点数减 1
-        # full 能力：CDN 模式 7 节点，直连模式 5 节点（含本机认证 SOCKS5）
-        # xray 能力：CDN 模式 5 节点，直连模式 3 节点（不含 anyTLS/TUIC）
-        # TUIC 或 SOCKS5 未启用时按实际配置动态减 1
+        # full 能力：CDN 模式 6 节点，直连模式 4 节点
+        # xray 能力：CDN 模式 4 节点，直连模式 2 节点（不含 anyTLS/TUIC）
+        # 本机 SOCKS5 只有双重显式授权才额外计数
         _tuic_count = 1 if ENABLE_TUIC else 0
         _socks5_count = 1 if SOCKS5_SUBSCRIPTION_ENABLED else 0
         node_count_full = (3 if DIRECT_MODE_ENABLED else 5) + _tuic_count + _socks5_count
@@ -2169,8 +2174,8 @@ def create_app():
 
         【v4.15.3 客户端能力适配（修复 Shadowrocket 节点缺失问题）】:
         - 根据 User-Agent 自动判断客户端能力
-        - Clash Meta/mihomo/sing-box/NekoBox/NekoRay/v2rayN/v2rayNG/Shadowrocket（full）→ 7 节点（含 anyTLS + TUIC v5 + SOCKS5）
-        - Surge/Quantumult X/Loon/v2Box（xray）→ 标准URI，5 节点（含 SOCKS5，不含 anyTLS/TUIC）
+        - Clash Meta/mihomo/sing-box/NekoBox/NekoRay/v2rayN/v2rayNG/Shadowrocket（full）→ CDN 6 / direct 4 节点
+        - Surge/Quantumult X/Loon/v2Box（xray）→ CDN 4 / direct 2 节点（不含 anyTLS/TUIC）
         - direct 模式比上述 CDN 模式少 2 个 WS-CDN 节点
         - 默认未知客户端按 full 处理，避免 sing-box/GUI 拉取器被误降级
         - ?client=clash / ?client=full 强制返回全量节点（含 anyTLS）

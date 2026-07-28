@@ -1,5 +1,10 @@
 # 变更日志
 
+## [4.15.29] - 2026-07-29
+- **纠正 SOCKS5 语义**：`AI_SOCKS5_*` 只作为服务器侧 AI 出口，不再因为启用 AI 分流而向 Base64、Clash、sing-box 发布客户端 SOCKS5 节点。
+- **固定两套订阅**：direct 固定 4 节点，CDN 固定 6 节点；新增默认关闭的 `PUBLISH_SOCKS5_NODE` 双重权限，一键安装默认不开放本机 SOCKS5。
+- **生产整改**：JP 公网订阅恢复 6 节点且 CDN 101/101；HK2/HKBEIYONG 恢复 4 节点并关闭本机 1080。两台香港服务器的 AI 分流均经 JP 上游取得 OpenAI 401，三台部署门禁全部通过。
+
 ## [4.15.28] - 2026-07-28
 - **修复 JP CDN 被 direct 节点覆盖**：HKBEIYONG/HK2 健康检查不再用各自域名改写 Cloudflare 全域 skip/origin ruleset；`apply` 在脚本内部也对 direct 模式 fail-safe 跳过，未知模式拒绝执行。
 - **部署防假绿**：JP 门禁新增 Cloudflare API 回读，按受管 description 精确核对 action/enabled/expression/action_parameters、TLS 1.2 与 DDoS L7 override；`DEPLOY_MODE` 缺失或拼错也直接阻塞。

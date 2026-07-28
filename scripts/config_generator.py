@@ -94,7 +94,7 @@ cdn_sub_domain = build_sub_domain(cf_domain)
 # - sub-* 灰云直连子域名仅用于订阅端点（singbox-sub 服务），不用于 CDN 代理入站
 # - v4.13.3 教训：此处的 _ws_host 必须与 subscription_service.py 的 cdn_sni 一致
 _ws_host = cf_domain or server_ip
-enable_socks5 = env_vars.get('ENABLE_SOCKS5', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+enable_socks5 = env_vars.get('ENABLE_SOCKS5', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 socks5_port_raw = env_vars.get('SOCKS5_PORT', '1080').strip()
 try:
     socks5_port = int(socks5_port_raw)

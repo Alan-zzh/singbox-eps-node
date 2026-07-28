@@ -161,7 +161,7 @@ check_ports() {
         [ -n "$dynamic_port" ] && ports="$ports $dynamic_port"
     done
     enable_socks5_hc=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-    enable_socks5_hc=${enable_socks5_hc:-true}
+    enable_socks5_hc=${enable_socks5_hc:-false}
     if [[ "$enable_socks5_hc" =~ ^(true|1|yes|on)$ ]]; then
         socks5_port_hc=$(grep '^SOCKS5_PORT=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
         socks5_user_hc=$(grep '^SOCKS5_USER=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r')

@@ -248,7 +248,9 @@ def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_mo
     assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in singbox_tags
 
 
-def test_authenticated_socks5_is_in_all_subscription_formats(subscription_service_module, monkeypatch):
+def test_authenticated_socks5_requires_explicit_publication_in_all_formats(
+    subscription_service_module, monkeypatch
+):
     monkeypatch.setattr(subscription_service_module, "SOCKS5_SUBSCRIPTION_ENABLED", True)
     monkeypatch.setattr(subscription_service_module, "SOCKS5_USER", "eps user")
     monkeypatch.setattr(subscription_service_module, "SOCKS5_PASS", "p@ss:/word")
@@ -327,6 +329,30 @@ def test_ai_socks_credentials_never_leak_into_client_subscriptions(
     assert "secret-password" not in rendered
     assert "AI-SOCKS5-" not in rendered
     assert "ai-residential" not in rendered
+
+
+def test_ai_socks_routing_does_not_publish_a_client_socks_node(
+    subscription_service_module, monkeypatch
+):
+    monkeypatch.setattr(subscription_service_module, "AI_SOCKS5_ROUTING", "on")
+    monkeypatch.setattr(
+        subscription_service_module,
+        "AI_SOCKS5_POOL",
+        "internal.example|1080|internal-user|internal-password",
+    )
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_SUBSCRIPTION_ENABLED", False)
+
+    links = subscription_service_module.generate_all_links()
+    clash = subscription_service_module.generate_clash_config()
+    singbox = subscription_service_module.generate_singbox_config()
+
+    assert not any(link.startswith("socks5://") for link in links)
+    assert not any(proxy["type"] == "socks5" for proxy in clash["proxies"])
+    assert not any(
+        outbound.get("type") == "socks"
+        and outbound.get("tag", "").endswith("-SOCKS5")
+        for outbound in singbox["outbounds"]
+    )
 
 
 @pytest.mark.parametrize(

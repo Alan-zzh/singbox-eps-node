@@ -81,6 +81,7 @@ def test_verifier_does_not_infer_cdn_from_domain_name():
     assert "grep -qvP '^hk1\\.'" not in commands
     assert "SOCKS5_PASSWORD" in verify.CHECKS["SOCKS5_AUTH_INBOUND"]["cmd"]
     assert "ENABLE_SOCKS5" in verify.CHECKS["SOCKS5_AUTH_INBOUND"]["cmd"]
+    assert "PUBLISH_SOCKS5_NODE" in verify.CHECKS["SUBSCRIPTION_ENDPOINTS"]["cmd"]
     assert verify.CHECKS["AI_SOCKS5_OPENAI"]["severity"] == "BLOCKER"
     assert "ai_socks5_health.py" in verify.CHECKS["AI_SOCKS5_OPENAI"]["cmd"]
     assert "--require-all" not in verify.CHECKS["AI_SOCKS5_OPENAI"]["cmd"]
@@ -108,9 +109,11 @@ def test_noninteractive_installer_keeps_fail_fast_and_supports_hk2():
     assert "AI SOCKS5 业务门禁" in installer
     assert "ai_socks5_health.py" in installer
     assert "ENABLE_SOCKS5=false" in installer
+    assert "PUBLISH_SOCKS5_NODE=${PUBLISH_SOCKS5_NODE}" in installer
+    assert "是否开放本服务器的认证 SOCKS5 节点" not in installer
     assert "verify_subscription_semantics()" in installer
     assert "direct 模式不应包含 CDN 节点" in installer
-    assert "ENABLE_SOCKS5=false 时不应输出 SOCKS5 节点" in installer
+    assert "未明确发布时不应输出 SOCKS5 节点" in installer
     assert "已安全恢复既有 .env" in installer
     assert "禁止回退自签名证书" in installer
     assert "validate_ai_socks5_routing" in installer
@@ -162,11 +165,17 @@ def test_noninteractive_installer_keeps_fail_fast_and_supports_hk2():
 
 def test_config_generator_honors_socks5_enable_and_port():
     source = (PROJECT_ROOT / "scripts" / "config_generator.py").read_text(encoding="utf-8")
+    subscription_source = (
+        PROJECT_ROOT / "scripts" / "subscription_service.py"
+    ).read_text(encoding="utf-8")
+    config_source = (PROJECT_ROOT / "scripts" / "config.py").read_text(encoding="utf-8")
 
-    assert "enable_socks5 = env_vars.get('ENABLE_SOCKS5', 'true')" in source
+    assert "enable_socks5 = env_vars.get('ENABLE_SOCKS5', 'false')" in source
     assert "socks5_port = int(socks5_port_raw)" in source
     assert '"listen_port": socks5_port' in source
     assert "if enable_socks5 and socks5_user and socks5_pass else []" in source
+    assert "PUBLISH_SOCKS5_NODE" in config_source
+    assert "and PUBLISH_SOCKS5_NODE" in subscription_source
 
 
 def test_config_generator_uses_runtime_ai_socks_failover_marker_and_urltest():

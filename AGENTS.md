@@ -56,6 +56,7 @@
 
 1. **本地代码修改未部署 = 线上不生效**：改完必须走 `deploy.py`（根目录部署入口，调用 `scripts/deploy_verify.py` 验证）全流程部署 → 重跑 config_generator → 重启服务。仅 SFTP 同步文件不算完成。
 2. **协议增删必须三层同步**：① 订阅层 `subscription_service.py`（Base64 URI + sing-box JSON + Clash YAML 三处生成 + CLIENT_CAPABILITIES + CDN_PROTOCOL_KEYS + cdn_status_api）；② 服务端层 `config_generator.py`（入站块完全删除不能条件保留 `if enable_xxx`）；③ 辅助脚本 `install.sh` + `health_check.sh` + `diagnose.sh` + `cdn_monitor.py` + `cloudflare_proxy_rules.py` + `diagnose_disconnect.py`（端口/防火墙/iptables/CDN IP/诊断字典）。
+   - 用户订阅只有两套固定模板：direct=VLESS-Reality/Trojan-TCP/anyTLS/TUIC-v5 共 4 节点；CDN=上述 4 节点 + VLESS-WS-CDN/Trojan-WS-CDN 共 6 节点。`AI_SOCKS5_*` 只允许作为服务器侧 AI 出口，禁止生成客户端 SOCKS5 节点；只有老板单独明确要求时，才能同时设置 `ENABLE_SOCKS5=true` 与 `PUBLISH_SOCKS5_NODE=true` 额外发布。
    - 加回协议时用 `grep -rn "ENABLE_xxx\|enable_xxx"` 扫描所有变量引用点，确认每处都有条件包裹，推荐 `*([{...}] if enable_xxx else [])` 解包语法
    - 每次协议增删强制 `grep` 检查 `node_name("...")` 参数不能含空格（如 `"TUIC-v5"` 不是 `"TUIC v5"`）
    - CDN WS 节点命名必须带 `-CDN` 后缀：`{CC}-VLESS-WS-CDN` / `{CC}-Trojan-WS-CDN`。Base64 fragment、Clash `name`、sing-box `tag`、proxy-groups 和 `cdn_status_api` 必须一致；所有 direct 模式不输出 CDN 节点。
@@ -88,9 +89,9 @@
 ### 三、服务器识别
 
 15. **直连模式与服务器标识必须分开，禁止用地理 COUNTRY_CODE 推模式**：
-    - HK1（`hk1.290372913.xyz`）= 直接模式（默认 5 节点，关闭本机 SOCKS5 时 4 节点，无 CDN）
-    - HK2（`hk2.290372913.xyz`）= 直接模式（默认 5 节点，关闭本机 SOCKS5 时 4 节点，无 CDN）
-    - HKBEIYONG（`hkbeiyong.290372913.xyz`）= 直接模式（默认 5 节点，关闭本机 SOCKS5 时 4 节点，无 CDN）
+    - HK1（`hk1.290372913.xyz`）= 直接模式（固定 4 个订阅节点，无 CDN）
+    - HK2（`hk2.290372913.xyz`）= 直接模式（固定 4 个订阅节点，无 CDN）
+    - HKBEIYONG（`hkbeiyong.290372913.xyz`）= 直接模式（固定 4 个订阅节点，无 CDN）
     - `DEPLOY_MODE` 显式设置最高优先，fallback 用 `CF_DOMAIN.startswith(('hk1.', 'hk2.', 'hkbeiyong.'))`
     - `COUNTRY_CODE` 是节点/订阅服务器标识，安装器从 `CF_DOMAIN` 首标签安全转为大写（如 `hkbeiyong.* → HKBEIYONG`），不得用 ipinfo 地理码覆盖
 

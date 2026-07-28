@@ -51,6 +51,24 @@ for sname, sub_domain, cc, main_domain, is_cdn in servers:
             cdn_nodes = [l for l in node_lines if '-VLESS-WS' in l or '-Trojan-WS' in l]
             print(f'    节点数: {len(node_lines)} (含 {len(name_lines) - len(node_lines)} 个 proxy-group)')
             print(f'    CDN 节点: {len(cdn_nodes)}')
+            expected_names = {
+                f'{cc}-VLESS-Reality',
+                f'{cc}-Trojan-TCP',
+                f'{cc}-anyTLS',
+                f'{cc}-TUIC-v5',
+            }
+            if is_cdn:
+                expected_names |= {
+                    f'{cc}-VLESS-WS-CDN',
+                    f'{cc}-Trojan-WS-CDN',
+                }
+            actual_names = {
+                line.split('- name:', 1)[1].strip().strip('"\'')
+                for line in node_lines
+            }
+            if actual_names != expected_names:
+                print(f'    FAIL: 协议集合漂移 expected={sorted(expected_names)} actual={sorted(actual_names)}')
+                all_ok = False
             # Check server fields in CDN nodes
             if cdn_nodes:
                 # Find server lines after CDN nodes
@@ -84,8 +102,9 @@ for sname, sub_domain, cc, main_domain, is_cdn in servers:
                 proto = link.split('://')[0] if '://' in link else '?'
                 print(f'    {proto}://...')
             # v4.15.14: 默认/未知 UA 按 full 输出，避免 sing-box 拉取器被误降级成 Xray 兼容节点。
-            if len(links) < 4:
-                print(f'    WARN: 默认 UA 仅 {len(links)} 个协议 (<4，预期 full)')
+            expected_count = 6 if is_cdn else 4
+            if len(links) != expected_count or any(link.startswith('socks5://') for link in links):
+                print(f'    FAIL: 默认 UA 协议应固定为 {expected_count} 个且不得含 SOCKS5')
                 all_ok = False
         except:
             print(f'  /sub/{cc}: RAW ({len(raw)} bytes, not valid base64?)')
@@ -103,7 +122,53 @@ for sname, sub_domain, cc, main_domain, is_cdn in servers:
         code = r.stdout.strip()
         ok = code == '200'
         print(f'  /singbox/{cc}: HTTP {code} {"OK" if ok else "FAIL"}')
-        if not ok:
+        if ok:
+            r2 = subprocess.run(
+                [
+                    'curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '10',
+                    f'https://{sub_domain}:2087/singbox/{cc}',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                encoding='utf-8',
+                errors='replace',
+            )
+            try:
+                config = json.loads(r2.stdout)
+                expected_tags = {
+                    f'{cc}-VLESS-Reality',
+                    f'{cc}-Trojan-TCP',
+                    f'{cc}-anyTLS',
+                    f'{cc}-TUIC-v5',
+                }
+                if is_cdn:
+                    expected_tags |= {
+                        f'{cc}-VLESS-WS-CDN',
+                        f'{cc}-Trojan-WS-CDN',
+                    }
+                outbounds = config.get('outbounds', [])
+                actual_tags = {
+                    outbound.get('tag')
+                    for outbound in outbounds
+                    if isinstance(outbound, dict)
+                    and str(outbound.get('tag', '')).startswith(f'{cc}-')
+                }
+                has_socks = any(
+                    isinstance(outbound, dict) and outbound.get('type') == 'socks'
+                    for outbound in outbounds
+                )
+                if actual_tags != expected_tags or has_socks:
+                    print(
+                        '    FAIL: sing-box 协议集合漂移 '
+                        f'expected={sorted(expected_tags)} actual={sorted(actual_tags)} '
+                        f'socks={has_socks}'
+                    )
+                    all_ok = False
+            except (json.JSONDecodeError, TypeError, AttributeError) as exc:
+                print(f'    FAIL: sing-box JSON 无法解析: {exc}')
+                all_ok = False
+        else:
             all_ok = False
     except Exception as e:
         print(f'  /singbox/{cc}: ERROR {e}')
@@ -179,8 +244,9 @@ for sname, sub_domain, cc, main_domain, is_cdn in servers:
             decoded = base64.b64decode(raw + '==').decode('utf-8', errors='replace')
             links = [l for l in decoded.split('\n') if l.strip() and '://' in l]
             print(f'  v2rayN UA /sub/{cc}: {len(links)} 协议')
-            if len(links) < 4:
-                print(f'    WARN: v2rayN 仅 {len(links)} 个协议')
+            expected_count = 6 if is_cdn else 4
+            if len(links) != expected_count or any(link.startswith('socks5://') for link in links):
+                print(f'    FAIL: v2rayN 协议应固定为 {expected_count} 个且不得含 SOCKS5')
                 all_ok = False
         except:
             print(f'  v2rayN UA /sub/{cc}: 解码失败 ({len(raw)} bytes)')

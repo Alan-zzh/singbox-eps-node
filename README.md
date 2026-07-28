@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.15.28`
+**当前版本**: `v4.15.29`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -28,11 +28,10 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 | Trojan-WS-CDN | ✅ CF 优选 IP `:443`（按路径回源 `:2083`） | ❌ |
 | anyTLS | ✅ `:2096` | ✅ `:2096` |
 | TUIC-v5 | ✅ UDP `:443` | ✅ UDP `:443` |
-| 认证 SOCKS5 | ✅ 可选 `:1080` | ✅ 可选 `:1080` |
-
-本机认证 SOCKS5 与服务器侧 AI SOCKS5 分流是两个独立开关，支持
-`none`、仅本机 SOCKS5、仅 AI 分流、两者同时启用。AI 上游只有在经 SOCKS5
-访问 OpenAI 得到未认证 `401` 后才允许启用；全部失效时健康检查自动降级并重生成配置。
+订阅协议固定为两套：CDN 6 节点、direct 4 节点。`AI_SOCKS5_*` 仅用于服务器内部
+AI 出口分流，不生成客户端 `SOCKS5` 节点。只有明确设置
+`ENABLE_SOCKS5=true` 与 `PUBLISH_SOCKS5_NODE=true` 才额外发布本机 SOCKS5；
+AI 上游只有在访问 OpenAI 得到未认证 `401` 后才允许启用。
 
 ## 订阅端点
 
