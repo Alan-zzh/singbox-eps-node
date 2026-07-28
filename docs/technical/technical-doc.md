@@ -1,7 +1,7 @@
 # Singbox EPS Node 技术文档
-**版本**: v4.15.24 | **更新**: 2026-07-23
+**版本**: v4.15.25 | **更新**: 2026-07-28
 
-> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.24 架构和模块说明。
+> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.25 架构和模块说明。
 > 已删除/已下线的协议在末尾「已删除协议清单」明确标注，避免后续 AI 基于过时文档犯错。
 
 ---
@@ -9,12 +9,12 @@
 ## 一、项目概况
 全自动 CDN 优选 IP 管理 + 多协议代理订阅生成系统。一条命令完成部署，客户端导入订阅即可使用。
 
-- **代理内核**: sing-box 1.13.11+（JP=1.13.14，HK1=1.13.13，HK2=1.13.14；默认含 gRPC transport，但本项目不使用 gRPC 协议）
+- **代理内核**: sing-box 1.13.11+（JP=1.13.14，HK1=1.13.13，HK2/HKBEIYONG=1.13.14；默认含 gRPC transport，但本项目不使用 gRPC 协议）
 - **后端**: Python 3 + Flask
 - **数据库**: SQLite（WAL 模式）
 - **CDN**: Cloudflare（SSL 模式必须为 `full`，自签证书场景下 strict 导致 526）
 - **证书**: 用户订阅统一使用 Let's Encrypt 公网可信证书；Cloudflare Origin CA/自签名只可用于不暴露给用户客户端的回源场景
-- **部署模式**: cdn / direct（当前 JP=cdn，HK1/HK2=direct）
+- **部署模式**: cdn / direct（当前 JP=cdn，HK1/HK2/HKBEIYONG=direct）
 
 ---
 
@@ -25,7 +25,7 @@
 | 模式 | 节点数 | 协议 | singbox-cdn | 适用场景 |
 |------|--------|------|-------------|----------|
 | `cdn` | 6 | 4 直连 + 2 WS-CDN | 启动 | JP，抗封锁 |
-| `direct` | 4 | 纯直连 | 不启动 | HK1/HK2，无 CDN 依赖 |
+| `direct` | 4 | 纯直连 | 不启动 | HK1/HK2/HKBEIYONG，无 CDN 依赖 |
 
 - `DEPLOY_MODE` 显式设置优先级最高
 - 现网每台都必须显式设置 `DEPLOY_MODE`；历史 fallback 仅用于兼容，部署脚本以远端 `.env` 为真相源。
@@ -36,7 +36,7 @@
 | 服务 | 端口 | 说明 |
 |------|------|------|
 | singbox | TCP 443/8443/2083/2096/TROJAN_TCP_PORT + UDP 443 | 代理内核（6 协议 CDN 模式 / 4 协议 direct 模式） |
-| singbox-sub | 2087 | HTTPS 订阅（JP 走 sub-jp 灰云；HK1/HK2 direct 走主域名） |
+| singbox-sub | 2087 | HTTPS 订阅（JP 走 sub-jp 灰云；所有 direct 节点走主域名） |
 | singbox-cdn | - | CDN 优选 IP 监控（v4.0 用户反馈驱动版，30 分钟存活检测） |
 
 ### 节点列表（v4.15.13 真实架构）
@@ -52,7 +52,7 @@
 | {CC}-VLESS-WS-CDN | 优选IP:443 | CDN | 主域名橙云代理，路径 `/api/v1/stream` 回源 8443 |
 | {CC}-Trojan-WS-CDN | 优选IP:443 | CDN | 主域名橙云代理，路径 `/api/v1/data` 回源 2083 |
 
-**direct 模式 4 节点**（HK1/HK2）：去掉 VLESS-WS-CDN / Trojan-WS-CDN / singbox-cdn，保留 VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5。
+**direct 模式 4 节点**（HK1/HK2/HKBEIYONG）：去掉 VLESS-WS-CDN / Trojan-WS-CDN / singbox-cdn，保留 VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5。
 
 > ⚠️ AI-SOCKS5 是幕后路由出站，不是用户可见节点，不出现在订阅链接和 selector 中。
 
@@ -64,7 +64,7 @@
 | 443/UDP（源站 IP） | TUIC-v5 | ❌（直连源站） |
 | 443/TCP（Cloudflare 边缘） | VLESS-WS-CDN / Trojan-WS-CDN，按 WS 路径分流 | ✅ |
 | 2083/TCP（源站监听） | Trojan-WS-CDN 回源 | Cloudflare 回源使用 |
-| 2087 | 订阅服务（JP 使用 sub-jp；HK1/HK2 使用主域名） | ❌ |
+| 2087 | 订阅服务（JP 使用 sub-jp；direct 使用各自主域名） | ❌ |
 | 8443/TCP（源站监听） | VLESS-WS-CDN 回源 | Cloudflare 回源使用 |
 | 2096 | anyTLS | ❌（直连源站） |
 | TROJAN_TCP_PORT | Trojan-TCP（随机 10000-65535） | ❌ |
@@ -75,20 +75,22 @@
 | 用途 | 域名 | 云色 | 说明 |
 |------|------|------|------|
 | CDN 代理节点（VLESS-WS/Trojan-WS 入站） | 主域名 `jp.290372913.xyz` | 橙云 `proxied=true` | 当前唯一 CF CDN 节点 |
-| 订阅端点（/clash /sub /singbox） | JP: `sub-jp.290372913.xyz`；HK1/HK2: 各自主域名 | 灰云/直连 | 订阅入口，不是 CDN 节点 fallback |
+| 订阅端点（/clash /sub /singbox） | JP: `sub-jp.290372913.xyz`；direct: 各自主域名 | 灰云/直连 | 订阅入口，不是 CDN 节点 fallback |
 
 > 两类严格分离，**CDN 节点不得用 sub-***。
 > v4.15.13 铁律：CDN WS 节点名必须保留 `-CDN` 后缀，`sub-*` 不得作为 CDN 节点降级地址。
 
-### 3 台服务器
+### 4 台服务器
 
 | 服务器 | IP | 域名 | 模式 | 协议数 | 备注 |
 |--------|----|----|------|--------|------|
 | JP | 3.113.4.86 | jp.290372913.xyz | CDN | 6 | sing-box 1.13.14（2026-07-19 迁移，原 43.207.152.47 已弃用） |
 | HK1 | 47.243.72.97 | hk1.290372913.xyz | direct | 4 | sing-box 1.13.13，阿里云 200GB/月 |
 | HK2 | 47.238.146.170 | hk2.290372913.xyz | direct | 4 | sing-box 1.13.14，取代旧 HKCEPIN |
+| HKBEIYONG | 47.242.36.160 | hkbeiyong.290372913.xyz | direct | 4 | sing-box 1.13.14，香港备用；2GB 磁盘保留原生 BBR+FQ |
 
 > ❌ 旧 HK/HKCEPIN/SG 已从当前服务器库和 Cloudflare DNS 删除。
+> 2026-07-28 HK1 整机端口超时；HKBEIYONG 当前已完成公网订阅、TLS、SOCKS5 与健康检查验收。
 
 ### 文件结构
 ```
@@ -126,8 +128,8 @@
 - 服务器 IP 自动检测（`_detect_server_ip()`）
 - 域名/IP 动态判断（`get_sub_domain()`）
 - 端口硬编码锁定 + SHA256 校验和防篡改
-- `DEPLOY_MODE` 显式设置最高优先级，fallback 用 `CF_DOMAIN.startswith('hk1.')` 判断（v4.15.2 铁律：**禁止用 COUNTRY_CODE**）
-- `COUNTRY_CODE` 从 .env 读取（install.sh 基于 CF_DOMAIN 前缀推导，见下文）
+- `DEPLOY_MODE` 显式设置最高优先级，固定香港直连节点的旧配置才使用 `hk1./hk2./hkbeiyong.` 域名前缀 fallback（铁律：**禁止用 COUNTRY_CODE 推模式**）
+- `COUNTRY_CODE` 从 .env 读取（install.sh 基于 CF_DOMAIN 首标签推导，见下文）
 - `.env` 解析优先 `python-dotenv`，降级时兼容历史 `KEY=  # 注释` 遗留格式
 - TUIC 规避配置，SOCKS5 凭据从环境变量读取
 
@@ -138,7 +140,7 @@
 - CDN 纠错机制：`get_cdn_ip_for_protocol()` 连通性检测，连不上自动回退域名（Bug #57）
 - SOCKS5 AI 路由规则（可选项，默认关闭）
 - TUIC v5 端口配置
-- 按月流量统计（SQLite 持久化，当前 JP=19 号、HK1/HK2=1 号）
+- 按月流量统计（SQLite 持久化，当前 JP=19 号、香港 direct=1 号）
 - `/api/traffic` JSON 接口，`/api/cdn-status` CDN 状态接口
 - `subscription-userinfo` 响应头（v2rayN 不解析，新增 `/info` 端点兜底）
 
@@ -227,6 +229,7 @@
 - JP Base64/Clash/sing-box: `https://sub-jp.290372913.xyz:2087/{sub|clash|singbox}/JP`
 - HK1 direct: `https://hk1.290372913.xyz:2087/{sub|clash|singbox}/HK1`；兼容旧路径 `/sub/hk` / `/clash/hk` / `/singbox/hk`
 - HK2 direct: `https://hk2.290372913.xyz:2087/{sub|clash|singbox}/HK2`
+- HKBEIYONG direct: `https://hkbeiyong.290372913.xyz:2087/{sub|clash|singbox}/HKBEIYONG`
 - 流量查询: 各订阅域名 `/api/traffic`；整体汇总为 `/api/traffic-summary`
 - CDN 状态: `https://sub-jp.290372913.xyz:2087/api/cdn-status`（仅 JP）
 - ⚠️ 必须用域名访问，IP 访问证书不匹配
@@ -272,7 +275,7 @@
 ### 6. 按月流量统计（v3.1.1 重构）
 - **数据来源**: iptables 内核级流量计数器（sing-box 各入站端口，INPUT + OUTPUT 双向）
 - **统计维度**: 所有 sing-box 入站端口的 TCP+UDP 流量总和
-- 每台服务器按 `TRAFFIC_RESET_DAY` 更新 baseline（当前 JP=19，HK1/HK2=1），不清零 iptables 内核计数器
+- 每台服务器按 `TRAFFIC_RESET_DAY` 更新 baseline（当前 JP=19，香港 direct=1），不清零 iptables 内核计数器
 - API: `/api/traffic`（返回 JSON）
 - `subscription-userinfo` 响应头（v2rayN 不解析，新增 `/info` 端点兜底）
 
@@ -296,13 +299,14 @@
 - 客户端: geosite-cn.srs / geoip-cn.srs / geosite-geolocation-!cn.srs
 - 服务端: 不需要 geoip/geosite（catch-all 处理 direct）
 
-### 10. COUNTRY_CODE 防复发（v4.15.12）
-install.sh 基于 CF_DOMAIN 前缀推导正确的 COUNTRY_CODE：
+### 10. COUNTRY_CODE 防复发（v4.15.25）
+install.sh 把 CF_DOMAIN 首标签校验后转为大写服务器标识：
 - `jp.*` → JP
 - `hk1.*` → HK1
 - `hk2.*` → HK2
+- `hkbeiyong.*` → HKBEIYONG
 
-不再依赖 ipinfo.io 自动检测作为服务器标识。历史 `hk.*` / `hkcepin.*` 分支仅保留安装兼容，不在当前部署库中。
+不再依赖 ipinfo.io 地理检测作为服务器标识。CDN/direct 模式优先服从显式 `DEPLOY_MODE`；HK1/HK2/HKBEIYONG 的旧配置可用固定域名前缀作 direct fallback。
 
 ---
 
@@ -349,8 +353,9 @@ install.sh 基于 CF_DOMAIN 前缀推导正确的 COUNTRY_CODE：
 | 变量 | 说明 |
 |------|------|
 | CF_API_TOKEN | Cloudflare API Token（37/40/48 字均合法，证书申请+规则维护） |
+| CF_API_EMAIL | Cloudflare Global API Key 认证配套邮箱；`cfat_` scoped token 不需要 |
 | CF_ZONE_ID | Cloudflare Zone ID |
-| COUNTRY_CODE | 服务器标识（当前 JP/HK1/HK2，install.sh 基于 CF_DOMAIN 推导） |
+| COUNTRY_CODE | 服务器标识（当前 JP/HK1/HK2/HKBEIYONG，install.sh 基于 CF_DOMAIN 首标签推导） |
 | SUB_TOKEN | 订阅 Token |
 | SOCKS5_USER / SOCKS5_PASSWORD | 本机 SOCKS5 入站认证凭据 |
 | AI_SOCKS5_SERVER / PORT / USER / PASS | AI SOCKS5 凭据 |
@@ -494,6 +499,7 @@ bash /root/singbox-eps-node/scripts/health_check.sh  # 手动运行
 
 | 版本 | 日期 | 更新 |
 |------|------|------|
+| v4.15.25 | 2026-07-28 | 新增 HKBEIYONG direct；修复自定义服务器标识、Global Key 邮箱认证、ACME 首装/重跑幂等与 direct 健康检查；生产 TLS/4 节点/SOCKS5 验收通过 |
 | v4.15.24 | 2026-07-23 | 新服务器安装从落盘 `.env` 读取域名；自动同步/验证 DNS；三类订阅经系统 CA 真实下载与格式检查后才允许成功 |
 | v4.15.23 | 2026-07-23 | 修复 HK2/JP 灰云订阅自签名证书假 200；统一 Let's Encrypt 签发/续签；部署与 full audit 强制真实 TLS 信任验证 |
 | v4.15.22 | 2026-07-23 | HK1/HK2 流量重置日统一为每月 1 号；本地服务器级配置在部署时强制同步并回读；两条香港 DNS 固定灰云 |
@@ -523,7 +529,7 @@ bash install.sh reinstall     # 重装操作系统（需 root 密码）
 ### 流量统计
 - 首页: `https://sub-{CC}:2087/`
 - API: `https://sub-{CC}:2087/api/traffic`
-- 重置: 按各机 `TRAFFIC_RESET_DAY`（JP=19，HK1/HK2=1）更新 baseline
+- 重置: 按各机 `TRAFFIC_RESET_DAY`（JP=19，香港 direct=1）更新 baseline
 
 ### Telegram 机器人
 .env 中配置 `TG_BOT_TOKEN` 和 `TG_ADMIN_CHAT_ID`，可用命令：/状态 /续签 /订阅 /重启 /优化 /设置住宅 /删除住宅

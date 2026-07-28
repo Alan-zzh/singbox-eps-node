@@ -69,7 +69,14 @@ def test_verifier_does_not_infer_cdn_from_domain_name():
 def test_noninteractive_installer_keeps_fail_fast_and_supports_hk2():
     installer = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
     assert "\n    set +e\n" not in installer
-    assert 'hk2.*)      COUNTRY_CODE="HK2"' in installer
+    assert "_domain_label=$(printf '%s' \"$CF_DOMAIN_INPUT\" | cut -d. -f1)" in installer
+    assert "COUNTRY_CODE=$(printf '%s' \"$_domain_label\" | tr '[:lower:]' '[:upper:]')" in installer
+    assert "CF_DOMAIN 首标签不能作为安全服务器标识" in installer
+    assert 'CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}' not in installer
+    assert "CF_API_TOKEN: 已配置（内容不写入安装日志）" in installer
+    assert 'CF_DEFAULT_API_EMAIL="${CF_API_EMAIL:-}"' in installer
+    assert "CF_API_EMAIL=${CF_API_EMAIL_INPUT}" in installer
+    assert "Global API Key 认证必填" in installer
     assert 'INSTALL_BUNDLE="${INSTALL_BUNDLE:-}"' in installer
     assert "SOCKS5_PASSWORD=${SOCKS5_PASSWORD}" in installer
     assert "repair_bootstrap_network_and_apt" in installer
@@ -84,7 +91,7 @@ def test_noninteractive_installer_keeps_fail_fast_and_supports_hk2():
     assert "https://get.acme.sh" in installer
     assert "setup_subscription_dns" in installer
     assert "cloudflare_proxy_rules.py\" dns-sync" in installer
-    assert "grep -Eqi '^hk[12]\\.'" in installer
+    assert "grep -Eqi '^(hk[12]|hkbeiyong)\\.'" in installer
 
 
 def test_fresh_installer_reads_persisted_domain_and_strictly_downloads_all_subscriptions():
@@ -112,9 +119,14 @@ def test_hk2_fallback_is_direct_across_server_and_subscription_layers():
     subscription_source = (PROJECT_ROOT / "scripts" / "subscription_service.py").read_text(encoding="utf-8")
     health_source = (PROJECT_ROOT / "scripts" / "health_check.sh").read_text(encoding="utf-8")
 
-    assert "startswith(('hk1.', 'hk2.'))" in config_source
-    assert "startswith(('hk1.', 'hk2.'))" in subscription_source
-    assert "grep -qE '^hk[12]\\.'" in health_source
+    assert "startswith(('hk1.', 'hk2.', 'hkbeiyong.'))" in config_source
+    assert "startswith(('hk1.', 'hk2.', 'hkbeiyong.'))" in subscription_source
+    assert "grep -qE '^(hk[12]|hkbeiyong)\\.'" in health_source
+    assert "DEPLOY_MODE_HC=" in health_source
+    assert 'if [ "$DEPLOY_MODE_HC" = "direct" ]' in health_source
+    assert 'services="singbox singbox-sub"' in health_source
+    assert 'ports="443 2087 2096"' in health_source
+    assert r'''tr -d "\"' \t\r\n"''' in health_source
 
 
 def test_subscription_certificate_manager_refuses_self_signed_fallback():
@@ -123,3 +135,14 @@ def test_subscription_certificate_manager_refuses_self_signed_fallback():
     assert "if obtain_letsencrypt_certificate(domain, extra_domains):" in source
     assert "subscription_certificate_is_trusted" in source
     assert "sys.exit(0 if obtain_certificate() else 1)" in source
+    assert "systemctl list-unit-files" in source
+    assert "'--reloadcmd', reload_cmd" in source
+    assert "'systemctl try-restart singbox singbox-sub'" not in source
+    assert "'Domains not changed' in issue_output" in source
+    assert "'Skipping' in issue_output" in source
+
+
+def test_full_audit_includes_hkbeiyong_and_supports_targeted_run():
+    source = (PROJECT_ROOT / "tests" / "full_audit.py").read_text(encoding="utf-8")
+    assert "('HKBEIYONG', 'hkbeiyong.290372913.xyz', 'HKBEIYONG'" in source
+    assert "parser.add_argument('--server'" in source

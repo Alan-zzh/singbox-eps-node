@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v4.15.24
+# 版本: v4.15.25
 # 用途: 新VPS全自动部署（含双部署模式+系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -48,6 +48,7 @@ REPO_URL="https://github.com/Alan-zzh/singbox-eps-node"
 
 CF_DEFAULT_DOMAIN="${CF_DOMAIN:-}"
 CF_DEFAULT_API_TOKEN="${CF_API_TOKEN:-}"
+CF_DEFAULT_API_EMAIL="${CF_API_EMAIL:-}"
 INSTALL_BUNDLE="${INSTALL_BUNDLE:-}"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -759,14 +760,14 @@ generate_reality_keys() {
 }
 
 select_deploy_mode() {
-    # HK1/HK2 是固定纯直连节点，必须按域名前缀区分，禁止被地理代码误判为 CDN。
+    # 固定纯直连节点必须按域名前缀区分，禁止被地理代码误判为 CDN。
     _direct_domain=""
     if [ -n "${CF_DOMAIN:-}" ]; then
         _direct_domain="$CF_DOMAIN"
     elif [ -f "$BASE_DIR/.env" ]; then
         _direct_domain=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || echo "")
     fi
-    if [ -n "$_direct_domain" ] && echo "$_direct_domain" | grep -Eqi '^hk[12]\.'; then
+    if [ -n "$_direct_domain" ] && echo "$_direct_domain" | grep -Eqi '^(hk[12]|hkbeiyong)\.'; then
         log_info "检测到香港直连域名 ($_direct_domain)，强制使用纯直连模式（4节点，无CDN依赖）"
         DEPLOY_MODE="direct"
         return
@@ -907,11 +908,14 @@ create_env_file() {
     fi
     CF_DOMAIN_INPUT="${CF_DEFAULT_DOMAIN}"
     CF_API_TOKEN_INPUT="${CF_DEFAULT_API_TOKEN}"
+    CF_API_EMAIL_INPUT="${CF_DEFAULT_API_EMAIL}"
     if [ -f "$BASE_DIR/.env" ]; then
         OLD_CF_DOMAIN=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
         OLD_CF_TOKEN=$(grep "^CF_API_TOKEN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        OLD_CF_EMAIL=$(grep "^CF_API_EMAIL=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
         [ -n "$OLD_CF_DOMAIN" ] && CF_DOMAIN_INPUT="$OLD_CF_DOMAIN"
         [ -n "$OLD_CF_TOKEN" ] && CF_API_TOKEN_INPUT="$OLD_CF_TOKEN"
+        [ -n "$OLD_CF_EMAIL" ] && CF_API_EMAIL_INPUT="$OLD_CF_EMAIL"
     fi
     if [ -z "$CF_DOMAIN_INPUT" ] && [ "${AUTO_YES:-0}" != "1" ]; then
         echo ""
@@ -928,14 +932,17 @@ create_env_file() {
         fi
         if [ -n "$CF_DOMAIN_INPUT" ]; then
             read -p "  Cloudflare API Token（留空要求DNS已提前正确配置）: " CF_API_TOKEN_INPUT
+            if [ -n "$CF_API_TOKEN_INPUT" ] && ! printf '%s' "$CF_API_TOKEN_INPUT" | grep -q '^cfat_'; then
+                read -p "  Cloudflare 账户邮箱（Global API Key 认证必填）: " CF_API_EMAIL_INPUT
+            fi
         fi
     fi
     if [ -z "$CF_DOMAIN_INPUT" ]; then
         log_error "CF_DOMAIN 不能为空：可信 HTTPS 订阅必须使用可验证域名"
         return 1
     fi
-    # HK1/HK2 铁律：二次确认，防止交互选择或旧环境把香港直连节点切成 CDN。
-    if echo "$CF_DOMAIN_INPUT" | grep -Eqi '^hk[12]\.'; then
+    # 固定香港直连节点二次确认，防止交互选择或旧环境把它们切成 CDN。
+    if echo "$CF_DOMAIN_INPUT" | grep -Eqi '^(hk[12]|hkbeiyong)\.'; then
         if [ "$DEPLOY_MODE" != "direct" ]; then
             log_warn "检测到香港直连域名 ($CF_DOMAIN_INPUT)，强制切换为纯直连模式（禁用 CDN）"
             DEPLOY_MODE="direct"
@@ -944,21 +951,22 @@ create_env_file() {
         fi
     fi
     log_info "CF_DOMAIN: ${CF_DOMAIN_INPUT}"
-    log_info "CF_API_TOKEN: ${CF_API_TOKEN_INPUT:0:8}..."
-    # v4.15.13 防复发:基于 CF_DOMAIN 前缀推导正确的 COUNTRY_CODE(服务器标识)
-    # 根因:ipinfo.io 返回 ISO 国家代码(如 HK),但项目 COUNTRY_CODE 是服务器标识(JP/HK/HK1/HKCEPIN)
-    # HKCEPIN/HK1 服务器都在香港→ipinfo 返回 HK,但项目需要 HKCEPIN/HK1
-    # 历史故障:v4.15.x 部署 HKCEPIN/HK1 时 COUNTRY_CODE=HK 导致订阅路由 /clash/HKCEPIN 返回 404
+    if [ -n "$CF_API_TOKEN_INPUT" ]; then
+        log_info "CF_API_TOKEN: 已配置（内容不写入安装日志）"
+    else
+        log_warn "CF_API_TOKEN: 未配置（只验证现有 DNS）"
+    fi
+    # COUNTRY_CODE 是服务器标识，不是地理国家码。统一从 CF_DOMAIN 的首个标签推导，
+    # 避免自定义节点（如 hkbeiyong.*）被 ipinfo.io 的 HK 覆盖后生成错误订阅路径。
     if [ -n "$CF_DOMAIN_INPUT" ]; then
-        case "$CF_DOMAIN_INPUT" in
-            jp.*)       COUNTRY_CODE="JP" ;;
-            hk1.*)      COUNTRY_CODE="HK1" ;;
-            hk2.*)      COUNTRY_CODE="HK2" ;;
-            hkcepin.*)  COUNTRY_CODE="HKCEPIN" ;;
-            hk.*)       COUNTRY_CODE="HK" ;;
-            *)          log_warn "未知 CF_DOMAIN 前缀($CF_DOMAIN_INPUT),COUNTRY_CODE 保持自动检测值: $COUNTRY_CODE" ;;
-        esac
-        log_info "基于域名前缀修正 COUNTRY_CODE: $COUNTRY_CODE (原 ipinfo 值已覆盖)"
+        _domain_label=$(printf '%s' "$CF_DOMAIN_INPUT" | cut -d. -f1)
+        if printf '%s' "$_domain_label" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,62}$'; then
+            COUNTRY_CODE=$(printf '%s' "$_domain_label" | tr '[:lower:]' '[:upper:]')
+            log_info "基于域名前缀设置服务器标识 COUNTRY_CODE: $COUNTRY_CODE"
+        else
+            log_error "CF_DOMAIN 首标签不能作为安全服务器标识: $_domain_label"
+            return 1
+        fi
     fi
     cat > "$BASE_DIR/.env" << EOF
 # Singbox EPS Node 环境变量配置
@@ -1003,6 +1011,7 @@ SOCKS5_PASSWORD=${SOCKS5_PASSWORD}
 
 # ============ 可选 ============
 CF_API_TOKEN=${CF_API_TOKEN_INPUT}
+CF_API_EMAIL=${CF_API_EMAIL_INPUT}
 COUNTRY_CODE=${COUNTRY_CODE}
 SUB_TOKEN=
 AI_SOCKS5_SERVER=${AI_SOCKS5_SERVER}
@@ -2033,7 +2042,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.24${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.25${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -2100,7 +2109,7 @@ main() {
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.24${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.25${NC}"
             echo "=========================================="
             echo ""
             check_root

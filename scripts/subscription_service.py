@@ -133,8 +133,8 @@ except ImportError:
     CDN_PREFERRED_IPS = []
     CDN_IP_BLACKLIST = []
     CDN_IP_HARD_REJECT = {'latency_ms': 500, 'packet_loss_rate': 0.3, 'download_speed_mbps': 5}
-    # HK1/HK2 必须按域名前缀识别为直连，禁止用地理 COUNTRY_CODE。
-    _hk_direct_fallback = (os.getenv('CF_DOMAIN', '') or '').strip().lower().startswith(('hk1.', 'hk2.'))
+    # 固定香港直连节点必须按域名前缀识别，禁止用地理 COUNTRY_CODE。
+    _hk_direct_fallback = (os.getenv('CF_DOMAIN', '') or '').strip().lower().startswith(('hk1.', 'hk2.', 'hkbeiyong.'))
     _env_dm = os.getenv('DEPLOY_MODE', '').lower().strip()
     if _env_dm in ('cdn', 'direct'):
         DEPLOY_MODE = _env_dm
@@ -163,9 +163,9 @@ CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
 
 # v4.15.0: HK_DIRECT_MODE 作为 legacy 标志从 config.py 导入
 # 实际逻辑以 CDN_MODE_ENABLED / DIRECT_MODE_ENABLED 为准
-# fallback 基于 CF_DOMAIN 域名前缀（hk1./hk2.），禁止用 COUNTRY_CODE
+# fallback 基于固定 direct 的 CF_DOMAIN 域名前缀，禁止用 COUNTRY_CODE
 if 'HK_DIRECT_MODE' not in dir():
-    HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith(('hk1.', 'hk2.'))
+    HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith(('hk1.', 'hk2.', 'hkbeiyong.'))
 
 # 标准 6 节点 SOP：Reality / Trojan-TCP / anyTLS / TUIC + WS-CDN / Trojan-WS-CDN
 #   full     = 完整 6 节点（含 anyTLS anytls:// + TUIC v5 tuic:// URI）

@@ -17,7 +17,7 @@
 
 | 凭据 | 读取方式 | 说明 |
 |------|----------|------|
-| CF API Token | `Get-Content .env \| Select-String "CF_API_TOKEN"` | CF API 访问，37/40/48 字均合法 |
+| CF API Token/Email | `Get-Content .env \| Select-String "CF_API_TOKEN\|CF_API_EMAIL"` | CF API 访问；Global Key 需要 Email，scoped token 不需要 |
 | CF Zone ID | `Get-Content .env \| Select-String "CF_ZONE_ID"` | CF 域名区域 ID |
 | 各协议密码/UUID | `Get-Content .env \| Select-String "UUID\|PASSWORD\|KEY"` | .env 里的全部凭据 |
 | 远程服务器 SSH | `python scripts/config.py` → `get_ssh_credentials()` | 从 .env 读取 SSH 主机/密码 |
@@ -58,7 +58,7 @@
 2. **协议增删必须三层同步**：① 订阅层 `subscription_service.py`（Base64 URI + sing-box JSON + Clash YAML 三处生成 + CLIENT_CAPABILITIES + CDN_PROTOCOL_KEYS + cdn_status_api）；② 服务端层 `config_generator.py`（入站块完全删除不能条件保留 `if enable_xxx`）；③ 辅助脚本 `install.sh` + `health_check.sh` + `diagnose.sh` + `cdn_monitor.py` + `cloudflare_proxy_rules.py` + `diagnose_disconnect.py`（端口/防火墙/iptables/CDN IP/诊断字典）。
    - 加回协议时用 `grep -rn "ENABLE_xxx\|enable_xxx"` 扫描所有变量引用点，确认每处都有条件包裹，推荐 `*([{...}] if enable_xxx else [])` 解包语法
    - 每次协议增删强制 `grep` 检查 `node_name("...")` 参数不能含空格（如 `"TUIC-v5"` 不是 `"TUIC v5"`）
-   - CDN WS 节点命名必须带 `-CDN` 后缀：`{CC}-VLESS-WS-CDN` / `{CC}-Trojan-WS-CDN`。Base64 fragment、Clash `name`、sing-box `tag`、proxy-groups 和 `cdn_status_api` 必须一致；HK1/HK2 direct 模式不输出 CDN 节点。
+   - CDN WS 节点命名必须带 `-CDN` 后缀：`{CC}-VLESS-WS-CDN` / `{CC}-Trojan-WS-CDN`。Base64 fragment、Clash `name`、sing-box `tag`、proxy-groups 和 `cdn_status_api` 必须一致；所有 direct 模式不输出 CDN 节点。
 3. **CRLF 换行污染**：Windows → Linux 的 `.env` 文件行尾 `\r` 会导致 hex 校验失败。所有 `.env` 读取命令加 `tr -d "\r"`。工具链：`deploy.py` pre-flight check + `scripts/deploy_verify.py` + `health_check.sh` 均已处理。
 4. **凭据一致性**：服务端生成随机凭据时必须写入 `.env` 并被订阅端读取。订阅端实现凭据降级——`ENABLE_xxx=true` 且凭据为空时自动 `ENABLE_xxx=False`。
 5. **Debian 12 PEP 668**：`pip3 install` 被阻止 → 用 `apt install python3-xxx` 或 `--break-system-packages`。一键安装脚本必须处理。
@@ -71,7 +71,7 @@
 9. **CF SSL 模式必须为 full**（非 strict/full_strict），自签证书场景下 strict 导致 526。
 10. **DNS proxied 按用途区分**：CDN 代理节点（VLESS-WS/Trojan-WS 入站）用主域名 `cf_domain`（橙云 `proxied=true`）；订阅端点（/clash /sub /singbox）用 sub-* 子域名（灰云 `proxied=false` 直连源站）。**两类严格分离，CDN 节点不得用 sub-***。
     - `sub-*` 只允许作为订阅入口，不得作为 CDN 节点 fallback；项目已有直连节点，CDN 节点要保持真正 CDN 路径。
-11. **CF API Token 长度**：40 字 hex(Global Key)、`cfat_` 开头 48 字(scoped token)、37 字短格式均合法。不要因长度判定"截断"。
+11. **CF API Token 长度与认证方式**：40 字 hex(Global Key)、`cfat_` 开头 48 字(scoped token)、37 字短格式均合法。不要因长度判定"截断"。Global API Key 必须同时提供并持久化 `CF_API_EMAIL`，请求使用 `X-Auth-Key + X-Auth-Email`；`cfat_` scoped token 使用 Bearer 认证。安装日志不得输出任何 Token 前缀。
 12. **CF 全局设置会漂移**：免费版 Managed Rules 自动启用拦截设置。`health_check.sh` 每 15 分钟巡检 `security_level/browser_check/bot_fight_mode/ssl/min_tls_version`，不符合自动修复。
 13. **L7 DDoS eoff 不作为 health_check 修复目标**：`cloudflare_proxy_rules.py apply` 只维护 custom skip 规则和 TLS 1.2，确保删除 ddos_l7 override。CF 免费版 DDoS L7 无法通过 skip 规则绕过，WS 路径已改为非代理特征路径（`/api/v1/stream` `/api/v1/data`）以降低 ML 误报率。CDN 节点始终使用主域名橙云代理，不降级到 sub-*。
 14. **CDN WS 验证标准 SOP**（防假阳性）：
@@ -86,10 +86,12 @@
     - **真实标准**：`tests/full_audit.py` 全 101 ✅；客户端实际能通 ✅
 ### 三、服务器识别
 
-15. **HK1/HK2 直连模式必须按域名前缀区分，禁止用 COUNTRY_CODE**：
+15. **直连模式与服务器标识必须分开，禁止用地理 COUNTRY_CODE 推模式**：
     - HK1（`hk1.290372913.xyz`）= 直接模式（4 节点，无 CDN）
     - HK2（`hk2.290372913.xyz`）= 直接模式（4 节点，无 CDN）
-    - `DEPLOY_MODE` 显式设置最高优先，fallback 用 `CF_DOMAIN.startswith(('hk1.', 'hk2.'))`
+    - HKBEIYONG（`hkbeiyong.290372913.xyz`）= 直接模式（4 节点，无 CDN）
+    - `DEPLOY_MODE` 显式设置最高优先，fallback 用 `CF_DOMAIN.startswith(('hk1.', 'hk2.', 'hkbeiyong.'))`
+    - `COUNTRY_CODE` 是节点/订阅服务器标识，安装器从 `CF_DOMAIN` 首标签安全转为大写（如 `hkbeiyong.* → HKBEIYONG`），不得用 ipinfo 地理码覆盖
 
 ### 四、协议与数据
 

@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.15.24`
+**当前版本**: `v4.15.25`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -20,7 +20,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 
 ## 协议
 
-| 协议 | CDN 模式（JP） | 直连模式（HK1/HK2） |
+| 协议 | CDN 模式（JP） | 直连模式（HK1/HK2/HKBEIYONG） |
 |------|--------------------------|-----------------|
 | VLESS-Reality | ✅ `:443` | ✅ `:443` |
 | Trojan-TCP | ✅ 随机端口 | ✅ 随机端口 |
@@ -34,15 +34,15 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 | 端点 | 用途 |
 |------|------|
 | `https://sub-jp.290372913.xyz:2087/sub/JP` | JP Base64 订阅（CDN 模式） |
-| `https://{hk1|hk2}.290372913.xyz:2087/sub/{HK1|HK2}` | 香港 Base64 订阅（直连模式） |
+| `https://{hk1|hk2|hkbeiyong}.290372913.xyz:2087/sub/{HK1|HK2|HKBEIYONG}` | 香港 Base64 订阅（直连模式） |
 | 同域名下 `/clash/{CC}` / `/singbox/{CC}` | Clash Meta YAML / sing-box JSON |
 | 同域名下 `/info/{CC}` | 流量查询 |
 
-> CC = 节点标识（JP/HK1/HK2）。只有 JP 走 Cloudflare CDN；JP 订阅端点走 `sub-jp` 灰云直连，CDN 节点仍使用 `jp` 主域名/优选 IP。
-> HK1/HK2 均为直连模式，订阅分别走 `hk1.290372913.xyz:2087` 和 `hk2.290372913.xyz:2087`，不生成 WS-CDN 节点。HK1 仍保留旧 `/sub/hk`、`/clash/hk`、`/singbox/hk`、`/info/hk` 兼容路径。
-> 流量重置日：JP 每月 19 号，HK1/HK2 每月 1 号。本地部署由 `{CC}_TRAFFIC_RESET_DAY` 持久同步到各服务器 `.env`。
+> CC = 节点标识（JP/HK1/HK2/HKBEIYONG）。只有 JP 走 Cloudflare CDN；JP 订阅端点走 `sub-jp` 灰云直连，CDN 节点仍使用 `jp` 主域名/优选 IP。
+> HK1/HK2/HKBEIYONG 均为直连模式，各走自身主域名，不生成 WS-CDN 节点。HK1 仍保留旧 `/sub/hk`、`/clash/hk`、`/singbox/hk`、`/info/hk` 兼容路径。
+> 流量重置日：JP 每月 19 号，香港直连节点每月 1 号。本地部署由 `{CC}_TRAFFIC_RESET_DAY` 持久同步到各服务器 `.env`。
 > 订阅证书：所有用户实际访问的灰云域名必须使用 Let's Encrypt 公网可信证书；客户端不需要开启“跳过证书验证”。
-> 一键安装会先按模式同步 Cloudflare DNS（JP 主域名橙云、订阅域名灰云；HK1/HK2 主域名灰云），再签发证书；最终必须用系统 CA 真实下载并校验 Base64、Clash、sing-box 三类订阅，任一失败都会以非零状态中止。
+> 一键安装会先按模式同步 Cloudflare DNS（JP 主域名橙云、订阅域名灰云；所有 direct 主域名灰云），再签发证书；最终必须用系统 CA 真实下载并校验 Base64、Clash、sing-box 三类订阅，任一失败都会以非零状态中止。Cloudflare Global API Key 认证必须同时提供账户邮箱。
 > Base64 订阅默认输出 sing-box 全量节点；只有明确识别为纯 Xray 客户端或手动加 `?client=xray` 才降级。
 
 ## 常用命令

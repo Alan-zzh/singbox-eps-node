@@ -184,11 +184,11 @@ TRAFFIC_AGGREGATE_ENDPOINTS = [
 # v4.14.0: anyTLS 协议密码（安装时随机生成，与 TROJAN_PASSWORD 独立）
 ANYTLS_PASSWORD = os.getenv('ANYTLS_PASSWORD', '')
 
-# HK1/HK2 是固定香港直连节点；只能按域名前缀判断，禁止用地理 COUNTRY_CODE。
+# HK1/HK2/HKBEIYONG 是固定香港直连节点；只能按域名前缀判断，禁止用地理 COUNTRY_CODE。
 # 此标志仅作旧 .env 缺少 DEPLOY_MODE 时的兼容依据；显式 DEPLOY_MODE 仍有最高优先级。
 _hk_direct_domain_fallback = (
     _load_env_value('CF_DOMAIN', '') or os.getenv('CF_DOMAIN', '') or ''
-).strip().lower().startswith(('hk1.', 'hk2.'))
+).strip().lower().startswith(('hk1.', 'hk2.', 'hkbeiyong.'))
 HK_DIRECT_MODE = _hk_direct_domain_fallback
 
 # v4.15.0: 部署模式 dual-stack 支持
@@ -197,7 +197,7 @@ HK_DIRECT_MODE = _hk_direct_domain_fallback
 # 向后兼容策略（基于域名前缀，非 COUNTRY_CODE）：
 #   - 如果 .env 中显式设置了 DEPLOY_MODE → 遵循显式设置（最高优先级）
 #   - 如果未设置 DEPLOY_MODE（旧部署升级）：
-#     * HK1/HK2（CF_DOMAIN 以 hk1./hk2. 开头）→ 默认 direct
+#     * 固定香港直连域名（hk1./hk2./hkbeiyong.）→ 默认 direct
 #     * 其他节点（JP 等）→ 默认 cdn
 _env_deploy_mode = os.getenv('DEPLOY_MODE', '').lower().strip() or _load_env_value('DEPLOY_MODE', '').lower().strip()
 if _env_deploy_mode in ('cdn', 'direct'):

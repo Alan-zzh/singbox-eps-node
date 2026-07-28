@@ -10,6 +10,8 @@ BASE_DIR="/root/singbox-eps-node"
 LOG_DIR="$BASE_DIR/logs"
 LOG_FILE="$LOG_DIR/health_check.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+DEPLOY_MODE_HC=$(grep '^DEPLOY_MODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+DEPLOY_MODE_HC=${DEPLOY_MODE_HC:-cdn}
 
 # 告警阈值（v4.10.20 新增）
 ESTAB_WARN=1500     # estab 连接数告警阈值（JP 实测 605，预留 2.5x 余量）
@@ -41,9 +43,15 @@ check_memory() {
     log "  系统内存: 总${MEM_TOTAL}MB | 可用${MEM_AVAILABLE}MB | 使用率${MEM_USED_PCT}%"
 
     if [ "$MEM_AVAILABLE" -lt "$MEM_LOW" ] || [ "$MEM_USED_PCT" -gt 80 ]; then
-        log "  ⚠️  内存紧张，重启 cdn_monitor 释放内存"
-        systemctl restart singbox-cdn
-        sleep 5
+        if [ "$DEPLOY_MODE_HC" = "direct" ]; then
+            log "  ⚠️  内存紧张（direct 模式无 cdn_monitor），重启 subscription_service 释放内存"
+            systemctl restart singbox-sub
+            sleep 5
+        else
+            log "  ⚠️  内存紧张，重启 cdn_monitor 释放内存"
+            systemctl restart singbox-cdn
+            sleep 5
+        fi
         MEM_AFTER=$(free -m | awk '/^Mem:/{print $7}')
         if [ "$MEM_AFTER" -lt 120 ]; then
             log "  ⚠️  重启 cdn 后仍紧张(${MEM_AFTER}MB)，再重启 subscription_service"
@@ -103,7 +111,15 @@ check_config_json() {
 # ============================================================
 check_services() {
     log_section "2. 三服务状态"
-    for svc in singbox singbox-sub singbox-cdn; do
+    services="singbox singbox-sub"
+    if [ "$DEPLOY_MODE_HC" = "cdn" ]; then
+        services="$services singbox-cdn"
+    else
+        systemctl stop singbox-cdn 2>/dev/null || true
+        systemctl disable singbox-cdn 2>/dev/null || true
+        log "  ⏭️  singbox-cdn: direct 模式已禁用"
+    fi
+    for svc in $services; do
         if systemctl is-active --quiet "$svc"; then
             log "  ✓  $svc: active"
         else
@@ -125,7 +141,15 @@ check_services() {
 check_ports() {
     log_section "3. 端口监听"
     # v4.14.0: 2053(HTTPUpgrade) 已下线，新增 2096(anyTLS)
-    for port in 443 2087 8443 2083 2096; do
+    ports="443 2087 2096"
+    if [ "$DEPLOY_MODE_HC" = "cdn" ]; then
+        ports="$ports 8443 2083"
+    fi
+    for dynamic_key in TROJAN_TCP_PORT SOCKS5_PORT; do
+        dynamic_port=$(grep "^${dynamic_key}=" "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '\r')
+        [ -n "$dynamic_port" ] && ports="$ports $dynamic_port"
+    done
+    for port in $ports; do
         if ss -tlnp 2>/dev/null | grep -q ":$port "; then
             log "  ✓  TCP $port 监听中"
         else
@@ -156,7 +180,7 @@ check_env_issues() {
     fi
     
     # 1. REALITY_SHORT_ID 必须是有效 hex（禁止字面值 $(openssl...)，禁止 CRLF 污染）
-    rs_val=$(grep "^REALITY_SHORT_ID=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '"'"'\r\n\t ')
+    rs_val=$(grep "^REALITY_SHORT_ID=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d "\"' \t\r\n")
     if [ -z "$rs_val" ]; then
         log "  ❌ REALITY_SHORT_ID 未设置"
     elif echo "$rs_val" | grep -qE '^[0-9a-f]{16}$'; then
@@ -181,14 +205,14 @@ check_env_issues() {
         fi
     fi
     
-    # 3. HK1 必须是直连模式
+    # 3. 固定香港直连节点必须是 direct 模式
     cf_dom=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n\t ')
-    if echo "$cf_dom" | grep -qE '^hk[12]\.'; then
+    if echo "$cf_dom" | grep -qE '^(hk[12]|hkbeiyong)\.'; then
         dm=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r\n\t ')
         if [ "$dm" != "direct" ]; then
             log "  ❌ 香港直连节点($cf_dom) 必须 direct 模式，当前: $dm"
         else
-            log "  ✓  HK1 正确直连模式"
+            log "  ✓  香港固定 direct 节点模式正确"
         fi
     fi
     

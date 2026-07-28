@@ -1,5 +1,13 @@
 # 变更日志
 
+## [4.15.25] - 2026-07-28
+- **新增香港备用直连节点**：`hkbeiyong.290372913.xyz` 指向 `47.242.36.160`，Cloudflare A 记录为唯一灰云记录；`COUNTRY_CODE=HKBEIYONG`、`DEPLOY_MODE=direct`，输出 VLESS-Reality、Trojan-TCP、anyTLS、TUIC-v5 共 4 节点，`singbox-cdn` 保持禁用。
+- **自定义服务器标识修复**：安装器不再用 ipinfo 地理码覆盖自定义节点名，而是从 `CF_DOMAIN` 首标签生成安全的大写服务器标识；`hkbeiyong.*` 的订阅路径和节点名稳定为 `HKBEIYONG`。
+- **Cloudflare 一键认证修复**：Global API Key 模式同时持久化 `CF_API_EMAIL`，`cfat_` 继续使用 Bearer Token；安装日志不再输出 Token 前缀。新机 DNS 同步已回读为 `proxied=false` 且无重复记录。
+- **证书幂等安装修复**：首次签发时 systemd unit 尚未创建，reload 现在只重启已存在服务；重复安装遇到 acme.sh `Domains not changed / Skipping` 时继续安装现有有效证书，其他错误仍 fail-closed。
+- **direct 健康检查修复**：修复 `health_check.sh` 旧引号语法错误；direct 模式不再尝试启动 `singbox-cdn` 或要求 8443/2083，改为检查实际 Trojan/SOCKS5 动态端口。生产手工巡检返回 0，Cloudflare SSL=`full`、TLS≥1.2、DDoS L7 override 不存在。
+- **生产验收**：一键安装最终 `RC=0`；公网三类订阅均 200 且严格 TLS 通过，三格式均为 4 节点；外部 TCP 443/2087/2096/1080/Trojan 随机端口可达，认证 SOCKS5 出口为新机 IP；`deploy.py --verify --server HKBEIYONG` 与定向 full audit 均通过，完整测试 `55 passed, 1 skipped`。全量审计同时确认原 HK1 主机所有端口超时，属于既有主机离线，不是新节点安装失败。
+
 ## [4.15.24] - 2026-07-23
 - **新服务器安装修复**：修复 `create_env_file` 已写入域名、但 `setup_certificate` 仍读取旧 shell 变量导致首次安装跳过可信证书分支的问题；证书阶段现在只从落盘 `.env` 读取真实值。
 - **DNS 自动闭环**：有 Cloudflare Token 时，一键安装自动创建/更新所需 A 记录并清除同名重复记录；JP 主域名保持橙云、`sub-jp` 灰云，HK1/HK2 主域名强制灰云。无 Token 时必须检测到订阅域名已灰云直连本机，否则中止。

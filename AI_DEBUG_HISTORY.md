@@ -5,6 +5,26 @@
 
 ---
 
+## -6. 自定义直连新机一键安装四连失败（v4.15.25）
+
+**现象**：香港备用机使用 `hkbeiyong.290372913.xyz` 非交互安装时，依次在 DNS、证书安装、重复签发和健康检查阶段失败；早期半成品只生成了 `.env/config.json`，服务未启动。
+
+**已确认根因**：
+- `COUNTRY_CODE` 仅识别固定域名前缀，未知 `hkbeiyong.*` 被 ipinfo 地理码覆盖为 `HK`，节点名和订阅路径错误。
+- 本项目 Cloudflare 凭据是 Global API Key，但安装器只写 `CF_API_TOKEN`，漏写配套 `CF_API_EMAIL`，API 返回 `Missing X-Auth-Email header`。
+- acme.sh 首次安装证书时执行 reload，但 systemd unit 尚未创建；重复执行时 `Domains not changed / Skipping` 返回非 0，两种情况都被误判为证书失败。
+- `health_check.sh` 的引号拼接存在 Bash 语法错误，且固定检查 `singbox-cdn`、8443/2083，不适用于 direct 模式。
+
+**修复**：
+- 从 `CF_DOMAIN` 首标签生成经校验的大写服务器标识；`DEPLOY_MODE` 仍是 CDN/direct 唯一真相。
+- 同时支持 `cfat_` Bearer Token 与 Global API Key + Email，凭据只落 `.env`，日志仅报告是否已配置。
+- acme reload 改为 unit 存在才重启；确认现有 ACME 证书未变化时继续 `--install-cert`，其他签发错误继续拒绝降级。
+- 健康检查按 `DEPLOY_MODE` 选择服务与端口，并修复 Bash 引号；安装包回归覆盖这些约束。
+
+**关键证据**：最终一键安装 `RC=0`；Cloudflare API 回读 `hkbeiyong` A 记录唯一、灰云、指向新机；Let's Encrypt YE1 证书 SAN 匹配且 `Verify return code: 0`；Base64/Clash/sing-box 公网入口均 200 且各含 4 个 `HKBEIYONG-*` 直连节点；外部认证 SOCKS5 出口 IP 匹配；生产健康检查返回 0。原 HK1 同期 SSH/443/2087/2096/1080 全部超时，已与新机交付分离。
+
+**教训**：`COUNTRY_CODE` 是服务器标识而非地理国家码；Global API Key 必须携带账户邮箱；证书签发和证书安装/reload 是不同阶段；一键脚本必须验证其后续定时巡检脚本，重复执行也必须幂等成功。
+
 ## -5. 订阅 HTTP 200 但客户端无法下载：`-k` 掩盖自签名证书（v4.15.23）
 
 **现象**：HK2 `/sub/HK2` `/clash/HK2` `/singbox/HK2` 在原审计中均显示 HTTP 200，但用户真实订阅下载失败。

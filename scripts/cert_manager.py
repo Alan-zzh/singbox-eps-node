@@ -2,8 +2,8 @@
 """
 Singbox 证书管理服务
 Author: Alan
-Version: v4.15.24
-Date: 2026-07-23
+Version: v4.15.25
+Date: 2026-07-28
 功能：证书管理
 """
 
@@ -244,16 +244,27 @@ def obtain_letsencrypt_certificate(domain, extra_domains=None):
         capture_output=True, text=True, timeout=180,
     )
     if issue.returncode != 0:
-        logger.error("[ERROR] Let's Encrypt 签发失败: %s", (issue.stderr or issue.stdout)[-1000:])
-        return False
+        issue_output = f"{issue.stdout}\n{issue.stderr}"
+        if 'Domains not changed' in issue_output and 'Skipping' in issue_output:
+            logger.info("[INFO] Let's Encrypt 现有证书仍有效，跳过重复签发并继续安装")
+        else:
+            logger.error("[ERROR] Let's Encrypt 签发失败: %s", issue_output[-1000:])
+            return False
 
     ensure_cert_dir()
     fullchain_file = os.path.join(CERT_DIR, 'fullchain.pem')
+    reload_cmd = (
+        'for svc in singbox singbox-sub; do '
+        'if systemctl list-unit-files "${svc}.service" --no-legend 2>/dev/null | grep -q .; then '
+        'systemctl try-restart "$svc" || true; '
+        'fi; '
+        'done'
+    )
     install = subprocess.run(
         [acme_sh, '--install-cert', '-d', domain, '--ecc',
          '--key-file', KEY_FILE,
          '--fullchain-file', fullchain_file,
-         '--reloadcmd', 'systemctl try-restart singbox singbox-sub'],
+         '--reloadcmd', reload_cmd],
         capture_output=True, text=True, timeout=60,
     )
     if install.returncode != 0:

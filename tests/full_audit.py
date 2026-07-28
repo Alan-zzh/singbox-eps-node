@@ -3,7 +3,7 @@
 完整订阅验证 + CDN 架构审计
 测试每台服务器的所有订阅格式，验证 CDN 路径分离是否正确
 """
-import subprocess, json, base64, sys
+import argparse, subprocess, json, base64, sys
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -12,7 +12,16 @@ servers = [
     ('JP', 'sub-jp.290372913.xyz', 'JP', 'jp.290372913.xyz', True),
     ('HK1', 'hk1.290372913.xyz', 'HK1', 'hk1.290372913.xyz', False),
     ('HK2', 'hk2.290372913.xyz', 'HK2', 'hk2.290372913.xyz', False),
+    ('HKBEIYONG', 'hkbeiyong.290372913.xyz', 'HKBEIYONG', 'hkbeiyong.290372913.xyz', False),
 ]
+
+parser = argparse.ArgumentParser(description='完整订阅验证 + CDN 架构审计')
+parser.add_argument('--server', help='仅审计指定服务器标识（如 HKBEIYONG）')
+args = parser.parse_args()
+if args.server:
+    servers = [item for item in servers if item[0].upper() == args.server.upper()]
+    if not servers:
+        parser.error(f'未知服务器: {args.server}')
 
 all_ok = True
 
