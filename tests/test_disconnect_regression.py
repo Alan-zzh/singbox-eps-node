@@ -23,6 +23,8 @@ def subscription_service_module(monkeypatch):
     monkeypatch.setattr(subscription_service, "_cdn_ip_cache", {})
     monkeypatch.setattr(subscription_service, "_ip_switch_fail_count", 0)
     monkeypatch.setattr(subscription_service, "_ip_switch_cooldown_until", 0)
+    # 历史节点数回归保持原基线；SOCKS5 订阅节点由独立测试显式开启。
+    monkeypatch.setattr(subscription_service, "SOCKS5_SUBSCRIPTION_ENABLED", False)
     return subscription_service
 
 
@@ -246,6 +248,159 @@ def test_clash_and_singbox_cdn_node_names_use_cdn_suffix(subscription_service_mo
     assert f"{subscription_service_module.COUNTRY_CODE}-Trojan-WS-CDN" in singbox_tags
 
 
+def test_authenticated_socks5_is_in_all_subscription_formats(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_SUBSCRIPTION_ENABLED", True)
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_USER", "eps user")
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_PASS", "p@ss:/word")
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_PORT", 1080)
+    monkeypatch.setattr(subscription_service_module, "SERVER_IP", "203.0.113.7")
+
+    links = subscription_service_module.generate_all_links(capability="full")
+    clash = subscription_service_module.generate_clash_config()
+    singbox = subscription_service_module.generate_singbox_config()
+    node = f"{subscription_service_module.COUNTRY_CODE}-SOCKS5"
+
+    assert (
+        "socks5://eps%20user:p%40ss%3A%2Fword@203.0.113.7:1080#"
+        + subscription_service_module.share_fragment("SOCKS5")
+    ) in links
+
+    clash_socks = next(proxy for proxy in clash["proxies"] if proxy["name"] == node)
+    assert clash_socks == {
+        "name": node,
+        "type": "socks5",
+        "server": "203.0.113.7",
+        "port": 1080,
+        "username": "eps user",
+        "password": "p@ss:/word",
+        "udp": False,
+    }
+    assert node in clash["proxy-groups"][0]["proxies"]
+    assert node in clash["proxy-groups"][1]["proxies"]
+
+    singbox_socks = next(outbound for outbound in singbox["outbounds"] if outbound.get("tag") == node)
+    assert singbox_socks["type"] == "socks"
+    assert singbox_socks["server"] == "203.0.113.7"
+    assert singbox_socks["server_port"] == 1080
+    assert singbox_socks["username"] == "eps user"
+    assert singbox_socks["password"] == "p@ss:/word"
+    assert node in singbox["outbounds"][0]["outbounds"]
+    assert node in singbox["outbounds"][1]["outbounds"]
+
+
+def test_subscription_zone_is_direct_before_proxy_fallback(subscription_service_module, monkeypatch):
+    monkeypatch.setattr(subscription_service_module, "CF_DOMAIN", "hkbeiyong.290372913.xyz")
+
+    clash = subscription_service_module.generate_clash_config()
+    singbox = subscription_service_module.generate_singbox_config()
+
+    assert subscription_service_module.subscription_zone_suffix() == "290372913.xyz"
+    assert clash["rules"][0] == "DOMAIN-SUFFIX,290372913.xyz,DIRECT"
+    assert clash["rules"][-1].startswith("MATCH,")
+
+    direct_rule = next(
+        rule
+        for rule in singbox["route"]["rules"]
+        if rule.get("domain_suffix") == ["290372913.xyz"]
+    )
+    assert direct_rule["outbound"] == "direct"
+    assert singbox["route"]["rules"].index(direct_rule) <= 2
+
+
+def test_ai_socks_credentials_never_leak_into_client_subscriptions(
+    subscription_service_module, monkeypatch
+):
+    monkeypatch.setattr(subscription_service_module, "AI_SOCKS5_ROUTING", "on")
+    monkeypatch.setattr(
+        subscription_service_module,
+        "AI_SOCKS5_POOL",
+        "secret-proxy.example|1080|secret-user|secret-password",
+    )
+
+    links = "\n".join(subscription_service_module.generate_all_links())
+    clash = json.dumps(subscription_service_module.generate_clash_config())
+    singbox = json.dumps(subscription_service_module.generate_singbox_config())
+    rendered = "\n".join([links, clash, singbox])
+
+    assert "secret-proxy.example" not in rendered
+    assert "secret-user" not in rendered
+    assert "secret-password" not in rendered
+    assert "AI-SOCKS5-" not in rendered
+    assert "ai-residential" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("direct_mode", "socks5_enabled", "ai_socks5_enabled", "expected_count"),
+    [
+        (True, False, False, 4),
+        (True, False, True, 4),
+        (True, True, False, 5),
+        (True, True, True, 5),
+        (False, False, False, 6),
+        (False, False, True, 6),
+        (False, True, False, 7),
+        (False, True, True, 7),
+    ],
+)
+def test_subscription_matrix_direct_cdn_with_independent_local_and_ai_socks5(
+    subscription_service_module,
+    monkeypatch,
+    direct_mode,
+    socks5_enabled,
+    ai_socks5_enabled,
+    expected_count,
+):
+    monkeypatch.setattr(subscription_service_module, "DIRECT_MODE_ENABLED", direct_mode)
+    monkeypatch.setattr(subscription_service_module, "CDN_MODE_ENABLED", not direct_mode)
+    monkeypatch.setattr(subscription_service_module, "HK_DIRECT_MODE", direct_mode)
+    monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_SUBSCRIPTION_ENABLED", socks5_enabled)
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_USER", "matrix-user")
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_PASS", "matrix-pass")
+    monkeypatch.setattr(subscription_service_module, "SOCKS5_PORT", 1080)
+    monkeypatch.setattr(
+        subscription_service_module,
+        "AI_SOCKS5_ROUTING",
+        "on" if ai_socks5_enabled else "off",
+    )
+    monkeypatch.setattr(
+        subscription_service_module,
+        "AI_SOCKS5_POOL",
+        "secret-proxy.example|1080|secret-user|secret-password"
+        if ai_socks5_enabled
+        else "",
+    )
+    monkeypatch.setattr(
+        subscription_service_module,
+        "get_cdn_ip_for_protocol",
+        lambda key: {
+            "vless_ws_cdn_ip": "1.1.1.1",
+            "trojan_ws_cdn_ip": "2.2.2.2",
+        }[key],
+    )
+
+    links = subscription_service_module.generate_all_links()
+    clash = subscription_service_module.generate_clash_config()
+    singbox = subscription_service_module.generate_singbox_config()
+    singbox_nodes = [
+        outbound
+        for outbound in singbox["outbounds"]
+        if outbound.get("tag", "").startswith(subscription_service_module.COUNTRY_CODE + "-")
+    ]
+
+    assert len(links) == expected_count
+    assert len(clash["proxies"]) == expected_count
+    assert len(singbox_nodes) == expected_count
+    assert any(link.startswith("socks5://") for link in links) is socks5_enabled
+    assert any(proxy["type"] == "socks5" for proxy in clash["proxies"]) is socks5_enabled
+    assert any(node["type"] == "socks" for node in singbox_nodes) is socks5_enabled
+    rendered = json.dumps({"clash": clash, "singbox": singbox, "links": links})
+    assert "secret-proxy.example" not in rendered
+    assert "AI-SOCKS5-" not in rendered
+    has_cdn = any("-CDN" in proxy["name"] for proxy in clash["proxies"])
+    assert has_cdn is (not direct_mode)
+
+
 def test_cdn_nodes_keep_ws_protocols_and_use_edge_443(subscription_service_module, monkeypatch):
     monkeypatch.setattr(subscription_service_module, "ENABLE_TUIC", True)
     monkeypatch.setattr(subscription_service_module, "get_cdn_ip_for_protocol", lambda key: {
@@ -282,10 +437,10 @@ def test_port_defaults_keep_reality_tcp443_and_move_tuic_to_udp443():
 def test_iptables_traffic_rules_count_output_by_source_port():
     source = (PROJECT_ROOT / "scripts" / "subscription_service.py").read_text(encoding="utf-8")
 
-    assert "iptables -I INPUT 1 -p tcp --dport {port}" in source
-    assert "iptables -I OUTPUT 1 -p tcp --sport {port}" in source
-    assert "iptables -I INPUT 1 -p udp --dport {port}" in source
-    assert "iptables -I OUTPUT 1 -p udp --sport {port}" in source
+    assert "iptables -I EPS_INPUT 1 -p tcp --dport {port}" in source
+    assert "iptables -I EPS_OUTPUT 1 -p tcp --sport {port}" in source
+    assert "iptables -I EPS_INPUT 1 -p udp --dport {port}" in source
+    assert "iptables -I EPS_OUTPUT 1 -p udp --sport {port}" in source
     assert "f'spt:{port}'" in source
 
 
@@ -309,6 +464,20 @@ def test_subscription_service_removes_fixed_outbound_keepalive_and_tfo():
     assert '"tcp_fast_open": True' not in source
     assert '"tcp_keep_alive": "30s"' not in source
     assert '"tcp_keep_alive_interval": "15s"' not in source
+    assert '"type": "rcode"' not in source
+    assert '"type": "dns"' not in source
+    assert '"type": "fakeip"' not in source
+    assert '"fakeip": {' not in source
+    assert '"inet4_address":' not in source
+    assert '"address": ["172.19.0.1/30"]' in source
+    assert '"action": "hijack-dns"' in source
+    assert '"short_id": [REALITY_SHORT_ID]' not in source
+    assert '"short_id": REALITY_SHORT_ID' in source
+    dns_block = source.split('"dns": {', 1)[1].split('"inbounds": [', 1)[0]
+    assert '"rule_set": [' not in dns_block
+    assert '"outbound": "any"' not in dns_block
+    singbox_urltest = source.split('"tag": "ePS-Auto-Test"', 1)[1].split("},", 1)[0]
+    assert '"timeout":' not in singbox_urltest
 
 
 def test_clash_config_removes_aggressive_globals():

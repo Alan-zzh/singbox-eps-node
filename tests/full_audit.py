@@ -117,7 +117,7 @@ for sname, sub_domain, cc, main_domain, is_cdn in servers:
         ]:
             try:
                 r = subprocess.run([
-                    'curl.exe', '-s', '-4', '--noproxy', '*', '--max-time', '8',
+                    'curl.exe', '-s', '-4', '--http1.1', '--noproxy', '*', '--max-time', '8',
                     '-o', 'NUL', '-w', '%{http_code}',
                     '-H', 'Connection: Upgrade',
                     '-H', 'Upgrade: websocket',

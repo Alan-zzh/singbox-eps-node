@@ -1,5 +1,14 @@
 # 变更日志
 
+## [4.15.26] - 2026-07-28
+- **一键安装事务化**：重装改为 staging 构建并迁移 `.env/data/cert`，旧目录保留到最终验收；切换后的任一步失败自动恢复项目、sing-box 二进制、systemd、crontab 与 iptables。证书签发失败或 SAN/密钥不匹配时恢复旧证书，禁止自签名降级；敏感 `.env` 不再复制到持久化 `.backup`。
+- **SOCKS5 全矩阵**：本机认证 SOCKS5 与服务器侧 AI SOCKS5 改为独立开关，覆盖 direct/CDN × local on/off × AI on/off 共 8 格；本机 SOCKS5 同步进入 Base64、Clash、sing-box 三类订阅。
+- **AI SOCKS5 真实门禁**：只接受经认证 SOCKS5 请求 OpenAI 得到的 401；代理池使用 sing-box `urltest` 自动选活，全部失效时健康检查写入运行时降级标记并重生成配置。标记切换和配置重载现在可失败回滚、可在下轮重试。HKBEIYONG 已通过 JP 认证 SOCKS5 实现真实 AI 分流。
+- **订阅导入根治**：三类客户端配置新增订阅域名直连规则，避免旧节点失效后无法拉新订阅；移除客户端侧 AI 上游凭据，统一为服务器侧分流，避免格式不一致和凭据下发。
+- **sing-box 1.13 兼容**：删除无效 `urltest.timeout`、`rcode` DNS、DNS outbound、旧 TUN 地址和 FakeIP 死配置，Reality outbound `short_id` 改为字符串；安装与部署门禁现在直接运行 `sing-box check` 校验客户端订阅。
+- **Cloudflare/防火墙硬化**：CF skip/origin 规则按当前 `CF_DOMAIN` 动态限定，CDN 安装执行 apply/readback；Windows WS 验收强制 HTTP/1.1。iptables 改用 `EPS_INPUT/EPS_OUTPUT` 专属链，不再清空宿主规则或修改默认策略；健康检查本轮出现未恢复异常时明确返回非零。
+- **生产验收**：本地 `82 passed, 1 skipped`（含目录回滚成功/失败注入），Git Bash 语法检查通过；HKBEIYONG 10 PASS/1 direct SKIP、5 节点，外部 SOCKS→AI→OpenAI 401；JP 11 PASS、7 节点，两个 Cloudflare WS 路径均 101；两台定向 full audit 均 `ALL OK`。
+
 ## [4.15.25] - 2026-07-28
 - **新增香港备用直连节点**：`hkbeiyong.290372913.xyz` 指向 `47.242.36.160`，Cloudflare A 记录为唯一灰云记录；`COUNTRY_CODE=HKBEIYONG`、`DEPLOY_MODE=direct`，输出 VLESS-Reality、Trojan-TCP、anyTLS、TUIC-v5 共 4 节点，`singbox-cdn` 保持禁用。
 - **自定义服务器标识修复**：安装器不再用 ipinfo 地理码覆盖自定义节点名，而是从 `CF_DOMAIN` 首标签生成安全的大写服务器标识；`hkbeiyong.*` 的订阅路径和节点名稳定为 `HKBEIYONG`。

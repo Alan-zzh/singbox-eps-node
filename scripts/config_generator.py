@@ -43,19 +43,33 @@ elif os.path.exists(env_file):
                 key, value = line.split('=', 1)
                 env_vars[key.strip()] = value.split(' #', 1)[0].split('\t#', 1)[0].strip()
 
-vless_uuid = env_vars.get('VLESS_UUID', str(uuid.uuid4()))
-vless_ws_uuid = env_vars.get('VLESS_WS_UUID', str(uuid.uuid4()))
-trojan_pass = env_vars.get('TROJAN_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
+_required_env_keys = [
+    'VLESS_UUID', 'VLESS_WS_UUID', 'TROJAN_PASSWORD', 'ANYTLS_PASSWORD',
+    'REALITY_PRIVATE_KEY', 'REALITY_PUBLIC_KEY', 'REALITY_SHORT_ID',
+    'SERVER_IP', 'CF_DOMAIN',
+]
+_missing_env_keys = [key for key in _required_env_keys if not env_vars.get(key, '').strip()]
+if _missing_env_keys:
+    raise SystemExit(
+        "[ERROR] .env 缺少关键配置，拒绝生成随机凭据或不可用配置: "
+        + ", ".join(_missing_env_keys)
+    )
+
+vless_uuid = env_vars['VLESS_UUID']
+vless_ws_uuid = env_vars['VLESS_WS_UUID']
+trojan_pass = env_vars['TROJAN_PASSWORD']
 # v4.14.0: anyTLS 协议密码（与 Trojan 密码独立，避免一处泄露影响多协议）
-anytls_pass = env_vars.get('ANYTLS_PASSWORD', '') or trojan_pass
+anytls_pass = env_vars['ANYTLS_PASSWORD']
 # v4.15.0: TUIC v5 加回（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
 # 认证方式：uuid + password 双因素，与 VLESS UUID 独立避免一处泄露影响多协议
-tuic_pass = env_vars.get('TUIC_PASSWORD', ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16)))
-tuic_uuid = env_vars.get('TUIC_UUID', str(uuid.uuid4()))
+tuic_pass = env_vars.get('TUIC_PASSWORD', '')
+tuic_uuid = env_vars.get('TUIC_UUID', '')
 enable_tuic = env_vars.get('ENABLE_TUIC', 'true').lower() == 'true'  # v4.15.0: 默认 true（加回 TUIC）
+if enable_tuic and (not tuic_pass or not tuic_uuid):
+    raise SystemExit("[ERROR] ENABLE_TUIC=true 但 TUIC_PASSWORD/TUIC_UUID 缺失")
 tuic_port = int(env_vars.get('TUIC_PORT', '0')) or 443
 reality_private_key = env_vars.get('REALITY_PRIVATE_KEY', '')
-reality_short_id = env_vars.get('REALITY_SHORT_ID') or secrets.token_hex(8)
+reality_short_id = env_vars['REALITY_SHORT_ID']
 # v4.10.20.2 兼容过渡：服务器端 short_id 数组同时保留旧客户端用的 abcd1234
 # 待所有用户切到新订阅链接后，下个版本可删除
 REALITY_SHORT_ID_LEGACY = 'abcd1234'
@@ -80,8 +94,20 @@ cdn_sub_domain = build_sub_domain(cf_domain)
 # - sub-* 灰云直连子域名仅用于订阅端点（singbox-sub 服务），不用于 CDN 代理入站
 # - v4.13.3 教训：此处的 _ws_host 必须与 subscription_service.py 的 cdn_sni 一致
 _ws_host = cf_domain or server_ip
+enable_socks5 = env_vars.get('ENABLE_SOCKS5', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+socks5_port_raw = env_vars.get('SOCKS5_PORT', '1080').strip()
+try:
+    socks5_port = int(socks5_port_raw)
+    if not 1 <= socks5_port <= 65535:
+        raise ValueError
+except ValueError:
+    print(f"[WARN] SOCKS5_PORT无效，已禁用本机 SOCKS5 入站: {socks5_port_raw}")
+    enable_socks5 = False
+    socks5_port = 1080
 socks5_user = env_vars.get('SOCKS5_USER', '')
 socks5_pass = env_vars.get('SOCKS5_PASSWORD', '')
+if enable_socks5 and (not socks5_user or not socks5_pass):
+    raise SystemExit("[ERROR] ENABLE_SOCKS5=true 但 SOCKS5_USER/SOCKS5_PASSWORD 缺失")
 
 # 读取协议端口配置（从环境变量或使用默认值）
 vless_grpc_port = int(env_vars.get('VLESS_GRPC_PORT', '50051'))
@@ -206,43 +232,36 @@ def parse_socks5_pool():
     return result
 
 socks5_pool = parse_socks5_pool()
-ai_socks5_enabled = bool(socks5_pool) and ai_socks5_routing == 'on'
+ai_socks5_runtime_disabled = os.path.exists(
+    os.path.join(DATA_DIR, 'ai_socks5_runtime_disabled')
+)
+ai_socks5_enabled = (
+    bool(socks5_pool)
+    and ai_socks5_routing == 'on'
+    and not ai_socks5_runtime_disabled
+)
+if ai_socks5_routing == 'on' and ai_socks5_runtime_disabled:
+    print("[WARN] AI SOCKS5 业务探测全部失败，运行时已降级为 direct/WARP")
 
-# ⚠️ SSL证书路径：优先fullchain.pem（Let's Encrypt/Cloudflare正式证书），降级cert.pem（自签名）
-# cert_manager.py生成cert.pem+key.pem，acme.sh生成fullchain.pem+key.pem
-# fullchain.pem包含完整证书链，客户端验证更可靠
+# 客户端订阅域名必须使用公网可信完整证书链；生成器不负责签发或降级。
 _cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
 _cert_key = os.path.join(CERT_DIR, 'key.pem')
-if not os.path.exists(_cert_chain):
-    _cert_chain = os.path.join(CERT_DIR, 'cert.pem')
+if not os.path.isfile(_cert_chain) or not os.path.isfile(_cert_key):
+    raise SystemExit("[ERROR] 可信证书 fullchain.pem/key.pem 缺失，拒绝生成配置")
 
-# 如果证书文件不存在，自动生成自签名证书（避免singbox因证书缺失启动失败）
-if not os.path.exists(_cert_chain) or not os.path.exists(_cert_key):
-    import subprocess
-    cert_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cert_manager.py')
-    if os.path.exists(cert_script):
-        subprocess.run([sys.executable, cert_script], capture_output=True, text=True, timeout=120)
-        # 重新检测证书路径（cert_manager可能生成fullchain.pem或cert.pem）
-        _cert_chain2 = os.path.join(CERT_DIR, 'fullchain.pem')
-        if os.path.exists(_cert_chain2):
-            _cert_chain = _cert_chain2
-        _cert_key2 = os.path.join(CERT_DIR, 'key.pem')
-        if os.path.exists(_cert_key2):
-            _cert_key = _cert_key2
-
-# ⚠️ SOCKS5入站：仅当用户名和密码均非空时才启用，避免空凭据导致无认证暴露
+# ⚠️ SOCKS5入站：开关为 true 且用户名/密码均非空时才启用，避免关闭后仍暴露端口。
 socks5_inbound = [{
     "type": "socks",
     "tag": "socks-in",
     "listen": "0.0.0.0",
-    "listen_port": 1080,
+    "listen_port": socks5_port,
     "users": [
         {
             "username": socks5_user,
             "password": socks5_pass
         }
     ]
-}] if socks5_user and socks5_pass else []
+}] if enable_socks5 and socks5_user and socks5_pass else []
 
 config = {
     "log": {
@@ -440,29 +459,21 @@ config = {
         "outbounds": ["warp-wg", "direct"],
         "default": "warp-wg"
     }] if warp_unlock and warp_private_key else []) + ([{
-        # ai-residential selector：AI网站流量自动路由到住宅代理池
-        # 【故障转移机制 - Bug #26教训】：
-        # outbounds包含["AI-SOCKS5-1", "AI-SOCKS5-2", ..., "direct"]
-        # 当某个SOCKS5代理不可用时，sing-box自动尝试下一个代理
-        # 如果所有SOCKS5代理均不可用，最终fallback到direct，从VPS直连出去
-        # 虽然直连可能被AI网站封锁，但至少不会无限转圈，用户能看到错误页面
-        #
-        # 【为什么selector而不是urltest】：
-        # selector允许管理员通过Clash API手动切换（如长期故障时切到direct）
-        # urltest是自动测速切换，无法手动干预
-        #
-        # 【Bug #26 故障转移教训】：
-        # 之前outbounds只有["AI-SOCKS5"]，没有direct备选
-        # 住宅代理宕机时所有AI网站流量全部中断，修复后加入direct作为第二选项
+        # AI 网站自动走经业务探测确认可用的住宅代理池。
+        # selector 不会自动尝试下一个出站，因此这里必须使用 urltest。
+        # direct 不加入测速组：否则低延迟直连会绕过住宅代理。
+        # 当全部代理失效时，health_check.sh 写入运行时禁用标记并重生成配置，
+        # AI 流量随即按下方 WARP/direct 规则安全降级。
         #
         # AI-SOCKS5是幕后路由出站，不是用户可见节点
         # 禁止将AI-SOCKS5加入Base64订阅链接或selector可选列表
         # 用户在客户端节点列表中看不到AI-SOCKS5，AI网站流量自动走此出站
-        # 故障转移：所有SOCKS5不可用时自动fallback到direct
-        "type": "selector",
+        "type": "urltest",
         "tag": "ai-residential",
-        "outbounds": [f"AI-SOCKS5-{i+1}" for i in range(len(socks5_pool))] + ["direct"],
-        "default": "AI-SOCKS5-1"
+        "outbounds": [f"AI-SOCKS5-{i+1}" for i in range(len(socks5_pool))],
+        "url": "https://api.openai.com/v1/models",
+        "interval": "1m",
+        "tolerance": 100
     }] + [{
         "type": "socks",
         "tag": f"AI-SOCKS5-{i+1}",

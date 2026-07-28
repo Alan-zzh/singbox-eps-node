@@ -22,8 +22,12 @@ DISK_WARN=80        # 磁盘告警 %
 DISK_CRIT=90        # 磁盘严重告警 %
 
 mkdir -p "$LOG_DIR"
+HEALTH_FAILED=0
 
 log() {
+    case "$1" in
+        *"❌"*) HEALTH_FAILED=1 ;;
+    esac
     echo "[$TIMESTAMP] $1" >> "$LOG_FILE"
 }
 
@@ -145,10 +149,26 @@ check_ports() {
     if [ "$DEPLOY_MODE_HC" = "cdn" ]; then
         ports="$ports 8443 2083"
     fi
-    for dynamic_key in TROJAN_TCP_PORT SOCKS5_PORT; do
+    for dynamic_key in TROJAN_TCP_PORT; do
         dynamic_port=$(grep "^${dynamic_key}=" "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '\r')
         [ -n "$dynamic_port" ] && ports="$ports $dynamic_port"
     done
+    enable_socks5_hc=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    enable_socks5_hc=${enable_socks5_hc:-true}
+    if [[ "$enable_socks5_hc" =~ ^(true|1|yes|on)$ ]]; then
+        socks5_port_hc=$(grep '^SOCKS5_PORT=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+        socks5_user_hc=$(grep '^SOCKS5_USER=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r')
+        socks5_pass_hc=$(grep '^SOCKS5_PASSWORD=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r')
+        if [ -n "$socks5_user_hc" ] && [ -n "$socks5_pass_hc" ]; then
+            ports="$ports ${socks5_port_hc:-1080}"
+        else
+            log "  ❌ 本机认证 SOCKS5 已启用但凭据不完整"
+        fi
+    elif [[ "$enable_socks5_hc" =~ ^(false|0|no|off)$ ]]; then
+        log "  ⏭️  本机认证 SOCKS5 已关闭"
+    else
+        log "  ❌ ENABLE_SOCKS5 配置非法"
+    fi
     for port in $ports; do
         if ss -tlnp 2>/dev/null | grep -q ":$port "; then
             log "  ✓  TCP $port 监听中"
@@ -219,6 +239,95 @@ check_env_issues() {
     # 4. .env 是否有 CRLF 换行（Windows 创建特征）
     if grep -rl $'\r$' "$BASE_DIR/.env" 2>/dev/null | grep -q .; then
         log "  ⚠️  .env 含 CRLF 换行（Windows 格式），建议 dos2unix 转换"
+    fi
+}
+
+# ============================================================
+# 3c. AI SOCKS5 业务检查（只记录脱敏汇总）
+# ============================================================
+reload_ai_socks_config() {
+    (
+        cd "$BASE_DIR" \
+            && python3 scripts/config_generator.py >> "$LOG_FILE" 2>&1 \
+            && /usr/local/bin/sing-box check -c "$BASE_DIR/config.json" >> "$LOG_FILE" 2>&1 \
+            && systemctl restart singbox >> "$LOG_FILE" 2>&1 \
+            && systemctl is-active --quiet singbox
+    )
+}
+
+check_ai_socks5() {
+    log_section "3c. AI SOCKS5 业务检查"
+    local checker result rc routing marker transition reload_pending marker_tmp
+    checker="$BASE_DIR/scripts/ai_socks5_health.py"
+    marker="$BASE_DIR/data/ai_socks5_runtime_disabled"
+    transition="${marker}.transition"
+    reload_pending="${marker}.reload_pending"
+    mkdir -p "$BASE_DIR/data"
+    if [ ! -f "$checker" ]; then
+        log "  ❌ AI SOCKS5 检查器缺失"
+        return
+    fi
+
+    # 上次切换若在重载中被中断，先恢复到安全的 direct 回退态；下方健康检查会再次尝试恢复。
+    if [ -f "$transition" ]; then
+        mv -f -- "$transition" "$marker"
+        chmod 600 "$marker"
+        if reload_ai_socks_config; then
+            rm -f -- "$reload_pending"
+            log "  ⚠️  检测到未完成的 AI SOCKS5 切换，已恢复 direct 回退态"
+        else
+            : > "$reload_pending"
+            chmod 600 "$reload_pending"
+            log "  ❌ 未完成切换的 direct 回退配置重载失败，保留标记等待下次重试"
+        fi
+    fi
+
+    result=$(python3 "$checker" --env "$BASE_DIR/.env" --json 2>&1)
+    rc=$?
+    routing=$(grep '^AI_SOCKS5_ROUTING=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    routing=${routing:-off}
+    if [ "$rc" -eq 0 ]; then
+        log "  ✓  AI SOCKS5: $result"
+        if [ -f "$marker" ]; then
+            mv -f -- "$marker" "$transition"
+            if reload_ai_socks_config; then
+                rm -f -- "$transition" "$reload_pending"
+                log "  ✓  AI SOCKS5 已恢复并完成配置切换"
+            else
+                mv -f -- "$transition" "$marker"
+                chmod 600 "$marker"
+                if reload_ai_socks_config; then
+                    rm -f -- "$reload_pending"
+                else
+                    : > "$reload_pending"
+                    chmod 600 "$reload_pending"
+                fi
+                log "  ❌ AI SOCKS5 恢复配置重载失败，已回滚 direct 标记并等待下次重试"
+            fi
+        fi
+    else
+        log "  ❌ AI SOCKS5 路由已开启但业务检查失败: $result"
+        if [ "$routing" = "on" ] && [ ! -f "$marker" ]; then
+            marker_tmp="${marker}.$$"
+            : > "$marker_tmp"
+            chmod 600 "$marker_tmp"
+            mv -f -- "$marker_tmp" "$marker"
+            if reload_ai_socks_config; then
+                rm -f -- "$reload_pending"
+                log "  ⚠️  所有 AI SOCKS5 失效，已切换到 direct 回退态"
+            else
+                rm -f -- "$marker" "$reload_pending"
+                reload_ai_socks_config || true
+                log "  ❌ AI SOCKS5 direct 回退配置重载失败，已撤销标记并等待下次重试"
+            fi
+        elif [ "$routing" = "on" ] && [ -f "$marker" ] && [ -f "$reload_pending" ]; then
+            if reload_ai_socks_config; then
+                rm -f -- "$reload_pending"
+                log "  ✓  AI SOCKS5 direct 回退配置重载重试成功"
+            else
+                log "  ❌ AI SOCKS5 direct 回退配置重载重试失败，保留待重试标记"
+            fi
+        fi
     fi
 }
 
@@ -475,6 +584,7 @@ check_config_json
 check_services
 check_ports
 check_env_issues
+check_ai_socks5
 check_connections
 check_log_size
 check_disk
@@ -483,5 +593,12 @@ check_cert
 check_cloudflare_proxy_rules
 check_cloudflare_global_settings
 
-log "===== 健康检查完成 ====="
+if [ "$HEALTH_FAILED" -ne 0 ]; then
+    log "===== 健康检查完成（存在未恢复异常）====="
+    log ""
+    exit 1
+fi
+
+log "===== 健康检查完成（全部通过或已安全跳过）====="
 log ""
+exit 0

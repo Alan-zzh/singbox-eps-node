@@ -11,11 +11,11 @@ Date: 2026-06-27
   - CDN优选IP自动分配（每个协议独立IP）
   - HTTPS支持（Cloudflare正式证书）
   - 按月流量统计（iptables 内核级计数器）
-  - DEPLOY_MODE 双模式支持：CDN全量（6节点）/ 直连精简（4节点）
+  - DEPLOY_MODE 双模式支持：CDN全量（7节点）/ 直连精简（5节点，含认证 SOCKS5）
 
 订阅链接格式:
   - Base64: https://{CF_DOMAIN}:{SUB_PORT}/sub/{国家代码}
-    - 自动识别客户端 UA：Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 6 节点
+    - 自动识别客户端 UA：Clash/sing-box/NekoBox/v2rayN/v2rayNG/Shadowrocket → 全量节点
     - 强制控制：?client=full|standard|clash|v2rayn|shadowrocket
   - sing-box JSON: https://{CF_DOMAIN}:{SUB_PORT}/singbox/{国家代码}
   - Clash Meta YAML: https://{CF_DOMAIN}:{SUB_PORT}/clash/{国家代码}
@@ -23,7 +23,7 @@ Date: 2026-06-27
   ⚠️ 必须使用域名访问（走CDN），IP访问会导致SSL证书不匹配
   ⚠️ CF_DOMAIN从.env动态读取，禁止硬编码域名
 
-节点命名规则: {国家代码}-{协议}（v4.15.0 起 CDN 模式 6 节点 / 直连模式 4 节点）
+节点命名规则: {国家代码}-{协议}（v4.15.26 起本机认证 SOCKS5 同步进入三类订阅）
 - {COUNTRY_CODE}-VLESS-Reality (直连节点，苹果域名伪装)
 - {COUNTRY_CODE}-Trojan-TCP (直连节点，TCP+TLS)
 - {COUNTRY_CODE}-anyTLS (直连节点，TLS-in-TLS 加密)
@@ -35,7 +35,7 @@ Date: 2026-06-27
   - 加回 TUIC v5（用户要求 TCP+UDP 双协议支持，TUIC 提供 UDP relay）
   - 删除 VLESS-gRPC（用 TUIC v5 替代，QUIC 多路复用比 gRPC 更高效）
   - v2rayN 6.x+ / v2rayNG 1.x+ 归 full 能力（内置 sing-box 内核，支持 anytls:// 和 tuic://）
-  - 节点数：CDN 模式 6 节点 / 直连模式 4 节点（ENABLE_TUIC=false 时各 -1）
+  - 节点数：CDN 模式 7 节点 / 直连模式 5 节点（TUIC/SOCKS5 未启用时动态减少）
 
 【v4.14.0 协议栈精简】:
   - 删除 VLESS-HTTPUpgrade-CDN（故障最多，兼容最窄）
@@ -157,6 +157,13 @@ except ImportError:
 
 logger = get_logger('subscription_service')
 
+# 本机认证 SOCKS5 入站与 AI_SOCKS5_* 幕后出站是两套独立配置。
+# 只有服务端入站显式启用且认证凭据完整时，才把本机 SOCKS5 作为用户可见节点输出。
+ENABLE_SOCKS5 = os.getenv('ENABLE_SOCKS5', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+SOCKS5_USER = os.getenv('SOCKS5_USER', '').strip()
+SOCKS5_PASS = (os.getenv('SOCKS5_PASSWORD', '') or os.getenv('SOCKS5_PASS', '')).strip()
+SOCKS5_SUBSCRIPTION_ENABLED = ENABLE_SOCKS5 and bool(SOCKS5_USER and SOCKS5_PASS)
+
 IP_REGEX = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
 # v4.14.0: 删除 vless_upgrade_cdn_ip（HTTPUpgrade 已下线）
 CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
@@ -167,12 +174,12 @@ CDN_PROTOCOL_KEYS = ['vless_ws_cdn_ip', 'trojan_ws_cdn_ip']
 if 'HK_DIRECT_MODE' not in dir():
     HK_DIRECT_MODE = (CF_DOMAIN or '').strip().lower().startswith(('hk1.', 'hk2.', 'hkbeiyong.'))
 
-# 标准 6 节点 SOP：Reality / Trojan-TCP / anyTLS / TUIC + WS-CDN / Trojan-WS-CDN
-#   full     = 完整 6 节点（含 anyTLS anytls:// + TUIC v5 tuic:// URI）
+# 标准 7 节点 SOP：Reality / Trojan-TCP / anyTLS / TUIC / SOCKS5 + WS-CDN / Trojan-WS-CDN
+#   full     = 完整 7 节点（含 anyTLS anytls:// + TUIC v5 tuic:// + SOCKS5 URI）
 #              - Clash Meta (mihomo) 系、sing-box 系、NekoBox/NekoRay
 #              - v2rayN 6.x+ / v2rayNG 1.x+（内置 sing-box 内核，支持 anytls:// + tuic://）
 #              - Shadowrocket（小火箭）iOS 版：原生支持 TUIC v5，anytls:// 安全忽略
-#   xray     = Xray 兼容节点（不含 anyTLS/TUIC），只返回标准 vless:// 和 trojan:// 链接
+#   xray     = Xray 兼容节点（不含 anyTLS/TUIC），保留标准 VLESS/Trojan/SOCKS5 链接
 #              - Quantumult/Surge/Loon/Pharos/Potatso 等纯 Xray 内核客户端
 #   standard = 同 xray（兼容旧参数）
 #   unknown  = 按 full 处理；只有明确识别为纯 Xray 客户端或 ?client=xray 才降级
@@ -263,6 +270,17 @@ def node_name(protocol, cdn=False):
 def share_fragment(protocol, cdn=False):
     """分享 URI 的 fragment 必须 URL 编码，避免 v2rayN 将空格等字符判为无效内容。"""
     return urllib.parse.quote(node_name(protocol, cdn=cdn), safe='')
+
+
+def subscription_zone_suffix():
+    """订阅域名所在区域的后缀，用于客户端更新/导入流量强制直连。
+
+    项目域名固定为普通二级域名结构（例如 290372913.xyz）。旧配置失效时，
+    新订阅请求若继续走旧代理会形成启动死锁，因此必须在兜底代理规则之前直连。
+    """
+    domain = (CF_DOMAIN or '').strip().lower().rstrip('.')
+    parts = domain.split('.')
+    return '.'.join(parts[-2:]) if len(parts) >= 2 else domain
 
 
 def detect_client_capability(user_agent=''):
@@ -397,109 +415,10 @@ def remove_ips_from_pool(conn, ips):
         conn.commit()
     return removed, new_pool
 
-# ============================================================
-# SOCKS5 代理池 + 健康检测 + 自动容错切换
-# 每次生成订阅时检测所有代理，自动剔除不可用的
-# 如果全部不可用，AI路由降级为普通代理（ePS-Auto）
-# ============================================================
-SOCKS5_POOL = []  # 可用代理列表，每个元素为dict: {server, port, user, pass}
-
-def parse_socks5_pool():
-    """解析代理池配置，返回代理列表"""
-    pool_str = AI_SOCKS5_POOL
-    if not pool_str:
-        # 兼容旧配置：单个代理
-        if AI_SOCKS5_SERVER and AI_SOCKS5_PORT:
-            return [{
-                'server': AI_SOCKS5_SERVER,
-                'port': int(AI_SOCKS5_PORT),
-                'user': AI_SOCKS5_USER or '',
-                'pass': AI_SOCKS5_PASS or ''
-            }]
-        return []
-    result = []
-    for item in pool_str.split(','):
-        item = item.strip()
-        if not item:
-            continue
-        parts = item.split('|')
-        if len(parts) >= 4:
-            result.append({
-                'server': parts[0].strip(),
-                'port': int(parts[1].strip()),
-                'user': parts[2].strip(),
-                'pass': parts[3].strip()
-            })
-    return result
-
-def check_single_socks5(proxy):
-    """检测单个SOCKS5代理是否能正常连接Google
-    返回True表示正常，False表示不可用
-    """
-    s = None
-    try:
-        proxy_host = proxy['server']
-        proxy_port = proxy['port']
-        target_host = "www.google.com"
-        target_port = 443
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect((proxy_host, proxy_port))
-        s.send(bytes([0x05, 0x02, 0x00, 0x02]))
-        resp = s.recv(2)
-        if len(resp) < 2:
-            return False
-        if resp[1] == 0x02:
-            if proxy['user'] and proxy['pass']:
-                user_bytes = proxy['user'].encode()
-                pass_bytes = proxy['pass'].encode()
-                auth_pkt = bytes([0x01, len(user_bytes)]) + user_bytes + bytes([len(pass_bytes)]) + pass_bytes
-                s.send(auth_pkt)
-                auth_resp = s.recv(2)
-                if len(auth_resp) < 2 or auth_resp[1] != 0x00:
-                    return False
-            else:
-                return False
-        target_ip = socket.gethostbyname(target_host)
-        host_bytes = bytes([int(x) for x in target_ip.split('.')])
-        conn_pkt = bytes([0x05, 0x01, 0x00, 0x01]) + host_bytes + target_port.to_bytes(2, 'big')
-        s.send(conn_pkt)
-        conn_resp = s.recv(10)
-        if len(conn_resp) >= 2 and conn_resp[1] == 0x00:
-            return True
-        return False
-    except Exception:
-        return False
-    finally:
-        if s:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-def check_socks5_pool():
-    """检测代理池中所有代理，返回可用列表"""
-    global SOCKS5_POOL
-    pool = parse_socks5_pool()
-    if not pool:
-        SOCKS5_POOL = []
-        logger.warning("未配置SOCKS5代理，AI流量将走普通代理")
-        return []
-    available = []
-    for proxy in pool:
-        addr = f"{proxy['server']}:{proxy['port']}"
-        if check_single_socks5(proxy):
-            available.append(proxy)
-            logger.info(f"SOCKS5健康检测通过: {addr}")
-        else:
-            logger.warning(f"SOCKS5健康检测失败: {addr}，已剔除")
-    SOCKS5_POOL = available
-    if not available:
-        logger.warning("所有SOCKS5代理均不可用，AI流量将降级为普通代理")
-    return available
-
-# 启动时检测代理池
-check_socks5_pool()
+# AI_SOCKS5_* 是服务端幕后出站凭据，只允许由 config_generator.py 使用。
+# 禁止把第三方代理地址/认证信息嵌入某一种客户端订阅，否则三类订阅行为不一致，
+# 且会把服务端私密凭据直接下发给客户端。
+SOCKS5_POOL = []
 
 # ⚠️ 以下变量从环境变量读取，不从config.py导入（config.py不导出这些值）
 # SERVER_IP和CF_DOMAIN优先使用config.py的值（已从.env读取+自动检测）
@@ -580,12 +499,18 @@ def setup_iptables_traffic_counters():
     # v4.15.0: 删除 2053(HTTPUpgrade)，新增 2096(anyTLS)，加回 TUIC_PORT(TUIC v5)
     singbox_ports = [443, 8443, 2083, 2096, TROJAN_TCP_PORT, TUIC_PORT_ENV]
 
+    # 项目只维护 EPS_INPUT/EPS_OUTPUT，绝不清空或污染宿主 INPUT/OUTPUT 规则。
+    _run_cmd('iptables -N EPS_INPUT 2>/dev/null || true')
+    _run_cmd('iptables -N EPS_OUTPUT 2>/dev/null || true')
+    _run_cmd('iptables -C INPUT -j EPS_INPUT 2>/dev/null || iptables -I INPUT 1 -j EPS_INPUT')
+    _run_cmd('iptables -C OUTPUT -j EPS_OUTPUT 2>/dev/null || iptables -I OUTPUT 1 -j EPS_OUTPUT')
+
     for port in singbox_ports:
         if not port or port == 0:
             continue
         tcp_rules = (
-            ('INPUT', 'dpt', f'iptables -I INPUT 1 -p tcp --dport {port} -j ACCEPT'),
-            ('OUTPUT', 'spt', f'iptables -I OUTPUT 1 -p tcp --sport {port} -j ACCEPT'),
+            ('EPS_INPUT', 'dpt', f'iptables -I EPS_INPUT 1 -p tcp --dport {port} -j ACCEPT'),
+            ('EPS_OUTPUT', 'spt', f'iptables -I EPS_OUTPUT 1 -p tcp --sport {port} -j ACCEPT'),
         )
         for chain, marker, add_cmd in tcp_rules:
             check_cmd = f'iptables -L {chain} -v -n -x | grep -c "tcp {marker}:{port}"'
@@ -597,8 +522,8 @@ def setup_iptables_traffic_counters():
         # TUIC 是 QUIC（UDP），UDP 也要单独建规则
         if port == TUIC_PORT_ENV and TUIC_PORT_ENV:
             udp_rules = (
-                ('INPUT', 'dpt', f'iptables -I INPUT 1 -p udp --dport {port} -j ACCEPT'),
-                ('OUTPUT', 'spt', f'iptables -I OUTPUT 1 -p udp --sport {port} -j ACCEPT'),
+                ('EPS_INPUT', 'dpt', f'iptables -I EPS_INPUT 1 -p udp --dport {port} -j ACCEPT'),
+                ('EPS_OUTPUT', 'spt', f'iptables -I EPS_OUTPUT 1 -p udp --sport {port} -j ACCEPT'),
             )
             for chain, marker, add_cmd in udp_rules:
                 check_cmd = f'iptables -L {chain} -v -n -x | grep -c "udp {marker}:{port}"'
@@ -625,21 +550,21 @@ def get_iptables_traffic_bytes():
     total_bytes = 0
 
     # 同时统计 INPUT 和 OUTPUT，反映真实双向流量
-    for chain in ('INPUT', 'OUTPUT'):
+    for chain in ('EPS_INPUT', 'EPS_OUTPUT'):
         cmd = f'iptables -L {chain} -v -n -x'
         ret, out, err = _run_cmd(cmd)
         if ret != 0:
             logger.warning(f"iptables命令执行失败: {err}")
             continue
 
-        port_marker = 'dpt' if chain == 'INPUT' else 'spt'
+        port_marker = 'dpt' if chain == 'EPS_INPUT' else 'spt'
         for line in out.split('\n'):
             if f'{port_marker}:' not in line:
                 continue
             for port in singbox_ports:
                 if not port or port == 0:
                     continue
-                port_prefix = f'dpt:{port}' if chain == 'INPUT' else f'spt:{port}'
+                port_prefix = f'dpt:{port}' if chain == 'EPS_INPUT' else f'spt:{port}'
                 if port_prefix in line:
                     # 行格式: pkts bytes target prot opt in out source destination
                     # 例: 12345 6789012345 ACCEPT tcp -- * * 0.0.0.0/0 0.0.0.0/0 tcp dpt:443/spt:443
@@ -1119,13 +1044,14 @@ def resolve_ws_targets():
 def generate_all_links(capability='full'):
     """生成所有节点链接
 
-    【v4.15.0 dual-stack 双模式支持 + anyTLS/TUIC v5】:
+    【v4.15.26 dual-stack 双模式支持 + anyTLS/TUIC v5/SOCKS5】:
     - DIRECT_MODE_ENABLED（直连精简模式）：
-      * full: 4节点（VLESS-Reality/Trojan-TCP/anyTLS/TUIC-v5），ENABLE_TUIC=false 时 3 节点
-      * xray: 2节点（VLESS-Reality/Trojan-TCP，不含 anyTLS/TUIC）
+      * full: 5节点（VLESS-Reality/Trojan-TCP/anyTLS/TUIC-v5/SOCKS5）
+      * xray: 3节点（VLESS-Reality/Trojan-TCP/SOCKS5，不含 anyTLS/TUIC）
     - CDN_MODE_ENABLED（CDN全量模式）：
-      * full: 6节点（加上 VLESS-WS-CDN/Trojan-WS-CDN），ENABLE_TUIC=false 时 5 节点
-      * xray: 4节点（加上 VLESS-WS-CDN/Trojan-WS-CDN，不含 anyTLS/TUIC）
+      * full: 7节点（加上 VLESS-WS-CDN/Trojan-WS-CDN）
+      * xray: 5节点（加上 VLESS-WS-CDN/Trojan-WS-CDN，不含 anyTLS/TUIC）
+    - SOCKS5 仅在 ENABLE_SOCKS5=true 且用户名/密码完整时输出；否则上述数量各减 1
     - capability='xray'：纯 Xray 内核客户端，跳过 anytls:// 和 tuic:// 非标准URI
     - capability='standard'：等同 xray（兼容旧参数）
     - v4.15.0: v2rayN 6.x+ 归 full（内置 sing-box 内核，支持 anytls:// 和 tuic://）
@@ -1222,14 +1148,24 @@ def generate_all_links(capability='full'):
         param_str = '&'.join([f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if v])
         links.append(f"tuic://{TUIC_UUID}:{TUIC_PASSWORD}@{SERVER_IP}:{TUIC_PORT}?{param_str}#{share_fragment('TUIC-v5')}")
 
+    # 本机认证 SOCKS5（用户可见直连节点；与 AI_SOCKS5_* 幕后出站无关）
+    if SOCKS5_SUBSCRIPTION_ENABLED:
+        socks_user = urllib.parse.quote(SOCKS5_USER, safe='')
+        socks_pass = urllib.parse.quote(SOCKS5_PASS, safe='')
+        links.append(
+            f"socks5://{socks_user}:{socks_pass}@{SERVER_IP}:{SOCKS5_PORT}"
+            f"#{share_fragment('SOCKS5')}"
+        )
+
     return links
 
 def generate_singbox_config(capability='full'):
     """生成完整sing-box JSON配置（含自动路由规则）
 
-    【标准 SOP 6 节点 / 直连 4 节点】:
-    - DIRECT_MODE_ENABLED（直连精简模式）：4 节点（Reality/Trojan-TCP/anyTLS/TUIC）
-    - CDN_MODE_ENABLED（CDN全量模式）：6 节点（加 WS-CDN/Trojan-WS-CDN）
+    【标准 SOP 7 节点 / 直连 5 节点】:
+    - DIRECT_MODE_ENABLED（直连精简模式）：5 节点（Reality/Trojan-TCP/anyTLS/TUIC/SOCKS5）
+    - CDN_MODE_ENABLED（CDN全量模式）：7 节点（加 WS-CDN/Trojan-WS-CDN）
+    - SOCKS5 凭据不完整或入站禁用时各减 1
     - capability='full' / 'standard' 等同（v4.14.0 起两者无差异）
     """
     ws_outbounds = []
@@ -1246,7 +1182,9 @@ def generate_singbox_config(capability='full'):
             node_name("VLESS-WS", cdn=True),
             node_name("Trojan-WS", cdn=True),
             node_name("anyTLS"),
-        ] + ([node_name("TUIC-v5")] if ENABLE_TUIC else [])
+        ] + ([node_name("TUIC-v5")] if ENABLE_TUIC else []) + (
+            [node_name("SOCKS5")] if SOCKS5_SUBSCRIPTION_ENABLED else []
+        )
     else:
         vless_ws_addr = SERVER_IP
         trojan_ws_addr = SERVER_IP
@@ -1256,7 +1194,9 @@ def generate_singbox_config(capability='full'):
         cdn_sni = CF_DOMAIN if (CF_DOMAIN and CF_DOMAIN.strip()) else SERVER_IP
         _auto_test_proxies = _auto_test_proxies_base + [
             node_name("anyTLS"),
-        ] + ([node_name("TUIC-v5")] if ENABLE_TUIC else [])
+        ] + ([node_name("TUIC-v5")] if ENABLE_TUIC else []) + (
+            [node_name("SOCKS5")] if SOCKS5_SUBSCRIPTION_ENABLED else []
+        )
 
     config = {
         "log": {
@@ -1292,21 +1232,6 @@ def generate_singbox_config(capability='full'):
                     # detour同样必须是direct，理由同上
                     # 使用h3协议（HTTP/3）可绕过国内对传统DoH(853)的干扰
                 },
-                {
-                    "tag": "dns_block",
-                    "type": "rcode",
-                    "rcode": "success"
-                    # 屏蔽DNS：返回success但不返回任何IP，用于屏蔽广告/恶意域名
-                    # 原理：当route.rules中某条规则的outbound是"dns_block"时，
-                    # 该域名的DNS查询会被此服务器处理，返回空响应，客户端无法连接
-                },
-                {
-                    "tag": "dns_fakeip",
-                    "type": "fakeip"
-                    # FakeIP模式：返回198.18.0.0/15范围内的假IP，真实连接时singbox自动替换
-                    # 优势：减少DNS查询延迟，避免DNS污染
-                    # 注意：本项目未启用fakeip作为默认DNS，仅在dns.fakeip.enabled=True时生效
-                }
             ],
             "rules": [
                 {
@@ -1321,43 +1246,12 @@ def generate_singbox_config(capability='full'):
                     # 非中国大陆网站 → 用Google DNS(tls)解析
                     # 注意：虽然tag叫dns_proxy，但detour是direct，DNS查询本身还是直连
                     # 只是解析结果会被标记为"需要代理"，后续路由规则决定走哪个出站
-                },
-                {
-                    "outbound": "any",
-                    "server": "dns_proxy"
-                    # 兜底规则：未匹配任何规则的域名（如highvcc.vip等小众海外网站）
-                    # 用Google DNS解析，确保海外网站能正常访问
-                    # 【Bug #30 教训】：之前这条规则用dns_direct，导致海外网站通过国内DNS解析
-                    # 可能拿到错误的IP或无法解析，必须用dns_proxy
-                }
-            ],
-            "rule_set": [
-                {
-                    "tag": "geosite-cn",
-                    "type": "remote",
-                    "format": "binary",
-                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
-                },
-                {
-                    "tag": "geosite-geolocation-!cn",
-                    "type": "remote",
-                    "format": "binary",
-                    "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-!cn.srs"
                 }
             ],
             "strategy": "prefer_ipv4",
-            "final": "dns_proxy",
+            "final": "dns_proxy"
             # DNS final规则：未被前面任何DNS规则匹配的域名，统一用dns_proxy解析
             # 即：非中国大陆网站默认用Google DNS，确保全球网站都能正常解析
-            "fakeip": {
-                # 默认关闭 FakeIP。
-                # 原因：本项目的主要客户端是 v2rayN / sing-box TUN 场景，FakeIP 会让
-                # ping/延迟测试经常命中本机分配的假 IP，出现 "<1ms" 这类误导性结果，
-                # 用户会误以为节点或地区判断出了问题。真实线路质量应以实际连接体感
-                # 和外部出口检测为准，而不是本机对 FakeIP 的 ICMP 响应。
-                "enabled": False,
-                "inet4_range": "198.18.0.0/15"
-            }
         },
         "inbounds": [
             {
@@ -1369,7 +1263,7 @@ def generate_singbox_config(capability='full'):
             {
                 "type": "tun",
                 "tag": "tun-in",
-                "inet4_address": "172.19.0.1/30",
+                "address": ["172.19.0.1/30"],
                 "auto_route": True,
                 "strict_route": True,
                 "stack": "mixed"
@@ -1377,7 +1271,7 @@ def generate_singbox_config(capability='full'):
         ],
         "outbounds": [
             # ePS-Auto: 用户可见的节点选择器
-            # v4.15.0 dual-stack：CDN 模式 6 节点，直连模式 4 节点
+            # v4.15.26 dual-stack：CDN 模式 7 节点，直连模式 5 节点（含认证 SOCKS5）
             {
                 "type": "selector",
                 "tag": "ePS-Auto",
@@ -1394,18 +1288,9 @@ def generate_singbox_config(capability='full'):
                 "outbounds": _auto_test_proxies,
                 "interval": "60s",
                 "tolerance": 150,
-                "url": "http://cp.cloudflare.com/generate_204",
-                "timeout": "5s"
+                "url": "http://cp.cloudflare.com/generate_204"
             },
-        ] + ([{
-                # ai-residential: 幕后路由出站，AI网站流量自动走此出站
-                # 用户在客户端看不到这个选项，路由规则自动匹配AI域名后走SOCKS5
-                # 故障转移：所有SOCKS5不可用时自动fallback到direct
-                "type": "selector",
-                "tag": "ai-residential",
-                "outbounds": [f"AI-SOCKS5-{i+1}" for i in range(len(SOCKS5_POOL))] + ["direct"],
-                "default": "AI-SOCKS5-1"
-            }] if SOCKS5_POOL and AI_SOCKS5_ROUTING == 'on' else []) + [
+        ] + [
             {
                 "type": "direct",
                 "tag": "direct"
@@ -1413,10 +1298,6 @@ def generate_singbox_config(capability='full'):
             {
                 "type": "block",
                 "tag": "block"
-            },
-            {
-                "type": "dns",
-                "tag": "dns-out"
             },
             # VLESS-Reality
             {
@@ -1442,7 +1323,7 @@ def generate_singbox_config(capability='full'):
                     "reality": {
                         "enabled": True,
                         "public_key": REALITY_PUBLIC_KEY,
-                        "short_id": [REALITY_SHORT_ID]
+                        "short_id": REALITY_SHORT_ID
                     }
                 }
             },
@@ -1575,24 +1456,22 @@ def generate_singbox_config(capability='full'):
                     "alpn": ["h3"]
                 }
             }] if ENABLE_TUIC else []),
-        ] + ([
-            # AI-SOCKS5代理池 - 多代理自动容错切换
-            # 从SOCKS5_POOL生成多个SOCKS5出站，ai-residential selector自动包含所有可用代理
-            {
-                "type": "socks",
-                "tag": f"AI-SOCKS5-{i+1}",
-                "server": proxy['server'],
-                "server_port": proxy['port'],
-                "version": "5",
-                "username": proxy['user'],
-                "password": proxy['pass']
-            } for i, proxy in enumerate(SOCKS5_POOL)] if SOCKS5_POOL and AI_SOCKS5_ROUTING == 'on' else []) + [
+        ] + ([{
+            # 本机认证 SOCKS5 入站作为用户可见直连节点输出。
+            "type": "socks",
+            "tag": node_name("SOCKS5"),
+            "server": SERVER_IP,
+            "server_port": SOCKS5_PORT,
+            "version": "5",
+            "username": SOCKS5_USER,
+            "password": SOCKS5_PASS
+        }] if SOCKS5_SUBSCRIPTION_ENABLED else []) + [
         ],
         "route": {
             "rules": [
                 {
                     "protocol": "dns",
-                    "outbound": "dns-out"
+                    "action": "hijack-dns"
                     # 最高优先级：DNS流量直接交给sing-box内部DNS引擎处理
                     # 原理：DNS是UDP 53端口的特殊流量，必须先于所有HTTP/HTTPS流量被匹配
                     # 如果这条规则在后面，DNS查询可能被误发到代理节点，导致解析失败
@@ -1602,6 +1481,11 @@ def generate_singbox_config(capability='full'):
                     "outbound": "direct"
                     # 私有IP（192.168.x.x, 10.x.x.x, 172.16-31.x.x等）必须直连
                     # 原理：这些是内网地址，走代理没有意义，且可能导致代理节点连接本地服务失败
+                },
+                {
+                    # 订阅更新/导入必须绕过当前代理，避免旧节点已死时无法下载新订阅。
+                    "domain_suffix": [subscription_zone_suffix()],
+                    "outbound": "direct"
                 },
             ] + ([
                 # ⚠️ 排除X/推特/groK（不走AI-SOCKS5，走ePS-Auto正常代理）- 必须放在geosite-cn和AI规则之前！
@@ -1853,8 +1737,9 @@ def generate_clash_config(capability='full'):
     """生成Clash Meta (mihomo) 订阅配置（含url-test自动故障转移）
 
     【v4.15.0 dual-stack 双模式支持】:
-    - DIRECT_MODE_ENABLED（直连精简模式）：4 节点代理
-    - CDN_MODE_ENABLED（CDN全量模式）：6 节点代理
+    - DIRECT_MODE_ENABLED（直连精简模式）：5 节点代理（含本机认证 SOCKS5）
+    - CDN_MODE_ENABLED（CDN全量模式）：7 节点代理（含本机认证 SOCKS5）
+    - SOCKS5 凭据不完整或入站禁用时各减 1
     - capability='full' / 'standard' 等同（v4.14.0 起两者无差异）
 
     ⚠️ Clash Meta v1.18.0+ 支持 VLESS-Reality 协议
@@ -1999,24 +1884,37 @@ def generate_clash_config(capability='full'):
             "skip-cert-verify": True,
         })
 
+    # 本机认证 SOCKS5（用户可见直连节点；不等同于 AI_SOCKS5_* 幕后出站）
+    if SOCKS5_SUBSCRIPTION_ENABLED:
+        proxies.append({
+            "name": node_name("SOCKS5"),
+            "type": "socks5",
+            "server": SERVER_IP,
+            "port": SOCKS5_PORT,
+            "username": SOCKS5_USER,
+            "password": SOCKS5_PASS,
+            "udp": False,
+        })
+
     proxy_names = [p["name"] for p in proxies]
-    # 标准 SOP：CDN 模式 6 节点（含 anyTLS+TUIC），直连模式 4 节点（含 anyTLS+TUIC）
-    # ENABLE_TUIC=false 时各减 1 节点
+    # 标准 SOP：CDN 模式 7 节点、直连模式 5 节点（含本机认证 SOCKS5）
+    # ENABLE_TUIC=false 或 SOCKS5 入站不可用时分别减 1 节点
     auto_proxy_names_base = [
         node_name("VLESS-Reality"),
         node_name("Trojan-TCP"),
     ]
     _tuic_proxy_name = [node_name("TUIC-v5")] if ENABLE_TUIC else []
+    _socks5_proxy_name = [node_name("SOCKS5")] if SOCKS5_SUBSCRIPTION_ENABLED else []
     if CDN_MODE_ENABLED:
         auto_proxy_names = auto_proxy_names_base + [
             node_name("VLESS-WS", cdn=True),
             node_name("Trojan-WS", cdn=True),
             node_name("anyTLS"),
-        ] + _tuic_proxy_name
+        ] + _tuic_proxy_name + _socks5_proxy_name
     else:
         auto_proxy_names = auto_proxy_names_base + [
             node_name("anyTLS"),
-        ] + _tuic_proxy_name
+        ] + _tuic_proxy_name + _socks5_proxy_name
     
     config = {
         "mixed-port": 7890,
@@ -2066,6 +1964,7 @@ def generate_clash_config(capability='full'):
             }
         ],
         "rules": [
+            "DOMAIN-SUFFIX,{},DIRECT".format(subscription_zone_suffix()),
             "GEOIP,CN,DIRECT",
             "MATCH,{}".format(f"{COUNTRY_CODE}-节点选择")
         ]
@@ -2101,12 +2000,13 @@ def create_app():
         usage_percent = round(used_gb / total_gb * 100, 1) if total_gb > 0 else 0
 
         # v4.15.0: 删除 VLESS-gRPC（用 TUIC v5 替代），节点数减 1
-        # full 能力：CDN 模式 6 节点（含 anyTLS+TUIC），直连模式 4 节点（含 anyTLS+TUIC）
-        # xray 能力：CDN 模式 4 节点（不含 anyTLS+TUIC），直连模式 2 节点（不含 anyTLS+TUIC）
-        # ENABLE_TUIC=false 时 full 各减 1（xray 本就不含 TUIC，不受影响）
+        # full 能力：CDN 模式 7 节点，直连模式 5 节点（含本机认证 SOCKS5）
+        # xray 能力：CDN 模式 5 节点，直连模式 3 节点（不含 anyTLS/TUIC）
+        # TUIC 或 SOCKS5 未启用时按实际配置动态减 1
         _tuic_count = 1 if ENABLE_TUIC else 0
-        node_count_full = (3 if DIRECT_MODE_ENABLED else 5) + _tuic_count
-        node_count_xray = (2 if DIRECT_MODE_ENABLED else 4)
+        _socks5_count = 1 if SOCKS5_SUBSCRIPTION_ENABLED else 0
+        node_count_full = (3 if DIRECT_MODE_ENABLED else 5) + _tuic_count + _socks5_count
+        node_count_xray = (2 if DIRECT_MODE_ENABLED else 4) + _socks5_count
         mode_label = '直连精简模式' if DIRECT_MODE_ENABLED else 'CDN全量模式'
         mode_desc = '无CDN节点，直连协议' if DIRECT_MODE_ENABLED else '含CDN节点，WS-CDN协议'
 
@@ -2269,8 +2169,9 @@ def create_app():
 
         【v4.15.3 客户端能力适配（修复 Shadowrocket 节点缺失问题）】:
         - 根据 User-Agent 自动判断客户端能力
-        - Clash Meta/mihomo/sing-box/NekoBox/NekoRay/v2rayN/v2rayNG/Shadowrocket（full）→ 6 节点（含 anyTLS + TUIC v5）
-        - Surge/Quantumult X/Loon/v2Box（xray）→ 标准URI，4 节点（不含 anyTLS/TUIC）
+        - Clash Meta/mihomo/sing-box/NekoBox/NekoRay/v2rayN/v2rayNG/Shadowrocket（full）→ 7 节点（含 anyTLS + TUIC v5 + SOCKS5）
+        - Surge/Quantumult X/Loon/v2Box（xray）→ 标准URI，5 节点（含 SOCKS5，不含 anyTLS/TUIC）
+        - direct 模式比上述 CDN 模式少 2 个 WS-CDN 节点
         - 默认未知客户端按 full 处理，避免 sing-box/GUI 拉取器被误降级
         - ?client=clash / ?client=full 强制返回全量节点（含 anyTLS）
         - ?client=v2rayn / ?client=xray / ?client=standard 强制返回 Xray 兼容节点（不含 anyTLS）
@@ -3171,22 +3072,14 @@ if __name__ == '__main__':
     app = create_app()
     logger.info(f"v4.15.0 Starting HTTPS subscription service on 0.0.0.0:{SUB_PORT}")
     logger.info(f"DEPLOY_MODE: {DEPLOY_MODE} | CDN_MODE_ENABLED: {CDN_MODE_ENABLED} | DIRECT_MODE_ENABLED: {DIRECT_MODE_ENABLED}")
-    node_count = 4 if DIRECT_MODE_ENABLED else 6
+    node_count = (4 if DIRECT_MODE_ENABLED else 6) + (1 if SOCKS5_SUBSCRIPTION_ENABLED else 0)
     logger.info(f"节点配置: {node_count} 个节点（{'直连精简' if DIRECT_MODE_ENABLED else 'CDN全量'}模式）")
     logger.info(f"Base64订阅: https://{sub_domain}:{SUB_PORT}/sub/{COUNTRY_CODE}")
     logger.info(f"sing-box JSON: https://{sub_domain}:{SUB_PORT}/singbox/{COUNTRY_CODE}")
 
-    # ⚠️ SSL证书路径：优先使用fullchain.pem（Let's Encrypt/Cloudflare正式证书）
-    # 如果fullchain.pem不存在，降级使用cert.pem（cert_manager.py自签名证书）
-    # cert_manager.py自签名证书文件名：cert.pem + key.pem
-    # Cloudflare API证书文件名：cert.pem + key.pem（写入CERT_FILE/KEY_FILE）
-    # Let's Encrypt证书文件名：fullchain.pem + key.pem（acme.sh生成）
+    # 用户订阅只能使用 Let's Encrypt 公网可信完整证书链，禁止回退自签名证书。
     cert_chain = os.path.join(CERT_DIR, 'fullchain.pem')
     cert_key = os.path.join(CERT_DIR, 'key.pem')
-    if not os.path.exists(cert_chain):
-        cert_chain = os.path.join(CERT_DIR, 'cert.pem')
-    if not os.path.exists(cert_key):
-        cert_key = os.path.join(CERT_DIR, 'key.pem')
 
     if not os.path.exists(cert_chain) or not os.path.exists(cert_key):
         logger.error(f"SSL证书文件不存在: {cert_chain} 或 {cert_key}")

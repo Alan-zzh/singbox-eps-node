@@ -34,6 +34,32 @@ def test_proxy_skip_expression_is_host_port_path_based_not_client_ip():
     assert 'starts_with(http.request.uri.path, "/clash")' in expression
 
 
+def test_proxy_rules_are_scoped_to_current_server_domain():
+    module = load_module()
+
+    module.configure_proxy_domain("hkbeiyong.290372913.xyz", "290372913.xyz")
+    expression = module.build_proxy_skip_expression("290372913.xyz")
+    origin_rules = module.build_cdn_origin_rules("290372913.xyz")
+
+    assert '"hkbeiyong.290372913.xyz"' in expression
+    assert '"jp.290372913.xyz"' not in expression
+    assert all(
+        '"hkbeiyong.290372913.xyz"' in rule["expression"]
+        for rule in origin_rules
+    )
+
+
+def test_proxy_domain_must_belong_to_requested_zone():
+    module = load_module()
+
+    try:
+        module.configure_proxy_domain("unrelated.example", "290372913.xyz")
+    except ValueError as exc:
+        assert "must be a subdomain" in str(exc)
+    else:
+        raise AssertionError("cross-zone proxy domain must be rejected")
+
+
 def test_proxy_skip_rule_skips_cloudflare_security_products_for_proxy_entrypoints():
     module = load_module()
 

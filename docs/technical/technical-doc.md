@@ -1,7 +1,7 @@
 # Singbox EPS Node 技术文档
-**版本**: v4.15.25 | **更新**: 2026-07-28
+**版本**: v4.15.26 | **更新**: 2026-07-28
 
-> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.25 架构和模块说明。
+> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.26 架构和模块说明。
 > 已删除/已下线的协议在末尾「已删除协议清单」明确标注，避免后续 AI 基于过时文档犯错。
 
 ---
@@ -24,8 +24,8 @@
 
 | 模式 | 节点数 | 协议 | singbox-cdn | 适用场景 |
 |------|--------|------|-------------|----------|
-| `cdn` | 6 | 4 直连 + 2 WS-CDN | 启动 | JP，抗封锁 |
-| `direct` | 4 | 纯直连 | 不启动 | HK1/HK2/HKBEIYONG，无 CDN 依赖 |
+| `cdn` | 6/7 | 4 直连 + 2 WS-CDN，可选认证 SOCKS5 | 启动 | JP，抗封锁 |
+| `direct` | 4/5 | 4 直连，可选认证 SOCKS5 | 不启动 | HK1/HK2/HKBEIYONG，无 CDN 依赖 |
 
 - `DEPLOY_MODE` 显式设置优先级最高
 - 现网每台都必须显式设置 `DEPLOY_MODE`；历史 fallback 仅用于兼容，部署脚本以远端 `.env` 为真相源。
@@ -35,13 +35,13 @@
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| singbox | TCP 443/8443/2083/2096/TROJAN_TCP_PORT + UDP 443 | 代理内核（6 协议 CDN 模式 / 4 协议 direct 模式） |
+| singbox | TCP 443/8443/2083/2096/TROJAN_TCP_PORT/可选1080 + UDP 443 | 代理内核（默认7节点 CDN / 默认5节点 direct） |
 | singbox-sub | 2087 | HTTPS 订阅（JP 走 sub-jp 灰云；所有 direct 节点走主域名） |
 | singbox-cdn | - | CDN 优选 IP 监控（v4.0 用户反馈驱动版，30 分钟存活检测） |
 
 ### 节点列表（v4.15.13 真实架构）
 
-**CDN 模式 6 节点**：
+**CDN 模式默认 7 节点**：
 
 | 节点 | 地址 | 方式 | 说明 |
 |------|------|------|------|
@@ -51,8 +51,9 @@
 | {CC}-TUIC-v5 | {IP}:443/UDP | 直连 | QUIC 多路复用 + UDP relay；与 Reality TCP 443 不冲突 |
 | {CC}-VLESS-WS-CDN | 优选IP:443 | CDN | 主域名橙云代理，路径 `/api/v1/stream` 回源 8443 |
 | {CC}-Trojan-WS-CDN | 优选IP:443 | CDN | 主域名橙云代理，路径 `/api/v1/data` 回源 2083 |
+| {CC}-SOCKS5 | {IP}:1080 | 直连 | 可选认证 SOCKS5 入站 |
 
-**direct 模式 4 节点**（HK1/HK2/HKBEIYONG）：去掉 VLESS-WS-CDN / Trojan-WS-CDN / singbox-cdn，保留 VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5。
+**direct 模式默认 5 节点**（HK1/HK2/HKBEIYONG）：去掉 VLESS-WS-CDN / Trojan-WS-CDN / singbox-cdn，保留 VLESS-Reality / Trojan-TCP / anyTLS / TUIC-v5 / 可选 SOCKS5。
 
 > ⚠️ AI-SOCKS5 是幕后路由出站，不是用户可见节点，不出现在订阅链接和 selector 中。
 
@@ -430,7 +431,7 @@ netfilter-persistent save
 
 ### CDN WS 验证标准 SOP（防假阳性，AGENTS.md 铁律 14）
 ```powershell
-curl.exe -s -4 --max-time 10 -k --noproxy "*" -o NUL -w "%{http_code}" `
+curl.exe -s -4 --http1.1 --max-time 10 -k --noproxy "*" -o NUL -w "%{http_code}" `
   -H "Upgrade: websocket" -H "Connection: Upgrade" `
   -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" `
   "https://{domain}:443/api/v1/stream"
@@ -438,6 +439,7 @@ curl.exe -s -4 --max-time 10 -k --noproxy "*" -o NUL -w "%{http_code}" `
 - **期望值**：`101`（∉403/520）
 - **铁律**：
   - ❌ 禁止 `-o /dev/null`（Windows 不识别，假 403）
+  - ❌ 禁止漏掉 `--http1.1`（HTTP/2 不支持 Upgrade，可能假 400）
   - ❌ 禁止服务器自测（CF 拦服务器 IP，假 403）
   - ❌ 禁止单次 403 就判 CDN 损坏（CF 瞬断重试即可）
 - **真实标准**：`tests/full_audit.py` 全 101 ✅；客户端实际能通 ✅
@@ -499,6 +501,7 @@ bash /root/singbox-eps-node/scripts/health_check.sh  # 手动运行
 
 | 版本 | 日期 | 更新 |
 |------|------|------|
+| v4.15.26 | 2026-07-28 | 一键安装完整事务回滚（目录/二进制/systemd/crontab/iptables）；8 格 SOCKS/AI 矩阵；真实 OpenAI 401 门禁及可重试降级；订阅域名直连；sing-box 1.13 客户端配置校验；CF/iptables 收口 |
 | v4.15.25 | 2026-07-28 | 新增 HKBEIYONG direct；修复自定义服务器标识、Global Key 邮箱认证、ACME 首装/重跑幂等与 direct 健康检查；生产 TLS/4 节点/SOCKS5 验收通过 |
 | v4.15.24 | 2026-07-23 | 新服务器安装从落盘 `.env` 读取域名；自动同步/验证 DNS；三类订阅经系统 CA 真实下载与格式检查后才允许成功 |
 | v4.15.23 | 2026-07-23 | 修复 HK2/JP 灰云订阅自签名证书假 200；统一 Let's Encrypt 签发/续签；部署与 full audit 强制真实 TLS 信任验证 |

@@ -68,6 +68,21 @@ SKIP_PRODUCTS = [
 ]
 
 
+def configure_proxy_domain(domain: str | None, zone_name: str = ZONE_NAME) -> None:
+    """Scope all Cloudflare proxy rules to the current server hostname."""
+    if not domain:
+        return
+    normalized_domain = domain.strip().lower().rstrip(".")
+    normalized_zone = zone_name.strip().lower().rstrip(".")
+    suffix = f".{normalized_zone}"
+    if normalized_domain == normalized_zone or not normalized_domain.endswith(suffix):
+        raise ValueError(f"proxy domain must be a subdomain of zone {normalized_zone}")
+    relative_name = normalized_domain[: -len(suffix)]
+    if not relative_name:
+        raise ValueError("proxy domain must include a hostname before the zone")
+    PROXY_SUBDOMAINS[:] = [relative_name]
+
+
 def load_env(path: Path = ENV_FILE) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -663,7 +678,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=["direct", "cdn"])
     args = parser.parse_args()
 
-    client = CloudflareClient(load_env())
+    env = load_env()
+    configure_proxy_domain(args.domain or env.get("CF_DOMAIN"), args.zone)
+    client = CloudflareClient(env)
     if args.action == "dns-sync":
         if not args.domain or not args.server_ip or not args.mode:
             parser.error("dns-sync requires --domain, --server-ip and --mode")

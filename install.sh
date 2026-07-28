@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v4.15.25
+# 版本: v4.15.26
 # 用途: 新VPS全自动部署（含双部署模式+系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
 # 【部署模式】
-#   - CDN混合模式（推荐）：6节点（4直连+2WS-CDN），抗封锁能力强，需要CF域名
-#   - 纯直连模式：4节点（全直连），极简无CDN依赖，IP被封即不可用
+#   - CDN混合模式（推荐）：默认7节点（含认证 SOCKS5 + 2WS-CDN）
+#   - 纯直连模式：默认5节点（含认证 SOCKS5，无CDN）
 #
 # 【自动化功能清单】
 # 阶段1-系统准备（全自动，无需用户操作）：
@@ -32,7 +32,7 @@ if [ ! -t 0 ]; then
 fi
 
 # 非root用户检查 [Trae CN] 2026-06-04
-if [ "$EUID" -ne 0 ]; then
+if [ "${INSTALL_SH_SOURCE_ONLY:-0}" != "1" ] && [ "$EUID" -ne 0 ]; then
     echo "[错误] 此脚本必须以root用户运行"
     exit 1
 fi
@@ -55,6 +55,237 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "${CYAN}>>> $1${NC}"; }
+
+INSTALL_ROLLBACK_DIR=""
+INSTALL_TEMP_ENV=""
+INSTALL_STATE_BACKUP_DIR=""
+INSTALL_LIVE_SWITCHED=0
+INSTALL_CLEAR_DATA=0
+INSTALL_TRANSACTION_STARTED=0
+
+cleanup_install_state_snapshot() {
+    if [[ "$INSTALL_STATE_BACKUP_DIR" == /root/singbox-install-state.* ]] \
+        && [ -d "$INSTALL_STATE_BACKUP_DIR" ]; then
+        rm -rf -- "$INSTALL_STATE_BACKUP_DIR"
+    fi
+    INSTALL_STATE_BACKUP_DIR=""
+}
+
+snapshot_install_host_state() {
+    local svc unit state_dir rules_name
+    state_dir=$(mktemp -d /root/singbox-install-state.XXXXXX)
+    chmod 700 "$state_dir"
+    INSTALL_STATE_BACKUP_DIR="$state_dir"
+
+    if ! command -v iptables-save >/dev/null 2>&1 \
+        || ! iptables-save > "$state_dir/iptables.runtime.v4" 2>/dev/null; then
+        log_error "无法快照当前 iptables 规则，拒绝进入安装事务"
+        cleanup_install_state_snapshot
+        return 1
+    fi
+    chmod 600 "$state_dir/iptables.runtime.v4"
+    if command -v ip6tables-save >/dev/null 2>&1; then
+        if ! ip6tables-save > "$state_dir/iptables.runtime.v6" 2>/dev/null; then
+            log_error "无法快照当前 ip6tables 规则，拒绝进入安装事务"
+            cleanup_install_state_snapshot
+            return 1
+        fi
+        chmod 600 "$state_dir/iptables.runtime.v6"
+    fi
+    for rules_name in rules.v4 rules.v6; do
+        if [ -f "/etc/iptables/$rules_name" ]; then
+            cp -a "/etc/iptables/$rules_name" "$state_dir/$rules_name"
+            : > "$state_dir/${rules_name}.existed"
+        fi
+    done
+
+    if crontab -l > "$state_dir/crontab" 2>/dev/null; then
+        : > "$state_dir/crontab.existed"
+        chmod 600 "$state_dir/crontab"
+    else
+        rm -f -- "$state_dir/crontab"
+    fi
+
+    for svc in singbox singbox-sub singbox-cdn; do
+        unit="/etc/systemd/system/${svc}.service"
+        if [ -f "$unit" ]; then
+            cp -a "$unit" "$state_dir/${svc}.service"
+            : > "$state_dir/${svc}.unit_existed"
+        fi
+        systemctl is-enabled "$svc" > "$state_dir/${svc}.enabled" 2>/dev/null || true
+        systemctl is-active "$svc" > "$state_dir/${svc}.active" 2>/dev/null || true
+    done
+    if [ -f /usr/local/bin/sing-box ]; then
+        cp -a /usr/local/bin/sing-box "$state_dir/sing-box"
+        : > "$state_dir/sing-box.existed"
+    fi
+    if [ -L /usr/local/bin/singbox ]; then
+        readlink /usr/local/bin/singbox > "$state_dir/singbox.symlink"
+    elif [ -f /usr/local/bin/singbox ]; then
+        cp -a /usr/local/bin/singbox "$state_dir/singbox.binary"
+    fi
+    INSTALL_TRANSACTION_STARTED=1
+    log_info "已建立安装事务快照（systemd/crontab/iptables）"
+}
+
+restore_install_host_state() {
+    local svc unit enabled_state active_state rules_name
+    local state_dir="$INSTALL_STATE_BACKUP_DIR" restore_failed=0
+    if [[ "$state_dir" != /root/singbox-install-state.* ]] || [ ! -d "$state_dir" ]; then
+        return 0
+    fi
+
+    for svc in singbox singbox-sub singbox-cdn; do
+        unit="/etc/systemd/system/${svc}.service"
+        if [ -f "$state_dir/${svc}.unit_existed" ]; then
+            cp -a "$state_dir/${svc}.service" "$unit" || restore_failed=1
+            cmp -s "$state_dir/${svc}.service" "$unit" || restore_failed=1
+        else
+            rm -f -- "$unit" || restore_failed=1
+            [ ! -e "$unit" ] || restore_failed=1
+        fi
+    done
+    systemctl daemon-reload 2>/dev/null || restore_failed=1
+
+    if [ -f "$state_dir/sing-box.existed" ]; then
+        cp -a "$state_dir/sing-box" /usr/local/bin/sing-box || restore_failed=1
+        cmp -s "$state_dir/sing-box" /usr/local/bin/sing-box || restore_failed=1
+    else
+        rm -f -- /usr/local/bin/sing-box || restore_failed=1
+        [ ! -e /usr/local/bin/sing-box ] || restore_failed=1
+    fi
+    rm -f -- /usr/local/bin/singbox || restore_failed=1
+    if [ -f "$state_dir/singbox.symlink" ]; then
+        ln -s "$(cat "$state_dir/singbox.symlink")" /usr/local/bin/singbox \
+            || restore_failed=1
+        [ "$(readlink /usr/local/bin/singbox 2>/dev/null)" = \
+            "$(cat "$state_dir/singbox.symlink")" ] || restore_failed=1
+    elif [ -f "$state_dir/singbox.binary" ]; then
+        cp -a "$state_dir/singbox.binary" /usr/local/bin/singbox \
+            || restore_failed=1
+        cmp -s "$state_dir/singbox.binary" /usr/local/bin/singbox \
+            || restore_failed=1
+    else
+        [ ! -e /usr/local/bin/singbox ] || restore_failed=1
+    fi
+
+    if [ -f "$state_dir/crontab.existed" ]; then
+        crontab "$state_dir/crontab" 2>/dev/null || restore_failed=1
+        crontab -l 2>/dev/null | cmp -s - "$state_dir/crontab" || restore_failed=1
+    else
+        crontab -r 2>/dev/null || true
+        if crontab -l >/dev/null 2>&1; then
+            restore_failed=1
+        fi
+    fi
+
+    mkdir -p /etc/iptables || restore_failed=1
+    for rules_name in rules.v4 rules.v6; do
+        if [ -f "$state_dir/${rules_name}.existed" ]; then
+            cp -a "$state_dir/$rules_name" "/etc/iptables/$rules_name" \
+                || restore_failed=1
+            cmp -s "$state_dir/$rules_name" "/etc/iptables/$rules_name" \
+                || restore_failed=1
+        else
+            rm -f -- "/etc/iptables/$rules_name" || restore_failed=1
+        fi
+    done
+    if ! command -v iptables-restore >/dev/null 2>&1 \
+        || ! iptables-restore < "$state_dir/iptables.runtime.v4" 2>/dev/null; then
+        restore_failed=1
+    elif ! iptables-save 2>/dev/null | cmp -s - "$state_dir/iptables.runtime.v4"; then
+        restore_failed=1
+    fi
+    if [ -f "$state_dir/iptables.runtime.v6" ]; then
+        if ! command -v ip6tables-restore >/dev/null 2>&1 \
+            || ! ip6tables-restore < "$state_dir/iptables.runtime.v6" 2>/dev/null; then
+            restore_failed=1
+        elif ! ip6tables-save 2>/dev/null | cmp -s - "$state_dir/iptables.runtime.v6"; then
+            restore_failed=1
+        fi
+    fi
+
+    for svc in singbox singbox-sub singbox-cdn; do
+        enabled_state=$(cat "$state_dir/${svc}.enabled" 2>/dev/null || true)
+        active_state=$(cat "$state_dir/${svc}.active" 2>/dev/null || true)
+        if [ "$enabled_state" = "enabled" ]; then
+            systemctl enable "$svc" 2>/dev/null || restore_failed=1
+        else
+            systemctl disable "$svc" 2>/dev/null || true
+        fi
+        [ "$(systemctl is-enabled "$svc" 2>/dev/null || true)" = "$enabled_state" ] \
+            || restore_failed=1
+        if [ "$active_state" = "active" ]; then
+            systemctl restart "$svc" 2>/dev/null || restore_failed=1
+            systemctl is-active --quiet "$svc" || restore_failed=1
+        else
+            systemctl stop "$svc" 2>/dev/null || true
+            [ "$(systemctl is-active "$svc" 2>/dev/null || true)" = "$active_state" ] \
+                || restore_failed=1
+        fi
+    done
+    if [ "$restore_failed" -ne 0 ]; then
+        log_error "主机状态恢复未完整通过，事务快照保留在 $state_dir"
+        return 1
+    fi
+    return 0
+}
+
+rollback_failed_install() {
+    local rc="${1:-1}" failed_dir
+    local project_restore_failed=0 host_restore_failed=0
+    trap - EXIT
+    set +e  # 回滚路径必须尽力执行完所有恢复步骤
+    if [ -n "$INSTALL_TEMP_ENV" ]; then
+        rm -f -- "$INSTALL_TEMP_ENV"
+        INSTALL_TEMP_ENV=""
+    fi
+    if [ "$rc" -ne 0 ]; then
+        if [ "$INSTALL_TRANSACTION_STARTED" = "1" ]; then
+            log_error "安装未通过最终验收，自动回滚项目与主机状态"
+            systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
+            if [ "$INSTALL_LIVE_SWITCHED" = "1" ] && [ -d "$BASE_DIR" ]; then
+                failed_dir="${BASE_DIR}.failed.$(date +%Y%m%d%H%M%S)"
+                if ! mv "$BASE_DIR" "$failed_dir"; then
+                    log_error "失败版本目录移出 live 路径失败"
+                    failed_dir=""
+                    project_restore_failed=1
+                fi
+            fi
+            if [ -n "$INSTALL_ROLLBACK_DIR" ] && [ -d "$INSTALL_ROLLBACK_DIR" ]; then
+                if [ -e "$BASE_DIR" ]; then
+                    log_error "live 路径仍被占用，无法恢复旧项目目录"
+                    project_restore_failed=1
+                elif mv "$INSTALL_ROLLBACK_DIR" "$BASE_DIR"; then
+                    INSTALL_ROLLBACK_DIR=""
+                else
+                    log_error "旧项目目录恢复到 live 路径失败"
+                    project_restore_failed=1
+                fi
+            fi
+            if ! restore_install_host_state; then
+                host_restore_failed=1
+            fi
+            if [ "$project_restore_failed" -eq 0 ] \
+                && [ "$host_restore_failed" -eq 0 ]; then
+                cleanup_install_state_snapshot
+                if [ -n "$failed_dir" ]; then
+                    log_error "旧状态已恢复；失败版本保留在 $failed_dir 供排查"
+                else
+                    log_error "安装前主机状态已恢复"
+                fi
+            else
+                log_error "回滚未完整通过；旧目录指针与事务快照均已保留，请按日志修复"
+            fi
+        else
+            cleanup_install_state_snapshot
+            log_error "安装在生产切换事务开始前失败，未停止或替换现有 singbox 服务"
+        fi
+    else
+        cleanup_install_state_snapshot
+    fi
+    exit "$rc"
+}
 
 cleanup_broken_xanmod_source() {
     if [ -f /etc/apt/sources.list.d/xanmod-release.list ]; then
@@ -540,29 +771,8 @@ install_singbox() {
         SINGBOX_CHOICE=${SINGBOX_CHOICE:-2}
 
         if [ "$SINGBOX_CHOICE" = "1" ]; then
-            log_info "卸载当前 Singbox 及所有关联数据（保留密码和密钥）..."
-            mkdir -p "${BASE_DIR}/.backup"
-            chmod 700 "${BASE_DIR}/.backup"
-            PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
-            > "$PASSWORD_BACKUP"
-            chmod 600 "$PASSWORD_BACKUP"
-            if [ -f "$BASE_DIR/.env" ]; then
-                for FIELD in VLESS_UUID VLESS_WS_UUID TROJAN_PASSWORD TUIC_PASSWORD ANYTLS_PASSWORD \
-                             REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID \
-                             COUNTRY_CODE DEPLOY_MODE \
-                             ENABLE_SOCKS5 SOCKS5_PORT SOCKS5_USER SOCKS5_PASSWORD \
-                             CF_DOMAIN CF_API_TOKEN AI_SOCKS5_SERVER AI_SOCKS5_PORT \
-                             AI_SOCKS5_USER AI_SOCKS5_PASS AI_SOCKS5_POOL AI_SOCKS5_ROUTING SERVER_IP SUB_TOKEN TG_BOT_TOKEN \
-                             TG_ADMIN_CHAT_ID WARP_UNLOCK WARP_PRIVATE_KEY WARP_PEER_PUBLIC_KEY \
-                             WARP_PEER_ENDPOINT WARP_CLIENT_IPV4 WARP_CLIENT_IPV6 WARP_RESERVED \
-                             ENABLE_TUIC; do
-                    VALUE=$(grep "^${FIELD}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
-                    if [ -n "$VALUE" ]; then
-                        echo "${FIELD}=${VALUE}" >> "$PASSWORD_BACKUP"
-                    fi
-                done
-                log_info "密码和密钥已备份到 ${PASSWORD_BACKUP}"
-            fi
+            log_info "卸载当前 Singbox 及所有关联数据（旧目录保留到最终验收通过）..."
+            INSTALL_CLEAR_DATA=1
             systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
             systemctl disable singbox singbox-sub singbox-cdn 2>/dev/null || true
             rm -f /etc/systemd/system/singbox.service
@@ -570,16 +780,12 @@ install_singbox() {
             rm -f /etc/systemd/system/singbox-cdn.service
             systemctl daemon-reload 2>/dev/null || true
             rm -f /usr/local/bin/singbox
-            if [ -d "$BASE_DIR" ]; then
-                log_info "删除项目目录 $BASE_DIR（配置/证书/流量记录/日志全部清除）..."
-                rm -rf "$BASE_DIR"
-            fi
             crontab -l 2>/dev/null | grep -v "health_check.sh" | grep -v "cert_manager.py" | crontab - 2>/dev/null || true
             iptables -D INPUT -p udp --dport 21000:21200 -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport 21000:21200 -j ACCEPT 2>/dev/null || true
             netfilter-persistent save 2>/dev/null || true
-            log_info "已完全卸载（二进制+配置+数据+证书+服务+定时任务+防火墙规则全部清除）"
-            log_info "密码和密钥已备份，安装时将自动恢复"
+            log_info "旧服务与防火墙规则已卸载；旧目录仅作为事务回滚源保留"
+            log_info "旧凭据将从原 .env 恢复；数据和证书不会带入新安装"
             log_info "开始全新安装..."
         else
             log_info "保留当前 Singbox: $CURRENT_VER"
@@ -612,21 +818,57 @@ install_singbox() {
 
 clone_repo() {
     log_step "部署项目文件..."
+    local preserved_env="" staging_dir="${BASE_DIR}.staging.$$" backup_dir=""
     if [ -d "$BASE_DIR" ]; then
-        log_warn "$BASE_DIR 已存在，备份后重新部署..."
-        mv "$BASE_DIR" "${BASE_DIR}.bak.$(date +%Y%m%d%H%M%S)"
+        log_warn "$BASE_DIR 已存在，先构建 staging 并保留 .env/data/cert，成功后才切换..."
+        if [ -f "$BASE_DIR/.env" ]; then
+            preserved_env=$(mktemp /root/singbox-eps-node.env.XXXXXX)
+            INSTALL_TEMP_ENV="$preserved_env"
+            cp "$BASE_DIR/.env" "$preserved_env"
+            chmod 600 "$preserved_env"
+        fi
     fi
     if [ -n "$INSTALL_BUNDLE" ] && [ -f "$INSTALL_BUNDLE" ]; then
-        mkdir -p "$BASE_DIR"
-        tar -xzf "$INSTALL_BUNDLE" -C "$BASE_DIR"
+        mkdir -p "$staging_dir"
+        tar -xzf "$INSTALL_BUNDLE" -C "$staging_dir"
         log_info "已从本地安装包部署项目: $INSTALL_BUNDLE"
     elif command -v git &>/dev/null; then
-        git clone "$REPO_URL" "$BASE_DIR"
+        git clone "$REPO_URL" "$staging_dir"
     else
         apt-get install -y git
-        git clone "$REPO_URL" "$BASE_DIR"
+        git clone "$REPO_URL" "$staging_dir"
     fi
-    mkdir -p "$BASE_DIR/logs" "$BASE_DIR/data" "$BASE_DIR/cert" "$BASE_DIR/backups"
+    mkdir -p "$staging_dir/logs" "$staging_dir/data" "$staging_dir/cert" "$staging_dir/backups"
+    if [ -d "$BASE_DIR" ] && [ "$INSTALL_CLEAR_DATA" != "1" ]; then
+        for preserved_dir in data cert; do
+            if [ -d "$BASE_DIR/$preserved_dir" ]; then
+                cp -a "$BASE_DIR/$preserved_dir/." "$staging_dir/$preserved_dir/"
+            fi
+        done
+    fi
+    if [ -n "$preserved_env" ]; then
+        # 只恢复唯一真相源 .env；禁止在仓库内再复制一份完整敏感配置。
+        cp "$preserved_env" "$staging_dir/.env"
+        chmod 600 "$staging_dir/.env"
+        rm -f -- "$preserved_env"
+        INSTALL_TEMP_ENV=""
+    fi
+    if [ -d "$BASE_DIR" ]; then
+        backup_dir="${BASE_DIR}.bak.$(date +%Y%m%d%H%M%S)"
+        mv "$BASE_DIR" "$backup_dir"
+        if ! mv "$staging_dir" "$BASE_DIR"; then
+            log_error "staging 切换失败，正在恢复原工作目录"
+            mv "$backup_dir" "$BASE_DIR"
+            return 1
+        fi
+        INSTALL_ROLLBACK_DIR="$backup_dir"
+    else
+        mv "$staging_dir" "$BASE_DIR"
+    fi
+    INSTALL_LIVE_SWITCHED=1
+    if [ -n "$preserved_env" ] || [ -n "$backup_dir" ]; then
+        log_info "已安全恢复既有 .env/data/cert（凭据内容不写入日志）"
+    fi
     log_info "目录结构已创建（logs/data/cert/backups）"
 }
 
@@ -653,10 +895,11 @@ setup_python_env() {
 
 generate_uuids_and_passwords() {
     log_step "生成协议密码和UUID..."
-    # v4.15.8: 使用 root 私有目录替代 /tmp，避免凭据泄露
-    PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
-    mkdir -p "${BASE_DIR}/.backup"
-    chmod 700 "${BASE_DIR}/.backup"
+    # 重装直接从唯一真相源 .env 恢复；兼容读取后立即删除旧版重复凭据备份。
+    PASSWORD_BACKUP="${BASE_DIR}/.env"
+    if [ -f "${BASE_DIR}/.backup/passwords_backup.env" ]; then
+        PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
+    fi
     if [ -f "$PASSWORD_BACKUP" ]; then
         log_info "检测到密码备份，恢复旧密码（客户端无需重新配置）..."
         while IFS='=' read -r key value; do
@@ -674,6 +917,12 @@ generate_uuids_and_passwords() {
                 SOCKS5_PORT) SOCKS5_PORT="$value" ;;
                 SOCKS5_USER) SOCKS5_USER="$value" ;;
                 SOCKS5_PASSWORD) SOCKS5_PASSWORD="$value" ;;
+                AI_SOCKS5_SERVER) AI_SOCKS5_SERVER="$value" ;;
+                AI_SOCKS5_PORT) AI_SOCKS5_PORT="$value" ;;
+                AI_SOCKS5_USER) AI_SOCKS5_USER="$value" ;;
+                AI_SOCKS5_PASS) AI_SOCKS5_PASS="$value" ;;
+                AI_SOCKS5_POOL) AI_SOCKS5_POOL="$value" ;;
+                AI_SOCKS5_ROUTING) AI_SOCKS5_ROUTING="$value" ;;
             esac
         done < "$PASSWORD_BACKUP"
         chmod 600 "$PASSWORD_BACKUP"
@@ -729,7 +978,10 @@ generate_uuids_and_passwords() {
 
 generate_reality_keys() {
     log_step "生成Reality密钥对..."
-    PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
+    PASSWORD_BACKUP="${BASE_DIR}/.env"
+    if [ -f "${BASE_DIR}/.backup/passwords_backup.env" ]; then
+        PASSWORD_BACKUP="${BASE_DIR}/.backup/passwords_backup.env"
+    fi
     if [ -f "$PASSWORD_BACKUP" ]; then
         while IFS='=' read -r key value; do
             case "$key" in
@@ -768,7 +1020,7 @@ select_deploy_mode() {
         _direct_domain=$(grep "^CF_DOMAIN=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || echo "")
     fi
     if [ -n "$_direct_domain" ] && echo "$_direct_domain" | grep -Eqi '^(hk[12]|hkbeiyong)\.'; then
-        log_info "检测到香港直连域名 ($_direct_domain)，强制使用纯直连模式（4节点，无CDN依赖）"
+        log_info "检测到香港直连域名 ($_direct_domain)，强制使用纯直连模式（默认5节点，无CDN依赖）"
         DEPLOY_MODE="direct"
         return
     fi
@@ -776,10 +1028,10 @@ select_deploy_mode() {
     # 如果已从备份恢复 DEPLOY_MODE，或已有 .env 中存在 DEPLOY_MODE，直接使用旧值不询问
     if [ -n "$DEPLOY_MODE" ]; then
         if [ "$DEPLOY_MODE" = "direct" ]; then
-            log_info "检测到已有部署模式：纯直连模式（4节点精简，无CDN依赖）"
+            log_info "检测到已有部署模式：纯直连模式（默认5节点，无CDN依赖）"
         else
             DEPLOY_MODE="cdn"
-            log_info "检测到已有部署模式：CDN混合模式（6节点全量，推荐）"
+            log_info "检测到已有部署模式：CDN混合模式（默认7节点，推荐）"
         fi
         return
     fi
@@ -788,34 +1040,68 @@ select_deploy_mode() {
         if [ -n "$OLD_DEPLOY_MODE" ]; then
             DEPLOY_MODE="$OLD_DEPLOY_MODE"
             if [ "$DEPLOY_MODE" = "direct" ]; then
-                log_info "从已有配置读取部署模式：纯直连模式（4节点精简，无CDN依赖）"
+                log_info "从已有配置读取部署模式：纯直连模式（默认5节点，无CDN依赖）"
             else
                 DEPLOY_MODE="cdn"
-                log_info "从已有配置读取部署模式：CDN混合模式（6节点全量，推荐）"
+                log_info "从已有配置读取部署模式：CDN混合模式（默认7节点，推荐）"
             fi
             return
         fi
     fi
     if [ "${AUTO_YES:-0}" = "1" ]; then
         DEPLOY_MODE="cdn"
-        log_info "非交互模式，默认选择：CDN混合模式（6节点全量，推荐）"
+        log_info "非交互模式，默认选择：CDN混合模式（默认7节点，推荐）"
         return
     fi
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${CYAN}  🚀 选择部署模式${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}1) CDN混合模式（推荐）${NC} - 6节点（4直连+2WS-CDN），抗封锁能力强，需要CF域名"
-    echo -e "  ${YELLOW}2) 纯直连模式${NC}        - 4节点（全直连），极简无CDN依赖，IP被封即不可用"
+    echo -e "  ${GREEN}1) CDN混合模式（推荐）${NC} - 默认7节点（含认证 SOCKS5 + 2WS-CDN）"
+    echo -e "  ${YELLOW}2) 纯直连模式${NC}        - 默认5节点（含认证 SOCKS5，无CDN）"
     echo ""
     read -p "  请选择部署模式 [1/2]（默认1）: " DEPLOY_MODE_CHOICE
     DEPLOY_MODE_CHOICE=${DEPLOY_MODE_CHOICE:-1}
     if [ "$DEPLOY_MODE_CHOICE" = "2" ]; then
         DEPLOY_MODE="direct"
-        log_info "已选择：纯直连模式（4节点精简，无CDN依赖）"
+        log_info "已选择：纯直连模式（默认5节点，无CDN依赖）"
     else
         DEPLOY_MODE="cdn"
-        log_info "已选择：CDN混合模式（6节点全量，推荐）"
+        log_info "已选择：CDN混合模式（默认7节点，推荐）"
+    fi
+}
+
+select_local_socks5_mode() {
+    # 本机认证 SOCKS5 与 AI SOCKS5 是两条独立轴：允许 none/local/AI/local+AI。
+    # 环境变量或重装恢复值优先，便于无人值守矩阵安装。
+    if [ -z "${ENABLE_SOCKS5:-}" ] && [ -f "$BASE_DIR/.env" ]; then
+        ENABLE_SOCKS5=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+    fi
+    if [ -n "${ENABLE_SOCKS5:-}" ]; then
+        case "$(printf '%s' "$ENABLE_SOCKS5" | tr '[:upper:]' '[:lower:]')" in
+            true|1|yes|on) ENABLE_SOCKS5=true ;;
+            false|0|no|off) ENABLE_SOCKS5=false ;;
+            *) log_error "ENABLE_SOCKS5 非法，只允许 true/false"; return 1 ;;
+        esac
+        log_info "本机认证 SOCKS5: $ENABLE_SOCKS5（沿用预置/既有配置）"
+        return 0
+    fi
+    if [ "${AUTO_YES:-0}" = "1" ]; then
+        ENABLE_SOCKS5=true
+        log_info "非交互模式默认启用本机认证 SOCKS5；可预置 ENABLE_SOCKS5=false 关闭"
+        return 0
+    fi
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  本机认证 SOCKS5（可选）${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    read -p "  是否开放本服务器的认证 SOCKS5 节点？(Y/n): " ENABLE_LOCAL_SOCKS
+    if [[ "${ENABLE_LOCAL_SOCKS:-y}" =~ ^[Nn]$ ]]; then
+        ENABLE_SOCKS5=false
+        log_info "本机认证 SOCKS5 已关闭"
+    else
+        ENABLE_SOCKS5=true
+        log_info "本机认证 SOCKS5 已启用"
     fi
 }
 
@@ -973,7 +1259,7 @@ create_env_file() {
 # 由安装脚本自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 
 # ============ 部署模式 ============
-# cdn: CDN混合模式（6节点，推荐）；direct: 纯直连模式（4节点，无CDN依赖）
+# cdn: CDN混合模式（默认7节点）；direct: 纯直连模式（默认5节点，无CDN）
 DEPLOY_MODE=${DEPLOY_MODE}
 
 # ============ 必填 ============
@@ -1044,8 +1330,12 @@ TRAFFIC_RESET_DAY=${TRAFFIC_RESET_DAY:-14}
 TRAFFIC_AGGREGATE_ENDPOINTS=${TRAFFIC_AGGREGATE_ENDPOINTS:-}
 EOF
     chmod 600 "$BASE_DIR/.env"
+    rm -f -- "$BASE_DIR/.backup/passwords_backup.env"
     # v4.15.8: 验证关键变量不为空
-    _CRITICAL_VARS="SERVER_IP CF_DOMAIN VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID ANYTLS_PASSWORD SOCKS5_USER SOCKS5_PASSWORD"
+    _CRITICAL_VARS="SERVER_IP CF_DOMAIN VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID ANYTLS_PASSWORD"
+    if [ "$ENABLE_SOCKS5" = "true" ]; then
+        _CRITICAL_VARS="$_CRITICAL_VARS SOCKS5_USER SOCKS5_PASSWORD"
+    fi
     _VALIDATION_FAILED=false
     for _var in $_CRITICAL_VARS; do
         _val=$(grep "^${_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
@@ -1064,6 +1354,19 @@ generate_config() {
     log_step "生成Singbox配置..."
     cd "$BASE_DIR"
     python3 scripts/config_generator.py
+}
+
+validate_ai_socks5_routing() {
+    log_step "验证 AI SOCKS5 到 OpenAI 的真实路由..."
+    local report rc
+    report=$(python3 "$BASE_DIR/scripts/ai_socks5_health.py" \
+        --env "$BASE_DIR/.env" --json 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_error "AI SOCKS5 路由门禁失败（仅输出脱敏结果）: $report"
+        return 1
+    fi
+    log_info "AI SOCKS5 路由门禁通过: $report"
 }
 
 setup_subscription_dns() {
@@ -1090,6 +1393,10 @@ setup_subscription_dns() {
             --zone "$dns_zone" --domain "$dns_domain" \
             --server-ip "$dns_server_ip" --mode "$dns_mode"; then
             log_error "Cloudflare DNS 自动同步失败，拒绝继续签发错误域名证书"
+            return 1
+        fi
+        if [ "$dns_mode" = "cdn" ] && ! python3 "$BASE_DIR/scripts/cloudflare_proxy_rules.py" apply --zone "$dns_zone"; then
+            log_error "Cloudflare CDN 代理规则应用失败，拒绝继续 CDN 安装"
             return 1
         fi
     else
@@ -1119,7 +1426,7 @@ setup_certificate() {
     log_step "配置SSL证书..."
     cd "$BASE_DIR"
 
-    local cert_domain
+    local cert_domain cert_backup deploy_mode cert_host cert_pub key_pub
     cert_domain=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
 
     # 用户实际下载订阅的域名都是灰云：direct 使用主域名，CDN 模式使用 sub-* 域名。
@@ -1134,12 +1441,44 @@ setup_certificate() {
             rm -f -- /tmp/acme-install.sh
         fi
         /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-        rm -rf "$BASE_DIR/cert"
+        cert_backup=$(mktemp -d /root/singbox-cert-backup.XXXXXX)
+        if [ -d "$BASE_DIR/cert" ]; then
+            cp -a "$BASE_DIR/cert/." "$cert_backup/"
+        fi
+        rm -rf -- "$BASE_DIR/cert"
         mkdir -p "$BASE_DIR/cert"
         if ! python3 scripts/cert_manager.py --cf-cert; then
             log_error "Let's Encrypt 证书签发失败，拒绝回退到客户端不信任的自签名/Origin CA 证书"
+            rm -rf -- "$BASE_DIR/cert"
+            mkdir -p "$BASE_DIR/cert"
+            cp -a "$cert_backup/." "$BASE_DIR/cert/" 2>/dev/null || true
+            rm -rf -- "$cert_backup"
             return 1
         fi
+        deploy_mode=$(grep '^DEPLOY_MODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+        cert_host="$cert_domain"
+        [ "${deploy_mode:-cdn}" = "cdn" ] && cert_host="sub-${cert_domain}"
+        if [ ! -s "$BASE_DIR/cert/fullchain.pem" ] || [ ! -s "$BASE_DIR/cert/key.pem" ] \
+            || ! openssl x509 -in "$BASE_DIR/cert/fullchain.pem" -noout -checkhost "$cert_domain" >/dev/null 2>&1 \
+            || ! openssl x509 -in "$BASE_DIR/cert/fullchain.pem" -noout -checkhost "$cert_host" >/dev/null 2>&1; then
+            log_error "新证书缺失、链无效或 SAN 不覆盖 $cert_domain/$cert_host，恢复旧证书"
+            rm -rf -- "$BASE_DIR/cert"
+            mkdir -p "$BASE_DIR/cert"
+            cp -a "$cert_backup/." "$BASE_DIR/cert/" 2>/dev/null || true
+            rm -rf -- "$cert_backup"
+            return 1
+        fi
+        cert_pub=$(openssl x509 -in "$BASE_DIR/cert/fullchain.pem" -pubkey -noout 2>/dev/null | sha256sum | awk '{print $1}')
+        key_pub=$(openssl pkey -in "$BASE_DIR/cert/key.pem" -pubout 2>/dev/null | sha256sum | awk '{print $1}')
+        if [ -z "$cert_pub" ] || [ "$cert_pub" != "$key_pub" ]; then
+            log_error "新证书与私钥不匹配，恢复旧证书"
+            rm -rf -- "$BASE_DIR/cert"
+            mkdir -p "$BASE_DIR/cert"
+            cp -a "$cert_backup/." "$BASE_DIR/cert/" 2>/dev/null || true
+            rm -rf -- "$cert_backup"
+            return 1
+        fi
+        rm -rf -- "$cert_backup"
         apt-get clean
         rm -f -- /var/cache/apt/pkgcache.bin /var/cache/apt/srcpkgcache.bin
         return 0
@@ -1220,13 +1559,14 @@ EOF
 }
 
 setup_firewall() {
-    log_step "配置防火墙（默认全放行）..."
-    iptables -P INPUT ACCEPT
-    iptables -P FORWARD ACCEPT
-    iptables -P OUTPUT ACCEPT
-    iptables -F
-    netfilter-persistent save 2>/dev/null || true
-    log_info "防火墙已配置为全放行"
+    log_step "保留宿主防火墙并准备项目专属规则链..."
+    # 不清空宿主规则、不改默认策略。项目端口由 setup_iptables_traffic_counter
+    # 在 EPS_INPUT/EPS_OUTPUT 专属链中幂等维护。
+    iptables -N EPS_INPUT 2>/dev/null || true
+    iptables -N EPS_OUTPUT 2>/dev/null || true
+    iptables -C INPUT -j EPS_INPUT 2>/dev/null || iptables -I INPUT 1 -j EPS_INPUT
+    iptables -C OUTPUT -j EPS_OUTPUT 2>/dev/null || iptables -I OUTPUT 1 -j EPS_OUTPUT
+    log_info "宿主防火墙策略已保留，项目专属链已就绪"
 }
 
 setup_health_check_cron() {
@@ -1325,40 +1665,57 @@ setup_iptables_traffic_counter() {
     SOCKS5_PORT_IPT=$(grep "^SOCKS5_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "1080")
     SOCKS5_USER_IPT=$(grep "^SOCKS5_USER=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
     SOCKS5_PASSWORD_IPT=$(grep "^SOCKS5_PASSWORD=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
+    ENABLE_SOCKS5_IPT=$(grep "^ENABLE_SOCKS5=" "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    ENABLE_SOCKS5_IPT=${ENABLE_SOCKS5_IPT:-true}
 
-    iptables -F INPUT 2>/dev/null || true
-    iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-    iptables -A INPUT -p udp --dport 443 -j ACCEPT
+    iptables -N EPS_INPUT 2>/dev/null || true
+    iptables -N EPS_OUTPUT 2>/dev/null || true
+    iptables -C INPUT -j EPS_INPUT 2>/dev/null || iptables -I INPUT 1 -j EPS_INPUT
+    iptables -C OUTPUT -j EPS_OUTPUT 2>/dev/null || iptables -I OUTPUT 1 -j EPS_OUTPUT
+    iptables -F EPS_INPUT
+    iptables -F EPS_OUTPUT
+    iptables -A EPS_INPUT -p tcp --dport 443 -j ACCEPT
+    iptables -A EPS_INPUT -p udp --dport 443 -j ACCEPT
     if [ "$DEPLOY_MODE_IPT" != "direct" ]; then
-        iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
-        iptables -A INPUT -p udp --dport 8443 -j ACCEPT
-        iptables -A INPUT -p tcp --dport 2083 -j ACCEPT
-        iptables -A INPUT -p udp --dport 2083 -j ACCEPT
+        iptables -A EPS_INPUT -p tcp --dport 8443 -j ACCEPT
+        iptables -A EPS_INPUT -p udp --dport 8443 -j ACCEPT
+        iptables -A EPS_INPUT -p tcp --dport 2083 -j ACCEPT
+        iptables -A EPS_INPUT -p udp --dport 2083 -j ACCEPT
     fi
-    iptables -A INPUT -p tcp --dport 2087 -j ACCEPT
-    iptables -A INPUT -p udp --dport 2087 -j ACCEPT
+    iptables -A EPS_INPUT -p tcp --dport 2087 -j ACCEPT
+    iptables -A EPS_INPUT -p udp --dport 2087 -j ACCEPT
     # v4.14.0 新增：anyTLS 端口（替换已下线的 2053 HTTPUpgrade）
-    iptables -A INPUT -p tcp --dport 2096 -j ACCEPT
-    iptables -A INPUT -p udp --dport 2096 -j ACCEPT
-    if [ -n "$SOCKS5_USER_IPT" ] && [ -n "$SOCKS5_PASSWORD_IPT" ]; then
-        iptables -A INPUT -p tcp --dport "$SOCKS5_PORT_IPT" -j ACCEPT
+    iptables -A EPS_INPUT -p tcp --dport 2096 -j ACCEPT
+    iptables -A EPS_INPUT -p udp --dport 2096 -j ACCEPT
+    if [[ "$ENABLE_SOCKS5_IPT" =~ ^(true|1|yes|on)$ ]] \
+        && [ -n "$SOCKS5_USER_IPT" ] && [ -n "$SOCKS5_PASSWORD_IPT" ]; then
+        iptables -A EPS_INPUT -p tcp --dport "$SOCKS5_PORT_IPT" -j ACCEPT
         log_info "带认证 SOCKS5 入站防火墙已开放 (TCP:$SOCKS5_PORT_IPT)"
     fi
     # Trojan-TCP 动态端口（VLESS-gRPC 已删除，不再开放其历史端口）
-    iptables -A INPUT -p tcp --dport $TROJAN_TCP_PORT -j ACCEPT
-    iptables -A INPUT -p udp --dport $TROJAN_TCP_PORT -j ACCEPT
+    iptables -A EPS_INPUT -p tcp --dport "$TROJAN_TCP_PORT" -j ACCEPT
+    iptables -A EPS_INPUT -p udp --dport "$TROJAN_TCP_PORT" -j ACCEPT
     # TUIC v5 端口（仅 ENABLE_TUIC=true 时添加）
     TUIC_PORT_IPT=$(grep "^TUIC_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "443")
     _enable_tuic_ipt=$(grep "^ENABLE_TUIC=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr '[:upper:]' '[:lower:]')
     if [ "${_enable_tuic_ipt:-true}" = "true" ]; then
-        iptables -A INPUT -p udp --dport $TUIC_PORT_IPT -j ACCEPT
+        iptables -A EPS_INPUT -p udp --dport "$TUIC_PORT_IPT" -j ACCEPT
         log_info "TUIC v5 防火墙规则已配置 (UDP端口: $TUIC_PORT_IPT)"
     else
         log_info "TUIC v5 已关闭（ENABLE_TUIC=false），跳过防火墙规则"
     fi
-    # v4.15.8: 清理旧端口跳跃规则（21000-21200）
-    iptables-save 2>/dev/null | grep -v "21000:21200" | iptables-restore 2>/dev/null || true
-    netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        if ! netfilter-persistent save >/dev/null 2>&1; then
+            log_error "iptables 持久化失败，安装不能通过"
+            return 1
+        fi
+    else
+        mkdir -p /etc/iptables
+        if ! iptables-save > /etc/iptables/rules.v4 2>/dev/null; then
+            log_error "iptables-save 持久化失败，安装不能通过"
+            return 1
+        fi
+    fi
     if [ "$DEPLOY_MODE_IPT" = "direct" ]; then
         log_info "iptables流量计数器已配置（纯直连模式：端口443/2087/2096/$TROJAN_TCP_PORT/$TUIC_PORT_IPT）"
     else
@@ -1388,13 +1745,25 @@ start_services() {
     cd "$BASE_DIR" && python3 scripts/config_generator.py
     # 立即 check 一次，配置错误早暴露
     if ! /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" >/dev/null 2>&1; then
-        log_warn "config.json 检查失败，详情："
+        log_error "config.json 检查失败，安装中止："
         /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" 2>&1 | head -20
+        return 1
     fi
     CERT_DIR_PATH="${BASE_DIR}/cert"
-    if [ ! -f "${CERT_DIR_PATH}/cert.pem" ] && [ ! -f "${CERT_DIR_PATH}/fullchain.pem" ]; then
-        log_warn "证书文件缺失，重新生成自签名证书..."
-        cd "$BASE_DIR" && python3 scripts/cert_manager.py
+    CERT_DOMAIN_START=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r')
+    if [ -z "$CERT_DOMAIN_START" ]; then
+        log_error "CF_DOMAIN 为空，拒绝启动客户端不信任证书的订阅服务"
+        return 1
+    fi
+    if [ ! -s "${CERT_DIR_PATH}/fullchain.pem" ] || [ ! -s "${CERT_DIR_PATH}/key.pem" ]; then
+        log_error "可信 Let's Encrypt 证书缺失，重新签发；禁止回退自签名证书"
+        if ! setup_certificate; then
+            return 1
+        fi
+        if [ ! -s "${CERT_DIR_PATH}/fullchain.pem" ] || [ ! -s "${CERT_DIR_PATH}/key.pem" ]; then
+            log_error "可信证书仍缺失，安装中止"
+            return 1
+        fi
     fi
     systemctl stop singbox-cdn 2>/dev/null || true
     systemctl disable singbox-cdn 2>/dev/null || true
@@ -1408,8 +1777,8 @@ start_services() {
         log_warn "尝试检查config.json..."
         /usr/local/bin/sing-box check -c "${BASE_DIR}/config.json" 2>&1 || true
         echo ""
-        log_warn "singbox启动失败，但订阅服务仍可运行"
-        log_warn "请检查上方错误信息，修复后运行: systemctl restart singbox"
+        log_error "singbox 启动失败，安装中止"
+        return 1
     fi
     systemctl start singbox-sub
     sleep 2
@@ -1429,13 +1798,13 @@ verify_installation() {
         DEPLOY_MODE_VERIFY=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
     fi
     echo ""
-    echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（4节点）" || echo "CDN混合模式（6节点，推荐）" )"
+    echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（默认5节点）" || echo "CDN混合模式（默认7节点）" )"
     echo ""
     ALL_OK=true
 
     # v4.15.8: 验证 .env 关键变量
     echo -e "  环境变量检查:"
-    _CRITICAL_VARS="SERVER_IP CF_DOMAIN VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID SOCKS5_USER SOCKS5_PASSWORD"
+    _CRITICAL_VARS="SERVER_IP CF_DOMAIN VLESS_UUID TROJAN_PASSWORD REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID"
     for _var in $_CRITICAL_VARS; do
         _val=$(grep "^${_var}=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "")
         if [ -z "$_val" ]; then
@@ -1448,6 +1817,23 @@ verify_installation() {
             echo -e "    ${GREEN}✅${NC} $_var: 已设置"
         fi
     done
+
+    _socks_enabled=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    _socks_enabled=${_socks_enabled:-true}
+    _socks_user=$(grep '^SOCKS5_USER=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    _socks_pass=$(grep '^SOCKS5_PASSWORD=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+    case "$_socks_enabled" in
+        true|1|yes|on)
+            if [ -n "$_socks_user" ] && [ -n "$_socks_pass" ]; then
+                echo -e "    ${GREEN}✅${NC} 本机认证 SOCKS5: 已启用且凭据完整"
+            else
+                echo -e "    ${RED}❌${NC} 本机认证 SOCKS5: 已启用但凭据不完整"
+                ALL_OK=false
+            fi
+            ;;
+        false|0|no|off) echo -e "    ${YELLOW}⏸️${NC} 本机认证 SOCKS5: 已关闭（ENABLE_SOCKS5=false）" ;;
+        *) echo -e "    ${RED}❌${NC} ENABLE_SOCKS5: 非法值"; ALL_OK=false ;;
+    esac
 
     for svc in singbox singbox-sub; do
         if systemctl is-active --quiet "$svc"; then
@@ -1475,10 +1861,8 @@ verify_installation() {
     else
         CHECK_PORTS="443 8443 2083 2087 2096"
     fi
-    _socks_user=$(grep '^SOCKS5_USER=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2-)
-    _socks_pass=$(grep '^SOCKS5_PASSWORD=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2-)
     _socks_port=$(grep '^SOCKS5_PORT=' "$BASE_DIR/.env" 2>/dev/null | cut -d= -f2)
-    if [ -n "$_socks_user" ] && [ -n "$_socks_pass" ]; then
+    if [[ "$_socks_enabled" =~ ^(true|1|yes|on)$ ]] && [ -n "$_socks_user" ] && [ -n "$_socks_pass" ]; then
         CHECK_PORTS="$CHECK_PORTS ${_socks_port:-1080}"
     fi
     for port in $CHECK_PORTS; do
@@ -1528,28 +1912,62 @@ verify_installation() {
     fi
     _verify_tmp="/tmp/singbox-subscription-verify.$$"
     mkdir -p "$_verify_tmp"
+    verify_subscription_semantics() {
+        local artifact="$1" artifact_name="$2" node
+        local required_nodes="${_verify_country}-VLESS-Reality ${_verify_country}-Trojan-TCP ${_verify_country}-anyTLS"
+        local tuic_enabled socks_enabled
+        tuic_enabled=$(grep '^ENABLE_TUIC=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        socks_enabled=$(grep '^ENABLE_SOCKS5=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        tuic_enabled=${tuic_enabled:-true}
+        socks_enabled=${socks_enabled:-true}
+        if [[ "$tuic_enabled" =~ ^(true|1|yes|on)$ ]]; then
+            required_nodes="$required_nodes ${_verify_country}-TUIC-v5"
+        fi
+        if [[ "$socks_enabled" =~ ^(true|1|yes|on)$ ]]; then
+            required_nodes="$required_nodes ${_verify_country}-SOCKS5"
+        fi
+        for node in $required_nodes; do
+            if ! grep -Fq "$node" "$artifact"; then
+                echo -e "    ${RED}❌${NC} $artifact_name: 缺少期望节点 $node"
+                ALL_OK=false
+            fi
+        done
+        if [ "$DEPLOY_MODE_VERIFY" = "cdn" ]; then
+            for node in "${_verify_country}-VLESS-WS-CDN" "${_verify_country}-Trojan-WS-CDN"; do
+                if ! grep -Fq "$node" "$artifact"; then
+                    echo -e "    ${RED}❌${NC} $artifact_name: CDN 模式缺少 $node"
+                    ALL_OK=false
+                fi
+            done
+        elif grep -Fq -- "-WS-CDN" "$artifact"; then
+            echo -e "    ${RED}❌${NC} $artifact_name: direct 模式不应包含 CDN 节点"
+            ALL_OK=false
+        fi
+        if [[ "$socks_enabled" =~ ^(false|0|no|off)$ ]] && grep -Fq "${_verify_country}-SOCKS5" "$artifact"; then
+            echo -e "    ${RED}❌${NC} $artifact_name: ENABLE_SOCKS5=false 时不应输出 SOCKS5 节点"
+            ALL_OK=false
+        fi
+    }
     if curl -fsS --connect-timeout 10 --max-time 30 \
-        --resolve "${_verify_host}:2087:127.0.0.1" \
         "https://${_verify_host}:2087/sub/${_verify_country}" \
         -o "$_verify_tmp/base64.txt" \
-        && tr -d '\r\n' < "$_verify_tmp/base64.txt" | base64 -d >/dev/null 2>&1; then
+        && tr -d '\r\n' < "$_verify_tmp/base64.txt" | base64 -d > "$_verify_tmp/base64.decoded" 2>/dev/null; then
         echo -e "    ${GREEN}✅${NC} Base64: 可信证书 + HTTP 200 + 可解码"
     else
         echo -e "    ${RED}❌${NC} Base64: 下载、证书或内容校验失败"
         ALL_OK=false
     fi
     if curl -fsS --connect-timeout 10 --max-time 30 \
-        --resolve "${_verify_host}:2087:127.0.0.1" \
         "https://${_verify_host}:2087/singbox/${_verify_country}" \
         -o "$_verify_tmp/singbox.json" \
-        && python3 -m json.tool "$_verify_tmp/singbox.json" >/dev/null 2>&1; then
-        echo -e "    ${GREEN}✅${NC} sing-box: 可信证书 + HTTP 200 + 合法 JSON"
+        && python3 -m json.tool "$_verify_tmp/singbox.json" >/dev/null 2>&1 \
+        && /usr/local/bin/sing-box check -c "$_verify_tmp/singbox.json" >/dev/null 2>&1; then
+        echo -e "    ${GREEN}✅${NC} sing-box: 可信证书 + HTTP 200 + 客户端配置校验通过"
     else
         echo -e "    ${RED}❌${NC} sing-box: 下载、证书或内容校验失败"
         ALL_OK=false
     fi
     if curl -fsS --connect-timeout 10 --max-time 30 \
-        --resolve "${_verify_host}:2087:127.0.0.1" \
         "https://${_verify_host}:2087/clash/${_verify_country}" \
         -o "$_verify_tmp/clash.yaml" \
         && grep -q '^proxies:' "$_verify_tmp/clash.yaml"; then
@@ -1558,7 +1976,22 @@ verify_installation() {
         echo -e "    ${RED}❌${NC} Clash: 下载、证书或内容校验失败"
         ALL_OK=false
     fi
+    echo -e "  订阅语义检查（节点、协议、模式与 SOCKS5 开关）:"
+    [ -f "$_verify_tmp/base64.decoded" ] && verify_subscription_semantics "$_verify_tmp/base64.decoded" "Base64"
+    [ -f "$_verify_tmp/singbox.json" ] && verify_subscription_semantics "$_verify_tmp/singbox.json" "sing-box"
+    [ -f "$_verify_tmp/clash.yaml" ] && verify_subscription_semantics "$_verify_tmp/clash.yaml" "Clash"
     rm -rf -- "$_verify_tmp"
+
+    echo ""
+    echo -e "  AI SOCKS5 业务门禁（经 SOCKS5 请求 api.openai.com，预期未认证 401）:"
+    _ai_socks_report=$(python3 "$BASE_DIR/scripts/ai_socks5_health.py" --env "$BASE_DIR/.env" --json 2>&1)
+    _ai_socks_rc=$?
+    if [ "$_ai_socks_rc" -eq 0 ]; then
+        echo -e "    ${GREEN}✅${NC} $_ai_socks_report"
+    else
+        echo -e "    ${RED}❌${NC} AI SOCKS5 路由已开启但业务验证失败: $_ai_socks_report"
+        ALL_OK=false
+    fi
 
     echo ""
     echo -e "  系统优化:"
@@ -1604,9 +2037,9 @@ print_summary() {
     echo "=========================================="
     echo ""
     if [ "$DEPLOY_MODE_SUMMARY" = "direct" ]; then
-        echo "  部署模式: 纯直连模式（4节点，无CDN依赖）"
+        echo "  部署模式: 纯直连模式（默认5节点，无CDN依赖）"
     else
-        echo "  部署模式: CDN混合模式（6节点，推荐）"
+        echo "  部署模式: CDN混合模式（默认7节点，推荐）"
     fi
     echo "📋 配置文件: $BASE_DIR/.env"
     echo ""
@@ -2042,7 +2475,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.25${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.26${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -2109,26 +2542,30 @@ main() {
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.25${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.26${NC}"
             echo "=========================================="
             echo ""
+            trap 'rollback_failed_install $?' EXIT
             check_root
             detect_os
             repair_bootstrap_network_and_apt
             update_system
             install_dependencies
+            snapshot_install_host_state
             optimize_system
             uninstall_old_panels
             install_singbox
             clone_repo
             setup_python_env
+            select_local_socks5_mode
             generate_uuids_and_passwords
             generate_reality_keys
             select_deploy_mode
             create_env_file
-            generate_config
+            validate_ai_socks5_routing
             setup_subscription_dns
             setup_certificate
+            generate_config
             setup_firewall
             setup_tuic_firewall
             create_systemd_services
@@ -2144,6 +2581,14 @@ main() {
                 cmd_warp_unlock install
             fi
             print_summary
+            if [ "$INSTALL_CLEAR_DATA" = "1" ] \
+                && [[ "$INSTALL_ROLLBACK_DIR" == "${BASE_DIR}.bak."* ]] \
+                && [ -d "$INSTALL_ROLLBACK_DIR" ]; then
+                rm -rf -- "$INSTALL_ROLLBACK_DIR"
+            fi
+            INSTALL_ROLLBACK_DIR=""
+            cleanup_install_state_snapshot
+            trap - EXIT
             ;;
         *)
             log_error "未知命令: $subcmd"
@@ -2153,4 +2598,6 @@ main() {
     esac
 }
 
-main "$@"
+if [ "${INSTALL_SH_SOURCE_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi

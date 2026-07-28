@@ -5,6 +5,26 @@
 
 ---
 
+## -7. 订阅 200 仍导入失败、AI SOCKS5 假容错与重装破坏现场（v4.15.26）
+
+**现象**：HKBEIYONG 的 Clash 链接可返回 200，但旧代理失效时客户端更新请求也被旧代理接管而超时；sing-box JSON 能被 JSON 解析却无法被 1.13 内核加载；AI SOCKS5 配置声称会自动切换，实际代理认证已过期且 `selector` 不会自动容错；重复安装还可能先搬走工作目录、删除旧证书或清空宿主防火墙。
+
+**已确认根因**：
+- 订阅配置没有对自身域名区域设置 DIRECT，旧节点失效后形成“必须先连旧代理才能下载新代理”的启动死锁。
+- sing-box 客户端订阅残留多个已移除字段：`urltest.timeout`、`rcode` DNS、DNS outbound、`inet4_address`、FakeIP 空地址；Reality outbound 把 `short_id` 错写成数组。
+- AI 代理只做端口/Google 探测，认证代理同时 offered no-auth；把 401/429 混为可用；`selector` 被误认为会自动尝试下一个出站。
+- 安装器在新版本完整验收前切换 live 目录，签证书前删除旧证书，并执行 `iptables -F`/修改默认策略。
+
+**修复**：
+- Clash/sing-box 订阅把当前 zone 的订阅流量置于兜底代理前直连；公网下载后分别交给 Mihomo 与 sing-box 真实解析。
+- AI 业务探测只协商正确认证方式且只接受 OpenAI 401；服务器组改为 `urltest`，全死时用运行时标记重生成 direct/WARP 降级配置。客户端订阅不再携带第三方 AI SOCKS 凭据。
+- 重装使用 staging + 失败回滚；旧目录保留到最终验收完成，失败时同步恢复 sing-box 二进制、systemd unit/启停状态、crontab 与 iptables；旧证书在新证书完成 SAN/密钥校验前可恢复；防火墙只维护 `EPS_INPUT/EPS_OUTPUT` 专属链。
+- AI 运行时标记使用过渡文件和配置重载事务：恢复或降级失败时撤销本次状态变更并保留下一轮重试条件，避免标记与实际配置永久错位。
+
+**关键证据**：HKBEIYONG 外部认证 SOCKS5 经服务器 AI 分流和 JP 上游访问 OpenAI 返回 401；HKBEIYONG/JP 部署分别 10 PASS/1 SKIP 与 11 PASS；公网订阅为 5/7 节点，Mihomo 与 sing-box 1.13 均通过；JP 两个 Cloudflare WS 路径在 Windows `--http1.1` 下均为 101；本地回归 `82 passed, 1 skipped`（包含项目目录 `mv` 失败注入），Git Bash 对安装与健康脚本语法检查通过。
+
+**教训**：HTTP 200、JSON 可解析、端口可连接和配置文件可见都不是客户端可用证据；协议组行为必须以官方语义和真实内核验证，安装器必须在最终业务验收前保留可恢复的旧生产状态。
+
 ## -6. 自定义直连新机一键安装四连失败（v4.15.25）
 
 **现象**：香港备用机使用 `hkbeiyong.290372913.xyz` 非交互安装时，依次在 DNS、证书安装、重复签发和健康检查阶段失败；早期半成品只生成了 `.env/config.json`，服务未启动。

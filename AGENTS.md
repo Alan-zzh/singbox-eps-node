@@ -76,20 +76,20 @@
 13. **L7 DDoS eoff 不作为 health_check 修复目标**：`cloudflare_proxy_rules.py apply` 只维护 custom skip 规则和 TLS 1.2，确保删除 ddos_l7 override。CF 免费版 DDoS L7 无法通过 skip 规则绕过，WS 路径已改为非代理特征路径（`/api/v1/stream` `/api/v1/data`）以降低 ML 误报率。CDN 节点始终使用主域名橙云代理，不降级到 sub-*。
 14. **CDN WS 验证标准 SOP**（防假阳性）：
     ```powershell
-    curl.exe -s -4 --max-time 10 -k --noproxy "*" -o NUL -w "%{http_code}" `
+    curl.exe -s -4 --http1.1 --max-time 10 -k --noproxy "*" -o NUL -w "%{http_code}" `
       -H "Upgrade: websocket" -H "Connection: Upgrade" `
       -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" `
       "https://{domain}:443/api/v1/stream"
     ```
     - **期望值**：`101`（∉403/520）
-    - **铁律**：❌ 禁止 `-o /dev/null`（Windows 不识别，假 403）；❌ 禁止服务器自测（CF 拦服务器 IP，假 403）；❌ 禁止单次 403 就判 CDN 损坏（CF 瞬断重试即可）
+    - **铁律**：❌ 禁止漏掉 `--http1.1`（HTTP/2 不支持 Upgrade，可能假 400）；❌ 禁止 `-o /dev/null`（Windows 不识别，假 403）；❌ 禁止服务器自测（CF 拦服务器 IP，假 403）；❌ 禁止单次 403 就判 CDN 损坏（CF 瞬断重试即可）
     - **真实标准**：`tests/full_audit.py` 全 101 ✅；客户端实际能通 ✅
 ### 三、服务器识别
 
 15. **直连模式与服务器标识必须分开，禁止用地理 COUNTRY_CODE 推模式**：
-    - HK1（`hk1.290372913.xyz`）= 直接模式（4 节点，无 CDN）
-    - HK2（`hk2.290372913.xyz`）= 直接模式（4 节点，无 CDN）
-    - HKBEIYONG（`hkbeiyong.290372913.xyz`）= 直接模式（4 节点，无 CDN）
+    - HK1（`hk1.290372913.xyz`）= 直接模式（默认 5 节点，关闭本机 SOCKS5 时 4 节点，无 CDN）
+    - HK2（`hk2.290372913.xyz`）= 直接模式（默认 5 节点，关闭本机 SOCKS5 时 4 节点，无 CDN）
+    - HKBEIYONG（`hkbeiyong.290372913.xyz`）= 直接模式（默认 5 节点，关闭本机 SOCKS5 时 4 节点，无 CDN）
     - `DEPLOY_MODE` 显式设置最高优先，fallback 用 `CF_DOMAIN.startswith(('hk1.', 'hk2.', 'hkbeiyong.'))`
     - `COUNTRY_CODE` 是节点/订阅服务器标识，安装器从 `CF_DOMAIN` 首标签安全转为大写（如 `hkbeiyong.* → HKBEIYONG`），不得用 ipinfo 地理码覆盖
 
