@@ -1,6 +1,6 @@
 # Singbox EPS Node 项目快照
 
-**版本**: v4.15.26 | **更新**: 2026-07-28（一键安装、订阅与 AI SOCKS5 稳定化）
+**版本**: v4.15.28 | **更新**: 2026-07-28（JP CDN 全域规则单一所有者）
 
 ## 当前唯一有效服务器清单
 
@@ -70,6 +70,7 @@ HK2/HKBEIYONG 系统盘仅 2GB，XanMod 内核包加安全余量无法容纳。H
 
 - HKBEIYONG 最终部署 10 PASS/1 direct 合理 SKIP；公网三类订阅各 5 节点，Mihomo 与 sing-box 1.13 原生配置检查均通过。
 - HKBEIYONG 外部认证 SOCKS5 → 服务器 AI 路由 → JP SOCKS5 → OpenAI 的端到端探测返回 401；AI 组类型为 urltest，运行时降级标记不存在。
-- JP 最终部署 11 PASS；公网三类订阅各 7 节点；Cloudflare 规则按 `jp` 动态回读，TLS 1.2，外部 `/api/v1/stream` 与 `/api/v1/data` 均 HTTP 101。
-- `python -m pytest -q`：`82 passed, 1 skipped`（含目录回滚成功/失败注入）；Git Bash 对 `install.sh`/`health_check.sh` 语法检查通过；HKBEIYONG/JP 定向 full audit 均 `ALL OK`。
+- JP 最终部署 13 PASS；公网三类订阅各 7 节点；Cloudflare 受管规则完整语义、TLS 与 DDoS override 均由 API 回读，外部 `/api/v1/stream` 与 `/api/v1/data` 均 HTTP 101。
+- Cloudflare zone 级 skip/origin ruleset 只允许 JP CDN 模式维护；HKBEIYONG/HK2 direct 健康检查已实测跳过且不改变规则版本，模式缺失/非法会阻塞。JP 门禁现为 13/13 PASS。
+- `python -m pytest -q`：`87 passed, 1 skipped`（含目录回滚、模式 fail-closed 与 Cloudflare 完整规则语义回归）；Git Bash 对 `install.sh`/`health_check.sh` 语法检查通过；HKBEIYONG/JP 定向 full audit 均 `ALL OK`。
 - 流量汇总包含 4 台：JP/HK2/HKBEIYONG 3 台可达，HK1 1 台不可达。

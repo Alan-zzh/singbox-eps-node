@@ -637,6 +637,29 @@ def ensure_no_ddos_l7_override(client: CloudflareClient, zone_name: str = ZONE_N
     return result
 
 
+def apply_proxy_rules_for_mode(
+    client: CloudflareClient,
+    deploy_mode: str,
+    zone_name: str = ZONE_NAME,
+) -> dict:
+    """Apply zone-wide CDN rules only from a server explicitly configured as CDN."""
+    normalized_mode = deploy_mode.strip().lower()
+    if normalized_mode == "direct":
+        return {
+            "status": "skipped",
+            "mode": "direct",
+            "reason": "direct servers must not mutate zone-wide CDN proxy/origin rules",
+        }
+    if normalized_mode != "cdn":
+        raise ValueError("apply requires DEPLOY_MODE=cdn or --mode cdn")
+
+    result = ensure_proxy_skip_rule(client, zone_name)
+    result["cdn_origin_rules"] = ensure_cdn_origin_rules(client, zone_name)
+    result["tls_settings"] = ensure_tls_settings(client, zone_name)
+    result["ddos_l7_override"] = ensure_no_ddos_l7_override(client, zone_name)
+    return result
+
+
 def cleanup_temporary_ip_rules(client: CloudflareClient, zone_name: str = ZONE_NAME) -> dict:
     zone_id = client.get_zone_id(zone_name)
     removed: list[str] = []
@@ -692,10 +715,11 @@ def main() -> int:
             zone_name=args.zone,
         )
     elif args.action == "apply":
-        result = ensure_proxy_skip_rule(client, args.zone)
-        result["cdn_origin_rules"] = ensure_cdn_origin_rules(client, args.zone)
-        result["tls_settings"] = ensure_tls_settings(client, args.zone)
-        result["ddos_l7_override"] = ensure_no_ddos_l7_override(client, args.zone)
+        deploy_mode = args.mode or env.get("DEPLOY_MODE", "")
+        try:
+            result = apply_proxy_rules_for_mode(client, deploy_mode, args.zone)
+        except ValueError as exc:
+            parser.error(str(exc))
     elif args.action == "cleanup-temp":
         result = cleanup_temporary_ip_rules(client, args.zone)
         access_result = remove_temporary_access_rules(client, args.zone)

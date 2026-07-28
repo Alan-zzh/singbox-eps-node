@@ -194,7 +194,7 @@ def detect_remote_deploy_mode(ssh):
         timeout=10,
     )
     mode = out.strip().lower() if ec == 0 else ""
-    return mode if mode in ("cdn", "direct") else "cdn"
+    return mode if mode in ("cdn", "direct") else ""
 
 
 def deploy(server_info, mode="deploy"):
@@ -229,6 +229,9 @@ def deploy(server_info, mode="deploy"):
 
     try:
         remote_mode = detect_remote_deploy_mode(ssh)
+        if not remote_mode:
+            print("  ❌ DEPLOY_MODE 缺失或非法；只允许 cdn/direct，拒绝部署与验证")
+            return False
         is_cdn = remote_mode == "cdn"
         print(f"\n{'=' * 60}")
         print(

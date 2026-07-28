@@ -73,6 +73,7 @@
     - `sub-*` 只允许作为订阅入口，不得作为 CDN 节点 fallback；项目已有直连节点，CDN 节点要保持真正 CDN 路径。
 11. **CF API Token 长度与认证方式**：40 字 hex(Global Key)、`cfat_` 开头 48 字(scoped token)、37 字短格式均合法。不要因长度判定"截断"。Global API Key 必须同时提供并持久化 `CF_API_EMAIL`，请求使用 `X-Auth-Key + X-Auth-Email`；`cfat_` scoped token 使用 Bearer 认证。安装日志不得输出任何 Token 前缀。
 12. **CF 全局设置会漂移**：免费版 Managed Rules 自动启用拦截设置。`health_check.sh` 每 15 分钟巡检 `security_level/browser_check/bot_fight_mode/ssl/min_tls_version`，不符合自动修复。
+    - 全域 CDN skip/origin 规则只有 `DEPLOY_MODE=cdn` 的服务器可以执行 `cloudflare_proxy_rules.py apply`；所有 direct 服务器健康检查必须跳过，禁止用各自 `CF_DOMAIN` 覆盖 JP 的全域规则。模式缺失或不是精确的 `cdn/direct` 时必须阻塞安装、健康检查和部署验证，禁止默认成 CDN。
 13. **L7 DDoS eoff 不作为 health_check 修复目标**：`cloudflare_proxy_rules.py apply` 只维护 custom skip 规则和 TLS 1.2，确保删除 ddos_l7 override。CF 免费版 DDoS L7 无法通过 skip 规则绕过，WS 路径已改为非代理特征路径（`/api/v1/stream` `/api/v1/data`）以降低 ML 误报率。CDN 节点始终使用主域名橙云代理，不降级到 sub-*。
 14. **CDN WS 验证标准 SOP**（防假阳性）：
     ```powershell

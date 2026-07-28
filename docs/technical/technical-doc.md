@@ -1,7 +1,7 @@
 # Singbox EPS Node 技术文档
-**版本**: v4.15.26 | **更新**: 2026-07-28
+**版本**: v4.15.28 | **更新**: 2026-07-28
 
-> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.26 架构和模块说明。
+> 版本历史以 CHANGELOG.md 为准。本文档描述当前 v4.15.28 架构和模块说明。
 > 已删除/已下线的协议在末尾「已删除协议清单」明确标注，避免后续 AI 基于过时文档犯错。
 
 ---
@@ -80,6 +80,7 @@
 
 > 两类严格分离，**CDN 节点不得用 sub-***。
 > v4.15.13 铁律：CDN WS 节点名必须保留 `-CDN` 后缀，`sub-*` 不得作为 CDN 节点降级地址。
+> v4.15.28 铁律：Cloudflare zone 级 skip/origin ruleset 只有 `DEPLOY_MODE=cdn` 的 JP 可以维护；所有 direct 节点的安装与健康检查必须跳过 `apply`；缺失/非法模式必须阻塞。部署门禁须核对受管规则完整语义，不能只匹配域名、路径和端口字符串。
 
 ### 4 台服务器
 
@@ -501,6 +502,7 @@ bash /root/singbox-eps-node/scripts/health_check.sh  # 手动运行
 
 | 版本 | 日期 | 更新 |
 |------|------|------|
+| v4.15.28 | 2026-07-28 | JP 独占 Cloudflare zone 级 CDN 规则维护；模式 fail-closed；部署门禁新增受管规则完整语义/TLS/DDoS API 回读 |
 | v4.15.26 | 2026-07-28 | 一键安装完整事务回滚（目录/二进制/systemd/crontab/iptables）；8 格 SOCKS/AI 矩阵；真实 OpenAI 401 门禁及可重试降级；订阅域名直连；sing-box 1.13 客户端配置校验；CF/iptables 收口 |
 | v4.15.25 | 2026-07-28 | 新增 HKBEIYONG direct；修复自定义服务器标识、Global Key 邮箱认证、ACME 首装/重跑幂等与 direct 健康检查；生产 TLS/4 节点/SOCKS5 验收通过 |
 | v4.15.24 | 2026-07-23 | 新服务器安装从落盘 `.env` 读取域名；自动同步/验证 DNS；三类订阅经系统 CA 真实下载与格式检查后才允许成功 |

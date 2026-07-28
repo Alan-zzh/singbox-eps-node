@@ -1,6 +1,6 @@
 # Singbox EPS Node
 
-**当前版本**: `v4.15.26`
+**当前版本**: `v4.15.28`
 
 一键部署 sing-box 多协议节点 + 自动生成订阅 + 自动维护 CDN 优选 IP + 健康检查自愈。
 
@@ -45,6 +45,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main
 
 > CC = 节点标识（JP/HK1/HK2/HKBEIYONG）。只有 JP 走 Cloudflare CDN；JP 订阅端点走 `sub-jp` 灰云直连，CDN 节点仍使用 `jp` 主域名/优选 IP。
 > HK1/HK2/HKBEIYONG 均为直连模式，各走自身主域名，不生成 WS-CDN 节点。HK1 仍保留旧 `/sub/hk`、`/clash/hk`、`/singbox/hk`、`/info/hk` 兼容路径。
+> Cloudflare 全域 CDN skip/origin 规则只允许 JP 的 `DEPLOY_MODE=cdn` 健康检查维护；所有 direct 节点必须跳过，模式缺失或拼错则安装、健康检查和部署门禁全部失败，防止覆盖 JP 的 8443/2083 回源规则。
 > 流量重置日：JP 每月 19 号，香港直连节点每月 1 号。本地部署由 `{CC}_TRAFFIC_RESET_DAY` 持久同步到各服务器 `.env`。
 > 订阅证书：所有用户实际访问的灰云域名必须使用 Let's Encrypt 公网可信证书；客户端不需要开启“跳过证书验证”。
 > 一键安装会先按模式同步 Cloudflare DNS（CDN 主域名橙云、订阅域名灰云；所有 direct 主域名灰云），再签发证书；最终必须用系统 CA 真实下载三类订阅，并用 sing-box 内核校验客户端 JSON。任一失败都会以非零状态中止，并在重装场景恢复旧项目、sing-box 二进制、systemd、crontab 与 iptables。Cloudflare Global API Key 认证必须同时提供账户邮箱。

@@ -1,5 +1,8 @@
 import importlib.util
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -110,6 +113,145 @@ def test_health_check_repairs_cloudflare_proxy_rules():
 
     assert "check_cloudflare_proxy_rules" in source
     assert "python3 scripts/cloudflare_proxy_rules.py apply" in source
+    assert "DEPLOY_MODE_HC=${DEPLOY_MODE_HC:-cdn}" not in source
+    assert "DEPLOY_MODE 必须明确且只能为 cdn/direct" in source
+    assert 'if [ "$DEPLOY_MODE_HC" != "cdn" ]; then' in source
+    assert "direct 模式不得修改全域 CDN 代理/回源规则" in source
+    assert '--mode cdn --domain "$cf_domain_hc" --zone "$cf_zone_hc"' in source
+
+
+def test_direct_mode_cannot_mutate_zone_wide_cdn_rules():
+    module = load_module()
+
+    class NoCallsAllowed:
+        def __getattr__(self, name):
+            raise AssertionError(f"direct mode unexpectedly called Cloudflare client: {name}")
+
+    result = module.apply_proxy_rules_for_mode(
+        NoCallsAllowed(),
+        "direct",
+        "290372913.xyz",
+    )
+
+    assert result["status"] == "skipped"
+    assert result["mode"] == "direct"
+    assert "must not mutate" in result["reason"]
+
+
+def test_installer_passes_explicit_cdn_mode_and_domain_to_apply():
+    source = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert '--zone "$dns_zone" --domain "$dns_domain" --mode "$dns_mode"' in source
+    assert "dns_mode=${dns_mode:-cdn}" not in source
+    assert "拒绝修改 Cloudflare" in source
+    select_start = source.index("select_deploy_mode()")
+    select_end = source.index("select_local_socks5_mode()", select_start)
+    select_source = source[select_start:select_end]
+    assert select_source.index('if [ -n "${DEPLOY_MODE:-}" ]; then') < select_source.index(
+        "_direct_domain="
+    )
+    assert "已有 DEPLOY_MODE 非法" in select_source
+    assert "require_deploy_mode()" in source
+    assert 'DEPLOY_MODE_IPT="cdn"' not in source
+    assert 'DEPLOY_MODE_START="cdn"' not in source
+    assert 'DEPLOY_MODE_VERIFY="cdn"' not in source
+    assert 'DEPLOY_MODE_SUMMARY="cdn"' not in source
+    assert source.count("require_deploy_mode") >= 5
+    reset_start = source.index("cmd_reset()")
+    reset_end = source.index("cmd_reinstall()", reset_start)
+    reset_source = source[reset_start:reset_end]
+    assert reset_source.index("require_deploy_mode") < reset_source.index(
+        "systemctl stop singbox"
+    )
+
+
+def test_deploy_verifier_rejects_missing_or_invalid_mode():
+    spec = importlib.util.spec_from_file_location(
+        "deploy_verify_mode_under_test",
+        PROJECT_ROOT / "scripts" / "deploy_verify.py",
+    )
+    verify = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(verify)
+
+    mode_check = verify.CHECKS["DEPLOY_MODE_VALID"]["cmd"]
+    cloudflare_check = verify.CHECKS["CLOUDFLARE_CDN_RULES"]["cmd"]
+    assert "cdn|direct" in mode_check
+    assert "got '${MODE:-missing}'" in mode_check
+    assert "direct)" in cloudflare_check
+    assert "cdn)" in cloudflare_check
+    assert "got '${MODE:-missing}'" in cloudflare_check
+
+
+def test_deploy_verifier_requires_complete_managed_rule_semantics():
+    cf_module = load_module()
+    spec = importlib.util.spec_from_file_location(
+        "deploy_verify_semantics_under_test",
+        PROJECT_ROOT / "scripts" / "deploy_verify.py",
+    )
+    verify = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(verify)
+
+    domain = "jp.290372913.xyz"
+    zone = "290372913.xyz"
+    cf_module.configure_proxy_domain(domain, zone)
+    valid_status = {
+        "entrypoint": {"rules": [cf_module.build_proxy_skip_rule(zone)]},
+        "origin_entrypoint": {"rules": cf_module.build_cdn_origin_rules(zone)},
+        "min_tls_version": "1.2",
+        "ddos_l7_entrypoint": None,
+    }
+    verify.validate_cloudflare_cdn_status(valid_status, domain, zone)
+
+    invalid_statuses = []
+    disabled = deepcopy(valid_status)
+    disabled["entrypoint"]["rules"][0]["enabled"] = False
+    invalid_statuses.append(disabled)
+    wrong_action = deepcopy(valid_status)
+    wrong_action["entrypoint"]["rules"][0]["action"] = "block"
+    invalid_statuses.append(wrong_action)
+    wrong_expression = deepcopy(valid_status)
+    wrong_expression["origin_entrypoint"]["rules"][0]["expression"] += " or true"
+    invalid_statuses.append(wrong_expression)
+    duplicate = deepcopy(valid_status)
+    duplicate["origin_entrypoint"]["rules"].append(
+        deepcopy(duplicate["origin_entrypoint"]["rules"][0])
+    )
+    invalid_statuses.append(duplicate)
+
+    for invalid_status in invalid_statuses:
+        with pytest.raises(ValueError):
+            verify.validate_cloudflare_cdn_status(invalid_status, domain, zone)
+
+
+def test_deploy_controller_does_not_default_invalid_remote_mode_to_cdn():
+    spec = importlib.util.spec_from_file_location(
+        "deploy_mode_fail_closed_under_test",
+        PROJECT_ROOT / "deploy.py",
+    )
+    deploy = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(deploy)
+
+    class Channel:
+        @staticmethod
+        def recv_exit_status():
+            return 0
+
+    class Stream:
+        channel = Channel()
+
+        @staticmethod
+        def read():
+            return b"typo\n"
+
+    class SSH:
+        @staticmethod
+        def exec_command(command, timeout=10):
+            return None, Stream(), Stream()
+
+    assert deploy.detect_remote_deploy_mode(SSH()) == ""
 
 
 def test_cloudflare_apply_enforces_tls12_for_windows_clients():

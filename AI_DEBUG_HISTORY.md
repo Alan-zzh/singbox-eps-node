@@ -5,6 +5,22 @@
 
 ---
 
+## -8. direct 健康检查覆盖全域规则，导致 JP CDN 从 101 变 400（v4.15.28）
+
+**现象**：部署香港备用直连机后，JP 订阅仍为 200 且输出 7 节点，但公网 `/api/v1/stream`、`/api/v1/data` 同时从 WebSocket 101 变成 HTTP 400；服务端监听与部署门禁仍显示通过。
+
+**已确认根因**：`health_check.sh` 在 direct 与 CDN 模式下都无条件执行 `cloudflare_proxy_rules.py apply`；规则脚本又按当前服务器 `CF_DOMAIN` 动态生成全域唯一 skip/origin ruleset。HKBEIYONG 的定时健康检查因此把 JP 规则覆盖为 `hkbeiyong.*`。原部署门禁只检查 Token 格式、源站服务与订阅，不回读 Cloudflare rule owner，所以产生假绿。
+
+**修复**：
+- 立即将全域 skip/origin 规则恢复为 `jp.290372913.xyz`，两条公网 WS 路径恢复 101。
+- `cloudflare_proxy_rules.py apply` 必须显式获得 `DEPLOY_MODE`；direct 模式在脚本内部 fail-safe 跳过，未知模式拒绝执行。
+- direct 健康检查在调用 Cloudflare 脚本前再次跳过；安装器 CDN 分支显式传 `--mode/--domain/--zone`。
+- 部署门禁新增 Cloudflare 受管规则完整语义（description/action/enabled/expression/action_parameters）、TLS 1.2 与 DDoS override API 回读；模式缺失或拼错也直接阻塞，避免服务/订阅正常但 CDN 边缘已坏仍显示通过。
+
+**关键证据**：修复前定向 full audit 两条 WS 均为 400，Cloudflare API 回读 skip/origin expression 均指向 `hkbeiyong.*`；恢复后主动运行 HKBEIYONG、HK2 健康检查均记录“direct 模式不得修改”且 ruleset `last_updated` 未变化，JP full audit 两条 WS 均为 101；JP 新部署门禁 13/13 PASS；本地回归 `87 passed, 1 skipped`。
+
+**教训**：Cloudflare phase ruleset 是 zone 级共享状态，不能让每台服务器按自身域名覆盖。CDN 验收必须同时包含 API rule owner 回读和外部 WebSocket 101，订阅 200、源站 active 不能代替。
+
 ## -7. 订阅 200 仍导入失败、AI SOCKS5 假容错与重装破坏现场（v4.15.26）
 
 **现象**：HKBEIYONG 的 Clash 链接可返回 200，但旧代理失效时客户端更新请求也被旧代理接管而超时；sing-box JSON 能被 JSON 解析却无法被 1.13 内核加载；AI SOCKS5 配置声称会自动切换，实际代理认证已过期且 `selector` 不会自动容错；重复安装还可能先搬走工作目录、删除旧证书或清空宿主防火墙。

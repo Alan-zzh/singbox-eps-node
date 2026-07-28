@@ -1,5 +1,10 @@
 # 变更日志
 
+## [4.15.28] - 2026-07-28
+- **修复 JP CDN 被 direct 节点覆盖**：HKBEIYONG/HK2 健康检查不再用各自域名改写 Cloudflare 全域 skip/origin ruleset；`apply` 在脚本内部也对 direct 模式 fail-safe 跳过，未知模式拒绝执行。
+- **部署防假绿**：JP 门禁新增 Cloudflare API 回读，按受管 description 精确核对 action/enabled/expression/action_parameters、TLS 1.2 与 DDoS L7 override；`DEPLOY_MODE` 缺失或拼错也直接阻塞。
+- **生产恢复**：Cloudflare ruleset 已恢复为 `jp.290372913.xyz`；主动运行 HKBEIYONG/HK2 健康检查后规则未再漂移，JP 两条公网 WS 均恢复 101，部署门禁 13/13 PASS，full audit `ALL OK`。
+
 ## [4.15.26] - 2026-07-28
 - **一键安装事务化**：重装改为 staging 构建并迁移 `.env/data/cert`，旧目录保留到最终验收；切换后的任一步失败自动恢复项目、sing-box 二进制、systemd、crontab 与 iptables。证书签发失败或 SAN/密钥不匹配时恢复旧证书，禁止自签名降级；敏感 `.env` 不再复制到持久化 `.backup`。
 - **SOCKS5 全矩阵**：本机认证 SOCKS5 与服务器侧 AI SOCKS5 改为独立开关，覆盖 direct/CDN × local on/off × AI on/off 共 8 格；本机 SOCKS5 同步进入 Base64、Clash、sing-box 三类订阅。

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # Singbox EPS Node 一键安装脚本
-# 版本: v4.15.26
+# 版本: v4.15.28
 # 用途: 新VPS全自动部署（含双部署模式+系统优化+CDN优选+流量统计）
 # 使用: bash <(curl -sL https://raw.githubusercontent.com/Alan-zzh/singbox-eps-node/main/install.sh)
 #
@@ -1011,8 +1011,42 @@ generate_reality_keys() {
     log_info "Reality Short ID: ${REALITY_SHORT_ID:-（将由 generate_uuids_and_passwords 生成）}"
 }
 
+require_deploy_mode() {
+    local required_mode
+    required_mode=$(grep '^DEPLOY_MODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+    case "$required_mode" in
+        cdn|direct) DEPLOY_MODE="$required_mode" ;;
+        *)
+            log_error "DEPLOY_MODE 必须明确且只能为 cdn/direct，当前为 ${required_mode:-缺失}"
+            return 1
+            ;;
+    esac
+}
+
 select_deploy_mode() {
-    # 固定纯直连节点必须按域名前缀区分，禁止被地理代码误判为 CDN。
+    # 如果已从备份恢复 DEPLOY_MODE，或已有 .env 中存在 DEPLOY_MODE，直接使用旧值不询问
+    if [ -n "${DEPLOY_MODE:-}" ]; then
+        case "$DEPLOY_MODE" in
+            direct) log_info "检测到已有部署模式：纯直连模式（默认5节点，无CDN依赖）" ;;
+            cdn) log_info "检测到已有部署模式：CDN混合模式（默认7节点，推荐）" ;;
+            *) log_error "DEPLOY_MODE 非法，只允许 cdn/direct"; return 1 ;;
+        esac
+        return
+    fi
+    if [ -f "$BASE_DIR/.env" ]; then
+        OLD_DEPLOY_MODE=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        if [ -n "$OLD_DEPLOY_MODE" ]; then
+            DEPLOY_MODE="$OLD_DEPLOY_MODE"
+            case "$DEPLOY_MODE" in
+                direct) log_info "从已有配置读取部署模式：纯直连模式（默认5节点，无CDN依赖）" ;;
+                cdn) log_info "从已有配置读取部署模式：CDN混合模式（默认7节点，推荐）" ;;
+                *) log_error "已有 DEPLOY_MODE 非法，只允许 cdn/direct"; return 1 ;;
+            esac
+            return
+        fi
+    fi
+
+    # 只有显式模式和已有 .env 都完全缺失时，才允许固定香港域名回退为 direct。
     _direct_domain=""
     if [ -n "${CF_DOMAIN:-}" ]; then
         _direct_domain="$CF_DOMAIN"
@@ -1025,29 +1059,6 @@ select_deploy_mode() {
         return
     fi
 
-    # 如果已从备份恢复 DEPLOY_MODE，或已有 .env 中存在 DEPLOY_MODE，直接使用旧值不询问
-    if [ -n "$DEPLOY_MODE" ]; then
-        if [ "$DEPLOY_MODE" = "direct" ]; then
-            log_info "检测到已有部署模式：纯直连模式（默认5节点，无CDN依赖）"
-        else
-            DEPLOY_MODE="cdn"
-            log_info "检测到已有部署模式：CDN混合模式（默认7节点，推荐）"
-        fi
-        return
-    fi
-    if [ -f "$BASE_DIR/.env" ]; then
-        OLD_DEPLOY_MODE=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
-        if [ -n "$OLD_DEPLOY_MODE" ]; then
-            DEPLOY_MODE="$OLD_DEPLOY_MODE"
-            if [ "$DEPLOY_MODE" = "direct" ]; then
-                log_info "从已有配置读取部署模式：纯直连模式（默认5节点，无CDN依赖）"
-            else
-                DEPLOY_MODE="cdn"
-                log_info "从已有配置读取部署模式：CDN混合模式（默认7节点，推荐）"
-            fi
-            return
-        fi
-    fi
     if [ "${AUTO_YES:-0}" = "1" ]; then
         DEPLOY_MODE="cdn"
         log_info "非交互模式，默认选择：CDN混合模式（默认7节点，推荐）"
@@ -1108,8 +1119,10 @@ select_local_socks5_mode() {
 create_env_file() {
     log_step "创建.env配置文件..."
     SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo "")
-    # 确保 DEPLOY_MODE 有值（向后兼容：旧版本无此字段时默认cdn）
-    DEPLOY_MODE=${DEPLOY_MODE:-cdn}
+    case "${DEPLOY_MODE:-}" in
+        cdn|direct) ;;
+        *) log_error "DEPLOY_MODE 必须在写入 .env 前明确为 cdn/direct"; return 1 ;;
+    esac
     # 保留调用方预置的 AI SOCKS5 参数；非交互安装不再清空已有配置。
     AI_SOCKS5_SERVER="${AI_SOCKS5_SERVER:-}"
     AI_SOCKS5_PORT="${AI_SOCKS5_PORT:-}"
@@ -1381,7 +1394,10 @@ setup_subscription_dns() {
         log_error "CF_DOMAIN/SERVER_IP 缺失，无法建立可信订阅入口"
         return 1
     fi
-    dns_mode=${dns_mode:-cdn}
+    case "$dns_mode" in
+        cdn|direct) ;;
+        *) log_error "DEPLOY_MODE 必须明确且只能为 cdn/direct，拒绝修改 Cloudflare"; return 1 ;;
+    esac
     dns_zone=$(echo "$dns_domain" | awk -F. 'NF>=2 {print $(NF-1)"."$NF}')
     if [ -z "$dns_zone" ]; then
         log_error "无法从 $dns_domain 推导 Cloudflare Zone"
@@ -1395,7 +1411,8 @@ setup_subscription_dns() {
             log_error "Cloudflare DNS 自动同步失败，拒绝继续签发错误域名证书"
             return 1
         fi
-        if [ "$dns_mode" = "cdn" ] && ! python3 "$BASE_DIR/scripts/cloudflare_proxy_rules.py" apply --zone "$dns_zone"; then
+        if [ "$dns_mode" = "cdn" ] && ! python3 "$BASE_DIR/scripts/cloudflare_proxy_rules.py" apply \
+            --zone "$dns_zone" --domain "$dns_domain" --mode "$dns_mode"; then
             log_error "Cloudflare CDN 代理规则应用失败，拒绝继续 CDN 安装"
             return 1
         fi
@@ -1654,12 +1671,9 @@ clean_crontab_conflicts() {
 
 setup_iptables_traffic_counter() {
     log_step "配置iptables流量计数器（sing-box各入站端口）..."
-    # 从 .env 读取端口配置和部署模式
-    DEPLOY_MODE_IPT="cdn"
-    if [ -f "$BASE_DIR/.env" ]; then
-        TROJAN_TCP_PORT=$(grep "^TROJAN_TCP_PORT=" "$BASE_DIR/.env" | cut -d'=' -f2)
-        DEPLOY_MODE_IPT=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
-    fi
+    require_deploy_mode
+    DEPLOY_MODE_IPT="$DEPLOY_MODE"
+    TROJAN_TCP_PORT=$(grep "^TROJAN_TCP_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2)
     # 默认值
     TROJAN_TCP_PORT=${TROJAN_TCP_PORT:-50443}
     SOCKS5_PORT_IPT=$(grep "^SOCKS5_PORT=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "1080")
@@ -1725,10 +1739,8 @@ setup_iptables_traffic_counter() {
 
 start_services() {
     log_step "启动所有服务..."
-    DEPLOY_MODE_START="cdn"
-    if [ -f "$BASE_DIR/.env" ]; then
-        DEPLOY_MODE_START=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
-    fi
+    require_deploy_mode
+    DEPLOY_MODE_START="$DEPLOY_MODE"
     if [ ! -f "${BASE_DIR}/config.json" ]; then
         log_error "config.json 不存在！重新生成..."
         cd "$BASE_DIR" && python3 scripts/config_generator.py
@@ -1793,10 +1805,8 @@ start_services() {
 
 verify_installation() {
     log_step "验证安装..."
-    DEPLOY_MODE_VERIFY="cdn"
-    if [ -f "$BASE_DIR/.env" ]; then
-        DEPLOY_MODE_VERIFY=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
-    fi
+    require_deploy_mode
+    DEPLOY_MODE_VERIFY="$DEPLOY_MODE"
     echo ""
     echo -e "  部署模式: $( [ "$DEPLOY_MODE_VERIFY" = "direct" ] && echo "纯直连模式（默认5节点）" || echo "CDN混合模式（默认7节点）" )"
     echo ""
@@ -2027,10 +2037,8 @@ print_summary() {
     COUNTRY=$(grep "^COUNTRY_CODE=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "US")
     TRAFFIC_RESET_DAY_SUMMARY=$(grep "^TRAFFIC_RESET_DAY=" "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2 | tr -d '\r' || echo "14")
     TRAFFIC_RESET_DAY_SUMMARY=${TRAFFIC_RESET_DAY_SUMMARY:-14}
-    DEPLOY_MODE_SUMMARY="cdn"
-    if [ -f "$BASE_DIR/.env" ]; then
-        DEPLOY_MODE_SUMMARY=$(grep "^DEPLOY_MODE=" "$BASE_DIR/.env" | cut -d'=' -f2 || echo "cdn")
-    fi
+    require_deploy_mode
+    DEPLOY_MODE_SUMMARY="$DEPLOY_MODE"
     echo ""
     echo "=========================================="
     echo -e "${CYAN}  Singbox EPS Node 安装完成！${NC}"
@@ -2135,6 +2143,8 @@ cmd_reset() {
         log_info "已取消"
         exit 0
     fi
+    # 必须在停止服务或删除目录前确认旧配置模式有效，失败时保持现网不动。
+    require_deploy_mode
     log_step "停止所有服务..."
     systemctl stop singbox singbox-sub singbox-cdn 2>/dev/null || true
     systemctl disable singbox singbox-sub singbox-cdn 2>/dev/null || true
@@ -2475,7 +2485,7 @@ cmd_optimize() {
 
 cmd_help() {
     echo ""
-    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.26${NC}"
+    echo -e "${CYAN}Singbox EPS Node 一键脚本 v4.15.28${NC}"
     echo ""
     echo "用法:"
     echo "  bash install.sh              全新安装（自动优化系统+交互式配置）"
@@ -2542,7 +2552,7 @@ main() {
         install|--yes|"")
             echo ""
             echo "=========================================="
-            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.26${NC}"
+            echo -e "${CYAN}  Singbox EPS Node 一键安装脚本 v4.15.28${NC}"
             echo "=========================================="
             echo ""
             trap 'rollback_failed_install $?' EXIT

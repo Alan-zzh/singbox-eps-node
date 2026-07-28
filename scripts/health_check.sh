@@ -11,7 +11,6 @@ LOG_DIR="$BASE_DIR/logs"
 LOG_FILE="$LOG_DIR/health_check.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 DEPLOY_MODE_HC=$(grep '^DEPLOY_MODE=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
-DEPLOY_MODE_HC=${DEPLOY_MODE_HC:-cdn}
 
 # 告警阈值（v4.10.20 新增）
 ESTAB_WARN=1500     # estab 连接数告警阈值（JP 实测 605，预留 2.5x 余量）
@@ -34,6 +33,14 @@ log() {
 log_section() {
     echo "[$TIMESTAMP] -- $1 --" >> "$LOG_FILE"
 }
+
+case "$DEPLOY_MODE_HC" in
+    cdn|direct) ;;
+    *)
+        log "  ❌ DEPLOY_MODE 必须明确且只能为 cdn/direct，当前为 ${DEPLOY_MODE_HC:-缺失}"
+        exit 1
+        ;;
+esac
 
 MEM_TOTAL=$(free -m | awk '/^Mem:/{print $2}')
 MEM_AVAILABLE=$(free -m | awk '/^Mem:/{print $7}')
@@ -464,6 +471,10 @@ check_cert() {
 # ============================================================
 check_cloudflare_proxy_rules() {
     log_section "9. Cloudflare 代理入口规则"
+    if [ "$DEPLOY_MODE_HC" != "cdn" ]; then
+        log "  ⏭️  direct 模式不得修改全域 CDN 代理/回源规则，跳过"
+        return
+    fi
     if [ ! -f "$BASE_DIR/scripts/cloudflare_proxy_rules.py" ]; then
         log "  ⚠️  cloudflare_proxy_rules.py 不存在，跳过"
         return
@@ -472,7 +483,15 @@ check_cloudflare_proxy_rules() {
         log "  ⚠️  CF_API_TOKEN 未配置，跳过 Cloudflare 规则自愈"
         return
     fi
-    if cd "$BASE_DIR" && python3 scripts/cloudflare_proxy_rules.py apply >> "$LOG_FILE" 2>&1; then
+    local cf_domain_hc cf_zone_hc
+    cf_domain_hc=$(grep '^CF_DOMAIN=' "$BASE_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r')
+    cf_zone_hc=$(printf '%s' "$cf_domain_hc" | awk -F. 'NF>=2 {print $(NF-1)"."$NF}')
+    if [ -z "$cf_domain_hc" ] || [ -z "$cf_zone_hc" ]; then
+        log "  ❌ CF_DOMAIN 缺失或非法，无法自愈 CDN 规则"
+        return
+    fi
+    if cd "$BASE_DIR" && python3 scripts/cloudflare_proxy_rules.py apply \
+        --mode cdn --domain "$cf_domain_hc" --zone "$cf_zone_hc" >> "$LOG_FILE" 2>&1; then
         log "  ✓  Cloudflare 代理入口规则已确认"
     else
         log "  ❌ Cloudflare 代理入口规则修复失败，请检查 CF_API_TOKEN 权限"

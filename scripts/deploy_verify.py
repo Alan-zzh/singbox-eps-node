@@ -11,11 +11,72 @@ v4.15.10 新增：将全部已知坑的检查标准化为一个可重用的模�
 import json
 import time
 
+
+def _managed_rule_matches(actual, expected):
+    """Compare the complete managed-rule semantics while ignoring CF metadata."""
+    return all(actual.get(key) == value for key, value in expected.items())
+
+
+def validate_cloudflare_cdn_status(status, domain, zone_name):
+    """Fail closed unless every managed JP CDN rule exactly matches its builder."""
+    from scripts.cloudflare_proxy_rules import (
+        build_cdn_origin_rules,
+        build_proxy_skip_rule,
+        configure_proxy_domain,
+    )
+
+    if not domain:
+        raise ValueError("CF_DOMAIN missing")
+    configure_proxy_domain(domain, zone_name)
+
+    actual_skip_rules = (status.get("entrypoint") or {}).get("rules", [])
+    expected_skip = build_proxy_skip_rule(zone_name)
+    managed_skip_rules = [
+        rule
+        for rule in actual_skip_rules
+        if rule.get("description") == expected_skip["description"]
+    ]
+    if len(managed_skip_rules) != 1 or not _managed_rule_matches(
+        managed_skip_rules[0], expected_skip
+    ):
+        raise ValueError(f"CDN skip rule semantics do not match {domain}")
+
+    actual_origin_rules = (status.get("origin_entrypoint") or {}).get("rules", [])
+    for expected_origin in build_cdn_origin_rules(zone_name):
+        managed_origin_rules = [
+            rule
+            for rule in actual_origin_rules
+            if rule.get("description") == expected_origin["description"]
+        ]
+        if len(managed_origin_rules) != 1 or not _managed_rule_matches(
+            managed_origin_rules[0], expected_origin
+        ):
+            raise ValueError(
+                f"CDN origin rule semantics do not match {expected_origin['description']}"
+            )
+
+    if status.get("min_tls_version") != "1.2":
+        raise ValueError("min TLS version drifted")
+    if status.get("ddos_l7_entrypoint") is not None:
+        raise ValueError("stale DDoS L7 override exists")
+
+
 # ============= 检查清单 =============
 # 这些检查项覆盖 AGENTS.md 全部铁律 + AI_DEBUG_HISTORY.md 全部已知坑
 # 每次部署/修复后自动运行，确保不复发
 
 CHECKS = {
+    "DEPLOY_MODE_VALID": {
+        "desc": "DEPLOY_MODE 必须明确且只能为 cdn/direct",
+        "severity": "BLOCKER",
+        "cmd": r"""
+MODE=$(grep ^DEPLOY_MODE= /root/singbox-eps-node/.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+case "$MODE" in
+  cdn|direct) echo "OK: DEPLOY_MODE=$MODE"; exit 0 ;;
+  *) echo "FAIL: DEPLOY_MODE must be exactly cdn or direct, got '${MODE:-missing}'"; exit 1 ;;
+esac
+""",
+    },
     "REALITY_SHORT_ID_VALID": {
         "desc": "REALITY_SHORT_ID 是有效 hex（非字面值 $(openssl...)）",
         "severity": "BLOCKER",  # 阻塞部署
@@ -47,6 +108,46 @@ if echo "$TOKEN" | grep -qE '^[0-9a-f]{40}$'; then echo "OK (hex key)"; exit 0; 
 if [ ${#TOKEN} -ge 30 ]; then echo "OK (user-confirmed, len=${#TOKEN})"; exit 0; fi
 echo "WARN: token len=${#TOKEN} (short)"
 exit 1
+""",
+    },
+    "CLOUDFLARE_CDN_RULES": {
+        "desc": "CDN 模式 Cloudflare 规则必须仍归属当前 CDN 主域名",
+        "severity": "BLOCKER",
+        "cmd": r"""
+MODE=$(grep ^DEPLOY_MODE= /root/singbox-eps-node/.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+case "$MODE" in
+  direct) echo "SKIP: direct mode must not own zone-wide CDN rules"; exit 0 ;;
+  cdn) ;;
+  *) echo "FAIL: DEPLOY_MODE must be exactly cdn or direct, got '${MODE:-missing}'"; exit 1 ;;
+esac
+python3 - <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+base = pathlib.Path("/root/singbox-eps-node")
+sys.path.insert(0, str(base))
+env = {}
+for line in (base / ".env").read_text(encoding="utf-8").splitlines():
+    if "=" in line and not line.startswith("#"):
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip().strip("'\"")
+domain = env.get("CF_DOMAIN", "")
+zone_name = ".".join(domain.split(".")[-2:])
+raw = subprocess.check_output(
+    ["python3", str(base / "scripts/cloudflare_proxy_rules.py"), "status"],
+    cwd=base,
+    text=True,
+)
+status = json.loads(raw)
+from scripts.deploy_verify import validate_cloudflare_cdn_status
+try:
+    validate_cloudflare_cdn_status(status, domain, zone_name)
+except ValueError as exc:
+    raise SystemExit(f"FAIL: {exc}") from exc
+print(f"OK: Cloudflare CDN rules owned by {domain}")
+PY
 """,
     },
     "SUBSCRIPTION_CERT_TRUSTED": {
